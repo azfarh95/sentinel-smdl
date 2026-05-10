@@ -249,14 +249,19 @@ async def build() -> Application:
 
     async def handle_stop_livestream(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
+        active_chats = list(_active_live_jobs.keys())
+        logger.info("CMD /stop_livestream from chat=%s | active_jobs=%s", chat_id, active_chats)
         if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+            logger.info("  rejected: chat not in ALLOWED_CHAT_IDS=%s", ALLOWED_CHAT_IDS)
             return
         job = _active_live_jobs.get(chat_id)
         if not job:
+            logger.info("  no active job for this chat — replying 'No active livestream'")
             await update.message.reply_text("No active livestream recording in this chat.")
             return
         job["stop_flag"]["stop"] = True
         elapsed_min = int((__import__("time").time() - job["started_at"]) // 60)
+        logger.info("  stop_flag set; %s min elapsed; replying confirmation", elapsed_min)
         await update.message.reply_text(
             f"⏹ Stop requested for {job['platform']} · @{job['uploader']} "
             f"({elapsed_min} min in). Finalizing the file…"
@@ -264,6 +269,7 @@ async def build() -> Application:
 
     async def handle_live_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
+        logger.info("CMD /live_status from chat=%s | active_jobs=%s", chat_id, list(_active_live_jobs.keys()))
         if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
             return
         job = _active_live_jobs.get(chat_id)

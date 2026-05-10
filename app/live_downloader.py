@@ -233,9 +233,7 @@ async def record_live(
         "quiet":                True,
         "no_warnings":          True,
         "progress_hooks":       [hook],
-        # Live-specific knobs
-        "live_from_start":      True,           # YouTube: record from current position back to start of stream when supported
-        "wait_for_video":       (1, 30),         # if 'is_upcoming', poll up to 30s — anything longer, give up
+        "wait_for_video":       (1, 30),  # if 'is_upcoming', poll up to 30s — anything longer, give up
         # CRITICAL: zero retries. Auth/session failures should NOT loop.
         "retries":              0,
         "fragment_retries":     0,
@@ -244,6 +242,13 @@ async def record_live(
         "skip_unavailable_fragments": False,
         "abort_on_unavailable_fragment": True,
     }
+    # `live_from_start` is YouTube-only. Twitch / Kick raise
+    # "no formats that can be downloaded from the start" if it's set —
+    # those platforms only support recording from "now" forward. Only
+    # enable for YouTube, where it materially improves "joined late"
+    # recordings.
+    if platform == "youtube":
+        ydl_opts["live_from_start"] = True
     if cookiepath:
         ydl_opts["cookiefile"] = cookiepath
 

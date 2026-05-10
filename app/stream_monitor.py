@@ -131,6 +131,7 @@ def _probe_is_live(url: str) -> dict[str, Any]:
         opts["cookiefile"] = cookiepath
     # Cloudflare-protected sites need Chrome TLS impersonation (HTTP 406 otherwise).
     from .live_downloader import _add_impersonate_if_needed
+    from . import stripchat_patch  # noqa: F401 — applies extractor patch on import
     _add_impersonate_if_needed(opts, url)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:

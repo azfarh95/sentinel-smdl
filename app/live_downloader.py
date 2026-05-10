@@ -579,6 +579,8 @@ async def record_live(
     if cookiepath:
         ydl_opts["cookiefile"] = cookiepath
     _add_impersonate_if_needed(ydl_opts, url)
+    # Apply Stripchat extractor patch (idempotent).
+    from . import stripchat_patch  # noqa: F401
 
     async with _get_live_semaphore():
         loop = asyncio.get_running_loop()

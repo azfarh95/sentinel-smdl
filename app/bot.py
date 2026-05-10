@@ -17,6 +17,7 @@ from telegram.ext import (
 
 from .config import ALLOWED_CHAT_IDS, DELETE_AFTER_SEND, LIVE_ENABLED, OWNER_CHAT_ID
 from .downloader import download, identify_post, send_files, _resolve_cookies
+from .i18n import LANG_LABELS, SUPPORTED_LANGS, get_lang, set_lang, t
 from .interceptor import find_video_url
 from .live_downloader import detect_live, record_live
 from . import file_serve, stream_monitor, telethon_uploader
@@ -52,14 +53,14 @@ def _build_delivery_links(filepath: str) -> dict:
     return out
 
 
-def _format_delivery_message(size_mb: float, links: dict, expires_hours: int = 24) -> str:
-    parts = [f"📁 File ready · {size_mb:.0f} MB"]
+def _format_delivery_message(size_mb: float, links: dict, expires_hours: int = 24, lang: str = "en") -> str:
+    parts = [t("file_ready", lang, size_mb=size_mb)]
     if links.get("tailnet"):
-        parts.append(f"🔒 Tailnet (you, on mesh):\n{links['tailnet']}")
+        parts.append(t("tailnet_link", lang, url=links["tailnet"]))
     if links.get("share"):
-        parts.append(f"🌍 Share link (anyone, expires in {expires_hours}h):\n{links['share']}")
+        parts.append(t("share_link", lang, url=links["share"], hours=expires_hours))
     if not links.get("tailnet") and not links.get("share"):
-        parts.append(f"⚠ No delivery method configured. File is at /downloads/{links['rel']}")
+        parts.append(t("no_delivery", lang, rel=links["rel"]))
     return "\n\n".join(parts)
 
 # Active livestream recordings, keyed by chat_id.
@@ -113,18 +114,22 @@ async def build() -> Application:
 
         platform, url = result
         logger.info("Video URL detected [%s]: %s", platform, url[:80])
+        lang = get_lang(chat_id)
 
-        status_msg = await msg.reply_text(f"Identifying {platform} post...")
+        status_msg = await msg.reply_text(t("identifying", lang, platform=platform))
 
         try:
             info = await identify_post(url)
         except Exception as e:
-            await status_msg.edit_text(f"Failed to identify post: {e}")
+            await status_msg.edit_text(t("identify_failed", lang, error=str(e)))
             return
 
         if info.get("error"):
             is_private = info.get("is_private", False)
-            err_text = "Private account — cannot download." if is_private else f"Could not identify post: {info['error'][:200]}"
+            err_text = (
+                t("private_account", lang) if is_private
+                else t("could_not_identify", lang, error=info["error"][:200])
+            )
             await status_msg.edit_text(err_text)
             return
 
@@ -144,10 +149,7 @@ async def build() -> Application:
         # ── Live recording branch ──────────────────────────────────────────────
         if is_live:
             if not LIVE_ENABLED:
-                await status_msg.edit_text(
-                    f"{platform} · @{uploader} · 🔴 LIVE\n"
-                    f"Live recording is disabled in config (live_enabled=false)."
-                )
+                await status_msg.edit_text(t("live_disabled", lang, platform=platform, uploader=uploader))
                 return
 
             # Retry budget — if we've already failed 3+ times on THIS url for THIS
@@ -156,18 +158,11 @@ async def build() -> Application:
             fail_key = (chat_id, url)
             if _live_url_fail_count.get(fail_key, 0) >= LIVE_NO_EXTRACTOR_RETRY_BUDGET:
                 await status_msg.edit_text(
-                    f"{platform} · 🔴 LIVE\n"
-                    f"⚠ Site not supported / not configured yet (yt-dlp can't extract "
-                    f"a live stream from this URL after {LIVE_NO_EXTRACTOR_RETRY_BUDGET} attempts).\n\n"
-                    f"If you think this should work, the site may need a yt-dlp extractor "
-                    f"update (`yt-dlp -U` inside the smdl container) or cookies."
+                    t("live_site_unsupported", lang, platform=platform, budget=LIVE_NO_EXTRACTOR_RETRY_BUDGET)
                 )
                 return
 
-            await status_msg.edit_text(
-                f"{platform} · @{uploader} · 🔴 LIVE\n"
-                f"Recording started — heartbeats every 5 min. Will auto-stop on stream end or session failure."
-            )
+            await status_msg.edit_text(t("live_started", lang, platform=platform, uploader=uploader))
 
             cookiepath = _resolve_cookies(url)
 
@@ -189,8 +184,7 @@ async def build() -> Application:
                 mins    = elapsed // 60
                 try:
                     await status_msg.edit_text(
-                        f"🔴 Recording · @{uploader}\n"
-                        f"⏱ {mins} min · 💾 {mb:.0f} MB · still live"
+                        t("live_progress", lang, uploader=uploader, mins=mins, mb=mb)
                     )
                 except Exception:
                     pass  # rate-limited or message gone
@@ -211,34 +205,32 @@ async def build() -> Application:
             elif live_result["abort_reason"] in ("stream_ended", "user_stopped"):
                 _live_url_fail_count.pop(fail_key, None)  # reset on confirmed-working
 
-            if live_result["abort_reason"] == "stream_ended":
-                summary = f"✓ Recording ended naturally · {mins} min · {mb:.0f} MB"
-            elif live_result["abort_reason"] == "user_stopped":
-                summary = f"⏹ Stopped by /stop_livestream · {mins} min · {mb:.0f} MB saved"
-            elif live_result["abort_reason"] == "session_fail":
-                summary = (
-                    f"⚠ Session/auth failed at {mins} min · {mb:.0f} MB saved\n"
-                    f"Cookie likely expired — refresh cookies and retry."
-                )
-            elif live_result["abort_reason"] == "no_extractor":
+            reason = live_result["abort_reason"]
+            if reason == "stream_ended":
+                summary = t("live_ended_natural", lang, mins=mins, mb=mb)
+            elif reason == "user_stopped":
+                summary = t("live_user_stopped", lang, mins=mins, mb=mb)
+            elif reason == "session_fail":
+                summary = t("live_session_fail", lang, mins=mins, mb=mb)
+            elif reason == "no_extractor":
                 attempts = _live_url_fail_count[fail_key]
                 if attempts >= LIVE_NO_EXTRACTOR_RETRY_BUDGET:
-                    summary = (
-                        f"⚠ Site not supported / not configured yet.\n"
-                        f"yt-dlp couldn't extract a live stream from this URL after {attempts} attempts."
-                    )
+                    summary = t("live_no_extractor_final", lang, attempts=attempts)
                 else:
                     remaining = LIVE_NO_EXTRACTOR_RETRY_BUDGET - attempts
-                    summary = (
-                        f"⚠ yt-dlp couldn't extract this URL ({attempts}/{LIVE_NO_EXTRACTOR_RETRY_BUDGET} attempts)\n"
-                        f"Try again — {remaining} more attempts before site is marked as not configured."
+                    summary = t(
+                        "live_no_extractor_retry", lang,
+                        attempts=attempts, budget=LIVE_NO_EXTRACTOR_RETRY_BUDGET, remaining=remaining,
                     )
-            elif live_result["abort_reason"] == "platform_not_allowed":
-                summary = f"⚠ {live_result['detail']}"
-            elif live_result["abort_reason"] == "disk_low":
-                summary = f"⚠ {live_result['detail']}"
+            elif reason == "platform_not_allowed":
+                summary = t("live_platform_not_allowed", lang, detail=live_result["detail"])
+            elif reason == "disk_low":
+                summary = t("live_disk_low", lang, detail=live_result["detail"])
             else:
-                summary = f"⚠ Stopped: {live_result['abort_reason']} · {mins} min · {mb:.0f} MB · {live_result.get('detail', '')[:120]}"
+                summary = t(
+                    "live_other_abort", lang,
+                    reason=reason, mins=mins, mb=mb, detail=live_result.get("detail", "")[:120],
+                )
 
             await status_msg.edit_text(summary)
 
@@ -257,19 +249,19 @@ async def build() -> Application:
                     # Skip telethon upload for live recordings (Twitch can be hours long;
                     # signed URLs scale better than waiting on a 2 GB upload).
                     links = _build_delivery_links(first)
-                    await msg.reply_text(_format_delivery_message(size_mb, links))
+                    await msg.reply_text(_format_delivery_message(size_mb, links, lang=lang))
             return
 
         # ── Normal (non-live) download ─────────────────────────────────────────
         try:
             await status_msg.edit_text(
-                f"{platform} · @{uploader} · {media_label}\nDownloading..."
+                t("downloading", lang, platform=platform, uploader=uploader, media_label=media_label)
             )
 
             result = await download(url, media_type=media_type, is_owner=is_owner)
 
             if result.get("error"):
-                await status_msg.edit_text(f"Download failed: {result['error']}")
+                await status_msg.edit_text(t("download_failed", lang, error=result["error"]))
                 return
 
             files = result["files"]
@@ -277,10 +269,11 @@ async def build() -> Application:
             file_count = len(files)
             title = info.get("title", "")
 
+            prefix = "Cached · s" if cached else "S"
             await status_msg.edit_text(
-                f"{'Cached · s' if cached else 'S'}ending {file_count} files..."
+                t("sending_files", lang, prefix=prefix, count=file_count)
                 if file_count > 1 else
-                f"{'Cached · s' if cached else 'S'}ending {platform} {media_label}..."
+                t("sending_one", lang, prefix=prefix, platform=platform, media_label=media_label)
             )
 
             send_result = await send_files(ctx.bot, chat_id, files, caption=title)
@@ -290,7 +283,7 @@ async def build() -> Application:
                 size = send_result.get("size_mb")
                 cached_tag = " · cached" if cached else ""
                 detail = f"{sent} file{'s' if sent > 1 else ''}" + (f" · {size} MB" if size else "") + cached_tag
-                await status_msg.edit_text(f"Sent ({detail})")
+                await status_msg.edit_text(t("sent_short", lang, detail=detail))
 
                 if DELETE_AFTER_SEND and not cached:
                     for fp in files:
@@ -301,26 +294,24 @@ async def build() -> Application:
             elif send_result.get("error") == "file_too_large":
                 size_mb_local = send_result['size_mb']
                 if telethon_uploader.is_configured() and size_mb_local < 1900:  # leave headroom under 2 GB
-                    await status_msg.edit_text(f"📤 Uploading {size_mb_local} MB via user account…")
+                    await status_msg.edit_text(t("uploading_telethon", lang, size_mb=size_mb_local))
                     up = await telethon_uploader.upload_file(
                         files[0], chat_id, caption=info.get("title"),
                     )
                     if up.get("ok"):
-                        await status_msg.edit_text(f"✓ Uploaded ({size_mb_local} MB)")
+                        await status_msg.edit_text(t("uploaded_telethon", lang, size_mb=size_mb_local))
                     else:
-                        # Fall through to delivery links
                         links = _build_delivery_links(files[0])
-                        await status_msg.edit_text(_format_delivery_message(size_mb_local, links))
+                        await status_msg.edit_text(_format_delivery_message(size_mb_local, links, lang=lang))
                 else:
-                    # Too large or no telethon — go straight to links
                     links = _build_delivery_links(files[0])
-                    await status_msg.edit_text(_format_delivery_message(size_mb_local, links))
+                    await status_msg.edit_text(_format_delivery_message(size_mb_local, links, lang=lang))
             else:
-                await status_msg.edit_text(f"Send failed: {send_result.get('error')}")
+                await status_msg.edit_text(t("send_failed", lang, error=send_result.get("error")))
 
         except Exception as e:
             logger.exception("Download pipeline error")
-            await status_msg.edit_text(f"Error: {e}")
+            await status_msg.edit_text(t("error_generic", lang, error=str(e)))
 
     async def handle_stop_livestream(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
@@ -329,17 +320,17 @@ async def build() -> Application:
         if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
             logger.info("  rejected: chat not in ALLOWED_CHAT_IDS=%s", ALLOWED_CHAT_IDS)
             return
+        lang = get_lang(chat_id)
         job = _active_live_jobs.get(chat_id)
         if not job:
             logger.info("  no active job for this chat — replying 'No active livestream'")
-            await update.message.reply_text("No active livestream recording in this chat.")
+            await update.message.reply_text(t("no_active_live", lang))
             return
         job["stop_flag"]["stop"] = True
         elapsed_min = int((__import__("time").time() - job["started_at"]) // 60)
         logger.info("  stop_flag set; %s min elapsed; replying confirmation", elapsed_min)
         await update.message.reply_text(
-            f"⏹ Stop requested for {job['platform']} · @{job['uploader']} "
-            f"({elapsed_min} min in). Finalizing the file…"
+            t("stop_requested", lang, platform=job["platform"], uploader=job["uploader"], elapsed_min=elapsed_min)
         )
 
     async def handle_live_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -347,14 +338,14 @@ async def build() -> Application:
         logger.info("CMD /live_status from chat=%s | active_jobs=%s", chat_id, list(_active_live_jobs.keys()))
         if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
             return
+        lang = get_lang(chat_id)
         job = _active_live_jobs.get(chat_id)
         if not job:
-            await update.message.reply_text("No active livestream recording.")
+            await update.message.reply_text(t("no_active_live_short", lang))
             return
         elapsed_min = int((__import__("time").time() - job["started_at"]) // 60)
         await update.message.reply_text(
-            f"🔴 Recording · {job['platform']} · @{job['uploader']}\n"
-            f"⏱ {elapsed_min} min · use /stop_livestream to halt"
+            t("live_status_active", lang, platform=job["platform"], uploader=job["uploader"], elapsed_min=elapsed_min)
         )
 
     # ── Stream monitor commands ────────────────────────────────────────────
@@ -364,40 +355,48 @@ async def build() -> Application:
 
     async def handle_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
+        lang = get_lang(chat_id)
         if not _is_owner(chat_id):
-            await update.message.reply_text("Owner only.")
+            await update.message.reply_text(t("owner_only", lang))
             return
         if not ctx.args:
-            await update.message.reply_text(
-                "Usage: /watch <url>\nExample: /watch https://twitch.tv/some_streamer"
-            )
+            await update.message.reply_text(t("watch_usage", lang))
             return
         url = ctx.args[0]
         label = " ".join(ctx.args[1:]) if len(ctx.args) > 1 else None
-        added, msg_text = stream_monitor.add_to_watchlist(url, label=label, added_by=chat_id)
-        await update.message.reply_text(("✅ " if added else "ℹ ") + msg_text)
+        added, key = stream_monitor.add_to_watchlist(url, label=label, added_by=chat_id)
+        if added:
+            await update.message.reply_text("✅ " + t("watch_added", lang, url=url))
+        else:
+            await update.message.reply_text("ℹ " + t("watch_already", lang, url=url))
 
     async def handle_unwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
+        lang = get_lang(chat_id)
         if not _is_owner(chat_id):
-            await update.message.reply_text("Owner only.")
+            await update.message.reply_text(t("owner_only", lang))
             return
         if not ctx.args:
-            await update.message.reply_text("Usage: /unwatch <url>")
+            await update.message.reply_text(t("unwatch_usage", lang))
             return
-        removed, msg_text = stream_monitor.remove_from_watchlist(ctx.args[0])
-        await update.message.reply_text(("🗑 " if removed else "ℹ ") + msg_text)
+        url = ctx.args[0]
+        removed, key = stream_monitor.remove_from_watchlist(url)
+        if removed:
+            await update.message.reply_text("🗑 " + t("watch_removed", lang, url=url))
+        else:
+            await update.message.reply_text("ℹ " + t("watch_not_found", lang, url=url))
 
     async def handle_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
+        lang = get_lang(chat_id)
         if not _is_owner(chat_id):
-            await update.message.reply_text("Owner only.")
+            await update.message.reply_text(t("owner_only", lang))
             return
         entries = stream_monitor.list_watchlist()
         if not entries:
-            await update.message.reply_text("Watchlist is empty.\nAdd one with: /watch <url>")
+            await update.message.reply_text(t("watchlist_empty", lang))
             return
-        lines = [f"📺 Watchlist ({len(entries)})"]
+        lines = [t("watchlist_header", lang, count=len(entries))]
         for e in entries:
             label = e.get("label") or e.get("url") or "?"
             url = e.get("url") or "?"
@@ -406,15 +405,61 @@ async def build() -> Application:
             lines.append(f"{badge} {label}\n   {url}")
         await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
 
+    async def handle_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+            return
+        # Direct form: /language en  or  /language ru
+        if ctx.args:
+            requested = ctx.args[0].lower()
+            if set_lang(chat_id, requested):
+                key = f"lang_set_{requested}"
+                await update.message.reply_text(t(key, requested))
+            else:
+                await update.message.reply_text(
+                    t("lang_unknown", get_lang(chat_id),
+                      lang=requested, supported=", ".join(SUPPORTED_LANGS))
+                )
+            return
+        # Picker form: inline keyboard
+        lang = get_lang(chat_id)
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(t("btn_lang_en", lang), callback_data="lang:set:en"),
+            InlineKeyboardButton(t("btn_lang_ru", lang), callback_data="lang:set:ru"),
+        ]])
+        await update.message.reply_text(t("lang_picker", lang), reply_markup=keyboard)
+
+    async def handle_language_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id is None:
+            return
+        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+            return
+        data = query.data or ""
+        if not data.startswith("lang:set:"):
+            return
+        new_lang = data[len("lang:set:"):]
+        if set_lang(chat_id, new_lang):
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.edit_message_text(t(f"lang_set_{new_lang}", new_lang))
+            except Exception:
+                pass
+
     async def _run_monitor_recording(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, url: str):
         """Background task spawned from monitor 'Yes' button. Keeps the live
         flow self-contained — does NOT share retry-budget state with manual
         flow (monitor URLs are owner-vetted, no retry-budget gate needed)."""
+        lang = get_lang(chat_id)
         platform = stream_monitor._probe_is_live(url)  # cheap re-probe
         uploader = (platform or {}).get("uploader") or "stream"
         status_msg = await ctx.bot.send_message(
             chat_id=chat_id,
-            text=f"🔴 Recording · @{uploader}\nStarting…",
+            text=t("monitor_record_starting", lang, uploader=uploader),
         )
         cookiepath = _resolve_cookies(url)
         stop_flag = {"stop": False}
@@ -432,8 +477,7 @@ async def build() -> Application:
             mins = elapsed // 60
             try:
                 await status_msg.edit_text(
-                    f"🔴 Recording · @{uploader}\n"
-                    f"⏱ {mins} min · 💾 {mb:.0f} MB · still live"
+                    t("live_progress", lang, uploader=uploader, mins=mins, mb=mb)
                 )
             except Exception:
                 pass
@@ -441,7 +485,7 @@ async def build() -> Application:
         try:
             live_result = await record_live(url, cookiepath, on_progress=_on_progress, stop_flag=stop_flag)
         except Exception as e:
-            await status_msg.edit_text(f"⚠ Recording crashed: {e}")
+            await status_msg.edit_text(t("monitor_recording_crashed", lang, error=str(e)))
             return
         finally:
             _active_live_jobs.pop(chat_id, None)
@@ -451,13 +495,17 @@ async def build() -> Application:
         files = live_result.get("files") or []
         reason = live_result["abort_reason"]
         if reason == "stream_ended":
-            summary = f"✓ Recording ended naturally · {mins} min · {mb:.0f} MB"
+            summary = t("live_ended_natural", lang, mins=mins, mb=mb)
         elif reason == "user_stopped":
-            summary = f"⏹ Stopped by /stop_livestream · {mins} min · {mb:.0f} MB saved"
+            summary = t("live_user_stopped", lang, mins=mins, mb=mb)
         elif reason == "session_fail":
-            summary = f"⚠ Session/auth failed at {mins} min · {mb:.0f} MB saved"
+            summary = t("live_session_fail", lang, mins=mins, mb=mb)
         else:
-            summary = f"⚠ Stopped: {reason} · {mins} min · {mb:.0f} MB · {live_result.get('detail', '')[:120]}"
+            summary = t(
+                "live_other_abort", lang,
+                reason=reason, mins=mins, mb=mb,
+                detail=live_result.get("detail", "")[:120],
+            )
         await status_msg.edit_text(summary)
 
         if files:
@@ -472,7 +520,7 @@ async def build() -> Application:
                     )
             else:
                 links = _build_delivery_links(first)
-                await ctx.bot.send_message(chat_id=chat_id, text=_format_delivery_message(size_mb, links))
+                await ctx.bot.send_message(chat_id=chat_id, text=_format_delivery_message(size_mb, links, lang=lang))
 
     async def handle_monitor_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -482,10 +530,11 @@ async def build() -> Application:
         chat_id = query.message.chat_id if query.message else None
         if chat_id is None or not _is_owner(chat_id):
             try:
-                await query.answer("Owner only", show_alert=True)
+                await query.answer(t("owner_only", get_lang(chat_id or 0)), show_alert=True)
             except Exception:
                 pass
             return
+        lang = get_lang(chat_id)
         data = query.data or ""
         if not data.startswith("mon:"):
             return
@@ -497,7 +546,7 @@ async def build() -> Application:
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.edit_message_text(
-                    text=(query.message.text or "") + "\n\n⏭ Skipped",
+                    text=(query.message.text or "") + "\n\n" + t("monitor_skipped", lang),
                     disable_web_page_preview=True,
                 )
             except Exception:
@@ -507,7 +556,7 @@ async def build() -> Application:
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.edit_message_text(
-                    text=(query.message.text or "") + "\n\n🎬 Recording starting…",
+                    text=(query.message.text or "") + "\n\n" + t("monitor_starting", lang),
                     disable_web_page_preview=True,
                 )
             except Exception:
@@ -522,6 +571,8 @@ async def build() -> Application:
     _app.add_handler(CommandHandler("watch", handle_watch))
     _app.add_handler(CommandHandler("unwatch", handle_unwatch))
     _app.add_handler(CommandHandler("watchlist", handle_watchlist))
+    _app.add_handler(CommandHandler("language", handle_language))
     _app.add_handler(CallbackQueryHandler(handle_monitor_callback, pattern=r"^mon:"))
+    _app.add_handler(CallbackQueryHandler(handle_language_callback, pattern=r"^lang:"))
     _app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return _app

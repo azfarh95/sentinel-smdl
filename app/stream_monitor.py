@@ -42,6 +42,7 @@ from .config import (
     OWNER_CHAT_ID,
 )
 from .downloader import _resolve_cookies
+from .i18n import get_lang, t
 
 logger = logging.getLogger(__name__)
 
@@ -163,15 +164,14 @@ async def _poll_once(app: Application, entries: list[dict[str, Any]]) -> None:
             # OFFLINE → LIVE transition. Notify owner with inline keyboard.
             uploader = result.get("uploader") or label
             title = (result.get("title") or "")[:120]
-            text = (
-                f"🔴 LIVE — {uploader}\n"
-                f"{title}\n\n"
-                f"{url}\n\n"
-                f"Record this stream?"
+            owner_lang = get_lang(OWNER_CHAT_ID)
+            text = t(
+                "monitor_live_prompt", owner_lang,
+                uploader=uploader, title=title, url=url,
             )
             keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Yes — Record", callback_data=f"mon:rec:{url}"),
-                InlineKeyboardButton("❌ Skip",         callback_data=f"mon:skip:{url}"),
+                InlineKeyboardButton(t("btn_yes_record", owner_lang), callback_data=f"mon:rec:{url}"),
+                InlineKeyboardButton(t("btn_skip", owner_lang),       callback_data=f"mon:skip:{url}"),
             ]])
             try:
                 await app.bot.send_message(

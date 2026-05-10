@@ -4,3 +4,4 @@ python-telegram-bot==21.11.1
 yt-dlp
 gallery-dl
 aiosqlite
+telethon==1.40.0

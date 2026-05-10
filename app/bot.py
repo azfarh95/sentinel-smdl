@@ -12,6 +12,7 @@ from .config import ALLOWED_CHAT_IDS, DELETE_AFTER_SEND, LIVE_ENABLED, OWNER_CHA
 from .downloader import download, identify_post, send_files, _resolve_cookies
 from .interceptor import find_video_url
 from .live_downloader import detect_live, record_live
+from . import telethon_uploader
 
 # Active livestream recordings, keyed by chat_id.
 # Each entry: {"stop_flag": {"stop": False}, "url": str, "started_at": float}
@@ -153,17 +154,32 @@ async def build() -> Application:
             await status_msg.edit_text(summary)
 
             if files:
-                # Files live in /downloads/live — too large for Telegram usually,
-                # so just print path. User retrieves via OneDrive/file share.
                 first = files[0]
-                size_mb = round(Path(first).stat().st_size / 1024 / 1024, 1) if Path(first).exists() else 0
+                first_path = Path(first)
+                size_mb = round(first_path.stat().st_size / 1024 / 1024, 1) if first_path.exists() else 0
                 if size_mb < 50:
-                    await ctx.bot.send_video(chat_id=chat_id, video=open(first, "rb"),
-                                             caption=info.get("title"),
-                                             read_timeout=180, write_timeout=180)
+                    # Bot API fits — inline send
+                    with open(first, "rb") as f:
+                        await ctx.bot.send_video(chat_id=chat_id, video=f,
+                                                 caption=info.get("title"),
+                                                 read_timeout=180, write_timeout=180)
+                elif telethon_uploader.is_configured():
+                    # Too big for bot API; fall back to user-account upload (2 GB cap)
+                    await msg.reply_text(f"📤 Uploading {size_mb} MB via user account…")
+                    up = await telethon_uploader.upload_file(
+                        first, chat_id, caption=info.get("title"),
+                    )
+                    if up.get("ok"):
+                        await msg.reply_text(f"✓ Uploaded ({size_mb} MB)")
+                    else:
+                        await msg.reply_text(
+                            f"📁 Saved to `{first}` ({size_mb} MB)\n"
+                            f"User-account upload failed: {up.get('error')} — {up.get('detail','')[:120]}"
+                        )
                 else:
                     await msg.reply_text(
-                        f"📁 Saved to `{first}` ({size_mb} MB) — too big for Telegram inline send."
+                        f"📁 Saved to `{first}` ({size_mb} MB) — too big for Telegram inline send "
+                        f"and user-account uploader is not configured."
                     )
             return
 
@@ -206,10 +222,24 @@ async def build() -> Application:
                         except Exception:
                             pass
             elif send_result.get("error") == "file_too_large":
-                await status_msg.edit_text(
-                    f"File too large for Telegram ({send_result['size_mb']} MB). "
-                    f"Saved locally at {files[0]}"
-                )
+                size_mb_local = send_result['size_mb']
+                if telethon_uploader.is_configured():
+                    await status_msg.edit_text(f"📤 Uploading {size_mb_local} MB via user account…")
+                    up = await telethon_uploader.upload_file(
+                        files[0], chat_id, caption=info.get("title"),
+                    )
+                    if up.get("ok"):
+                        await status_msg.edit_text(f"✓ Uploaded ({size_mb_local} MB)")
+                    else:
+                        await status_msg.edit_text(
+                            f"📁 Saved locally at {files[0]} ({size_mb_local} MB)\n"
+                            f"User-account upload failed: {up.get('error')}"
+                        )
+                else:
+                    await status_msg.edit_text(
+                        f"File too large for Telegram ({size_mb_local} MB). "
+                        f"Saved locally at {files[0]}"
+                    )
             else:
                 await status_msg.edit_text(f"Send failed: {send_result.get('error')}")
 

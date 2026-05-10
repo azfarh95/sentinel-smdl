@@ -25,7 +25,8 @@ from .i18n import (
     set_lang, set_transcode_pref, set_tz_offset, set_video_quality, t,
 )
 from .interceptor import find_video_url
-from .live_downloader import detect_live, record_live
+from .live_downloader import detect_live
+from .recorder_bridge import bridge
 from . import file_serve, stream_monitor, telethon_uploader
 
 DOWNLOADS_DIR = os.environ.get("DOWNLOADS_DIR", "/downloads")
@@ -68,10 +69,6 @@ def _format_delivery_message(size_mb: float, links: dict, expires_hours: int = 2
     if not links.get("tailnet") and not links.get("share"):
         parts.append(t("no_delivery", lang, rel=links["rel"]))
     return "\n\n".join(parts)
-
-# Active livestream recordings, keyed by chat_id.
-# Each entry: {"stop_flag": {"stop": False}, "url": str, "started_at": float}
-_active_live_jobs: dict[int, dict] = {}
 
 # Per-URL no-extractor fail counter (chat_id -> {url: n}). Resets on success.
 # After 3 consecutive 'no_extractor' failures we tell the user the site isn't
@@ -175,16 +172,6 @@ async def build() -> Application:
 
             cookiepath = _resolve_cookies(url)
 
-            # Job tracking for /stop_livestream
-            stop_flag = {"stop": False}
-            _active_live_jobs[chat_id] = {
-                "stop_flag":  stop_flag,
-                "url":        url,
-                "started_at": __import__("time").time(),
-                "uploader":   uploader,
-                "platform":   platform,
-            }
-
             # Throttled progress callback — edits the same message in place
             async def _on_progress(p):
                 elapsed = p.get("elapsed_seconds", 0)
@@ -198,15 +185,21 @@ async def build() -> Application:
                 except Exception:
                     pass  # rate-limited / not modified / message gone
 
+            # Bridge owns job tracking now — no local _active_live_jobs needed.
+            # bridge.record() blocks until recording finishes (naturally,
+            # via /stop_livestream, or via failure); /stop_livestream is
+            # serviced concurrently from a separate handler that calls
+            # bridge.stop(chat_id) to set the stop_flag.
             tc_h, tc_keep = get_transcode_pref(chat_id)
-            try:
-                live_result = await record_live(
-                    url, cookiepath,
-                    on_progress=_on_progress, stop_flag=stop_flag,
-                    transcode_height=tc_h, transcode_keep_original=tc_keep,
-                )
-            finally:
-                _active_live_jobs.pop(chat_id, None)
+            live_result = await bridge.record(
+                chat_id, url,
+                cookiepath=cookiepath,
+                on_progress=_on_progress,
+                transcode_height=tc_h,
+                transcode_keep_original=tc_keep,
+                platform=platform,
+                uploader=uploader,
+            )
 
             mins  = live_result["duration_seconds"] // 60
             mb    = live_result["bytes_downloaded"] / (1024 * 1024)
@@ -345,41 +338,39 @@ async def build() -> Application:
 
     async def handle_stop_livestream(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
-        active_chats = list(_active_live_jobs.keys())
+        active_chats = [j.chat_id for j in bridge.list_active()]
         logger.info("CMD /stop_livestream from chat=%s | active_jobs=%s", chat_id, active_chats)
         if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
             logger.info("  rejected: chat not in ALLOWED_CHAT_IDS=%s", ALLOWED_CHAT_IDS)
             return
         lang = get_lang(chat_id)
-        job = _active_live_jobs.get(chat_id)
-        if not job:
+        status = await bridge.stop(chat_id)
+        if status is None:
             logger.info("  no active job for this chat — replying 'No active livestream'")
             await update.message.reply_text(t("no_active_live", lang))
             return
-        job["stop_flag"]["stop"] = True
-        elapsed_sec = int(__import__("time").time() - job["started_at"])
-        logger.info("  stop_flag set; %s sec elapsed; replying confirmation", elapsed_sec)
+        logger.info("  stop_flag set; %s sec elapsed; replying confirmation", status.elapsed_seconds)
         await update.message.reply_text(
             t("stop_requested", lang,
-              platform=job["platform"], uploader=job["uploader"],
-              duration=format_duration(elapsed_sec))
+              platform=status.platform or "?", uploader=status.uploader or "?",
+              duration=format_duration(status.elapsed_seconds))
         )
 
     async def handle_live_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
-        logger.info("CMD /live_status from chat=%s | active_jobs=%s", chat_id, list(_active_live_jobs.keys()))
+        active = [j.chat_id for j in bridge.list_active()]
+        logger.info("CMD /live_status from chat=%s | active_jobs=%s", chat_id, active)
         if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
             return
         lang = get_lang(chat_id)
-        job = _active_live_jobs.get(chat_id)
-        if not job:
+        status = bridge.status(chat_id)
+        if status is None:
             await update.message.reply_text(t("no_active_live_short", lang))
             return
-        elapsed_sec = int(__import__("time").time() - job["started_at"])
         await update.message.reply_text(
             t("live_status_active", lang,
-              platform=job["platform"], uploader=job["uploader"],
-              duration=format_duration(elapsed_sec))
+              platform=status.platform or "?", uploader=status.uploader or "?",
+              duration=format_duration(status.elapsed_seconds))
         )
 
     # ── Stream monitor commands ────────────────────────────────────────────
@@ -708,14 +699,6 @@ async def build() -> Application:
             text=t("monitor_record_starting", lang, uploader=uploader),
         )
         cookiepath = _resolve_cookies(url)
-        stop_flag = {"stop": False}
-        _active_live_jobs[chat_id] = {
-            "stop_flag":  stop_flag,
-            "url":        url,
-            "started_at": __import__("time").time(),
-            "uploader":   uploader,
-            "platform":   "monitor",
-        }
 
         async def _on_progress(p):
             elapsed = p.get("elapsed_seconds", 0)
@@ -730,16 +713,18 @@ async def build() -> Application:
 
         tc_h, tc_keep = get_transcode_pref(chat_id)
         try:
-            live_result = await record_live(
-                url, cookiepath,
-                on_progress=_on_progress, stop_flag=stop_flag,
-                transcode_height=tc_h, transcode_keep_original=tc_keep,
+            live_result = await bridge.record(
+                chat_id, url,
+                cookiepath=cookiepath,
+                on_progress=_on_progress,
+                transcode_height=tc_h,
+                transcode_keep_original=tc_keep,
+                platform="monitor",
+                uploader=uploader,
             )
         except Exception as e:
             await status_msg.edit_text(t("monitor_recording_crashed", lang, error=str(e)))
             return
-        finally:
-            _active_live_jobs.pop(chat_id, None)
 
         mins = live_result["duration_seconds"] // 60
         mb = live_result["bytes_downloaded"] / (1024 * 1024)

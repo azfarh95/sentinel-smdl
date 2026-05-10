@@ -41,6 +41,8 @@ def _platform_from_url(url: str) -> str:
     if "twitter.com" in u or "x.com" in u:      return "Twitter"
     if "facebook.com" in u or "fb.com" in u:    return "Facebook"
     if "youtube.com" in u or "youtu.be" in u:   return "Youtube"
+    if "twitch.tv" in u:                         return "Twitch"
+    if "kick.com" in u:                          return "Kick"
     if "reddit.com" in u:                        return "Reddit"
     return "Unknown"
 

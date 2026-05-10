@@ -34,6 +34,15 @@ _PATTERNS: dict[str, list[str]] = {
     "pinterest": [
         r"https?://(?:www\.)?pinterest\.com/pin/\d+",
     ],
+    # Live-capable platforms (live recording handled by live_downloader.py).
+    # These broad patterns match channels, VODs, and clips — yt-dlp resolves
+    # which it is + whether it's currently live during identify_post.
+    "twitch": [
+        r"https?://(?:www\.|m\.|clips\.)?twitch\.tv/[\w\-/]+",
+    ],
+    "kick": [
+        r"https?://(?:www\.)?kick\.com/[\w\-/]+",
+    ],
 }
 
 _COMPILED = [

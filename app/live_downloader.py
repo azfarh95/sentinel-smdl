@@ -106,6 +106,7 @@ def _platform_of(url: str) -> str:
     if "tiktok.com" in u:                      return "tiktok"
     if "instagram.com" in u:                   return "instagram"
     if "facebook.com" in u or "fb.com" in u:   return "facebook"
+    if "chaturbate.com" in u:                  return "chaturbate"
     return "other"
 
 

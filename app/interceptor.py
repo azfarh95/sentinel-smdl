@@ -43,6 +43,9 @@ _PATTERNS: dict[str, list[str]] = {
     "kick": [
         r"https?://(?:www\.)?kick\.com/[\w\-/]+",
     ],
+    "chaturbate": [
+        r"https?://(?:www\.)?chaturbate\.com/[\w\-]+/?",
+    ],
 }
 
 _COMPILED = [

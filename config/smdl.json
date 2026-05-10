@@ -11,5 +11,6 @@
   "live_heartbeat_seconds": 300,
   "live_min_free_disk_gb": 10,
   "live_abort_on_session_fail": true,
-  "live_platforms": ["youtube", "twitch", "kick"]
+  "live_platforms": ["youtube", "twitch", "kick"],
+  "live_max_height": 720
 }

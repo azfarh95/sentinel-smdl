@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import time
 from pathlib import Path
 from typing import AsyncIterator
@@ -35,6 +36,7 @@ from .config import (
     LIVE_ABORT_ON_SESSION_FAIL,
     LIVE_HEARTBEAT_SECONDS,
     LIVE_MAX_CONCURRENT,
+    LIVE_MAX_HEIGHT,
     LIVE_MIN_FREE_DISK_GB,
     LIVE_PLATFORMS,
 )
@@ -118,6 +120,42 @@ class LiveAbort(Exception):
 
 def _is_auth_failure(err_text: str) -> bool:
     return bool(_AUTH_FAIL_PATTERNS.search(err_text))
+
+
+def _kill_orphan_ffmpeg_children() -> int:
+    """Defensive cleanup: SIGTERM any ffmpeg/ffprobe child of THIS process.
+
+    Even with hls_prefer_native=True, certain code paths (post-process mux,
+    fragment merge) can spawn ffmpeg. If LiveAbort fires before yt-dlp
+    cleans those up, we'd leak orphan processes that keep writing.
+
+    Returns count of processes signaled. Linux-only (uses /proc).
+    """
+    if not os.path.isdir("/proc"):
+        return 0
+    my_pid = os.getpid()
+    killed = 0
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/status") as f:
+                    status = f.read()
+                if f"PPid:\t{my_pid}\n" not in status:
+                    continue
+                with open(f"/proc/{entry}/comm") as f:
+                    comm = f.read().strip()
+                if comm in ("ffmpeg", "ffprobe"):
+                    pid = int(entry)
+                    os.kill(pid, signal.SIGTERM)
+                    killed += 1
+                    logger.info("killed orphan %s PID %d", comm, pid)
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue  # process exited between listdir and inspection
+    except Exception as e:
+        logger.warning("orphan cleanup failed: %s", e)
+    return killed
 
 
 async def record_live(
@@ -239,8 +277,14 @@ async def record_live(
         def warning(self, msg): logger.warning("yt-dlp: %s", msg)
         def error(self, msg):   logger.error("yt-dlp: %s", msg)
 
+    # Build format selector from live_max_height. 0 = no cap.
+    if LIVE_MAX_HEIGHT > 0:
+        format_selector = f"bestvideo[height<={LIVE_MAX_HEIGHT}]+bestaudio/best[height<={LIVE_MAX_HEIGHT}]/best"
+    else:
+        format_selector = "bestvideo+bestaudio/best"
+
     ydl_opts = {
-        "format":               "bestvideo[height<=1080]+bestaudio/best",
+        "format":               format_selector,
         "outtmpl":              f"{LIVE_DIR}/%(extractor)s/%(uploader,uploader_id)s/%(title).80s.%(timestamp)s.%(ext)s",
         "merge_output_format":  "mp4",
         "logger":               _YtdlpLogger(),
@@ -255,6 +299,13 @@ async def record_live(
         "file_access_retries":  0,
         "skip_unavailable_fragments": False,
         "abort_on_unavailable_fragment": True,
+        # Force native Python HLS downloader instead of ffmpeg subprocess.
+        # Reason: when the user calls /stop_livestream, the progress hook
+        # raises LiveAbort INSIDE Python — but if yt-dlp had delegated to
+        # ffmpeg, ffmpeg keeps writing fragments forever as an orphan child.
+        # Native downloader runs in-process so the exception interrupts it.
+        "hls_prefer_native":    True,
+        "external_downloader":  {"m3u8": "native", "default": "native"},
     }
     # `live_from_start` is YouTube-only. Twitch / Kick raise
     # "no formats that can be downloaded from the start" if it's set —
@@ -296,6 +347,13 @@ async def record_live(
             logger.exception("Unexpected live recording failure")
             abort_reason = "unknown"
             state["abort_detail"] = str(e)[:300]
+        finally:
+            # Defensive: kill any ffmpeg/ffprobe children. With native HLS
+            # downloader this should be a no-op, but if a code path slips
+            # through to ffmpeg we don't leak orphan recorders.
+            killed = _kill_orphan_ffmpeg_children()
+            if killed:
+                logger.info("orphan cleanup terminated %d ffmpeg child(ren)", killed)
 
     elapsed = int(time.time() - state["started_at"])
     files = []

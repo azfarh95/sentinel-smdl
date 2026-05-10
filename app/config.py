@@ -28,6 +28,11 @@ _DEFAULTS: dict = {
     # TikTok/Instagram excluded by design — both have hostile anti-scraping
     # and unreliable extractors; cookies failing mid-stream is the norm.
     "live_platforms":         ["youtube", "twitch", "kick"],
+    # Cap on live recording resolution (height in pixels). Trades file size
+    # for quality. Twitch 1080p60 source = ~7.5 Mbps = ~56 MB/min, which
+    # adds up quickly on long recordings. 720p60 ≈ ~3.5 Mbps = ~25 MB/min.
+    # 480p ≈ ~1.5 Mbps = ~12 MB/min. Set to 0 for unlimited (== source).
+    "live_max_height":        720,
 }
 
 logger = logging.getLogger(__name__)
@@ -68,3 +73,4 @@ LIVE_HEARTBEAT_SECONDS:     int       = int(_cfg["live_heartbeat_seconds"])
 LIVE_MIN_FREE_DISK_GB:      int       = int(_cfg["live_min_free_disk_gb"])
 LIVE_ABORT_ON_SESSION_FAIL: bool      = bool(_cfg["live_abort_on_session_fail"])
 LIVE_PLATFORMS:             set[str]  = {str(p).lower() for p in _cfg["live_platforms"]}
+LIVE_MAX_HEIGHT:            int       = int(_cfg["live_max_height"])

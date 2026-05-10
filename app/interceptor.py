@@ -55,6 +55,19 @@ _PATTERNS: dict[str, list[str]] = {
     "bongacams": [
         r"https?://(?:www\.)?bongacams\.(?:com|net)/(?:profile/)?[\w\-]+/?",
     ],
+    # xhamsterlive is a re-skin of stripchat sharing the same backend; rooms
+    # map 1:1. yt-dlp doesn't have a dedicated xhamsterlive extractor, so we
+    # detect the URL and rewrite to stripchat.com before yt-dlp ever sees it.
+    "xhamsterlive": [
+        r"https?://(?:www\.)?xhamsterlive\.com/[\w\-]+/?",
+    ],
+}
+
+# Some sites are mirror/skin redirects of an upstream that yt-dlp DOES
+# support. Rewrite them at detection time. Format: (matched_platform,
+# rewritten_platform, sed-style (old, new) host swap).
+_REWRITES: dict[str, tuple[str, str, str]] = {
+    "xhamsterlive": ("stripchat", "xhamsterlive.com", "stripchat.com"),
 }
 
 _COMPILED = [
@@ -65,9 +78,18 @@ _COMPILED = [
 
 
 def find_video_url(text: str) -> tuple[str, str] | None:
-    """Return (platform, url) for the first video URL found, or None."""
+    """Return (platform, url) for the first video URL found, or None.
+
+    For mirror sites listed in _REWRITES, the URL is rewritten to its
+    canonical form so that yt-dlp's existing extractor matches.
+    """
     for platform, regex in _COMPILED:
         m = regex.search(text)
         if m:
-            return platform, m.group(0)
+            url = m.group(0)
+            if platform in _REWRITES:
+                new_platform, old_host, new_host = _REWRITES[platform]
+                url = url.replace(old_host, new_host)
+                platform = new_platform
+            return platform, url
     return None

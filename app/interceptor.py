@@ -46,6 +46,15 @@ _PATTERNS: dict[str, list[str]] = {
     "chaturbate": [
         r"https?://(?:www\.)?chaturbate\.com/[\w\-]+/?",
     ],
+    "stripchat": [
+        r"https?://(?:www\.)?stripchat\.com/[\w\-]+/?",
+    ],
+    "cam4": [
+        r"https?://(?:www\.)?cam4\.com/[\w\-]+/?",
+    ],
+    "bongacams": [
+        r"https?://(?:www\.)?bongacams\.(?:com|net)/(?:profile/)?[\w\-]+/?",
+    ],
 }
 
 _COMPILED = [

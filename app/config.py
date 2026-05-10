@@ -33,6 +33,16 @@ _DEFAULTS: dict = {
     # adds up quickly on long recordings. 720p60 ≈ ~3.5 Mbps = ~25 MB/min.
     # 480p ≈ ~1.5 Mbps = ~12 MB/min. Set to 0 for unlimited (== source).
     "live_max_height":        720,
+    # Optional post-recording transcode. Captures at live_max_height (full
+    # quality), then re-encodes to a smaller height before delivery.
+    # Useful when you want a quality archive but smaller files for Telegram
+    # delivery. 0 = off (no transcode). Common values: 480, 240.
+    # Cost: CPU time on transcode (~1-2x realtime on libx264 veryfast).
+    "live_transcode_height":  0,
+    # If True, keep the original at full quality AND produce a transcoded
+    # sibling for delivery (archive + reduced). If False, transcode replaces
+    # the original (saves disk, archive is the smaller version).
+    "live_transcode_keep_original": False,
     # Stream monitor (V1) — polls a watchlist of channel/streamer URLs and
     # DMs the user when one goes live, with Yes/No inline buttons to start
     # recording. Watchlist is owned/managed via /watch /unwatch /watchlist.
@@ -80,6 +90,8 @@ LIVE_MIN_FREE_DISK_GB:      int       = int(_cfg["live_min_free_disk_gb"])
 LIVE_ABORT_ON_SESSION_FAIL: bool      = bool(_cfg["live_abort_on_session_fail"])
 LIVE_PLATFORMS:             set[str]  = {str(p).lower() for p in _cfg["live_platforms"]}
 LIVE_MAX_HEIGHT:            int       = int(_cfg["live_max_height"])
+LIVE_TRANSCODE_HEIGHT:      int       = int(_cfg["live_transcode_height"])
+LIVE_TRANSCODE_KEEP_ORIGINAL: bool    = bool(_cfg["live_transcode_keep_original"])
 
 # Stream monitor (V1)
 MONITOR_ENABLED:                bool = bool(_cfg["monitor_enabled"])

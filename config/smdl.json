@@ -13,6 +13,8 @@
   "live_abort_on_session_fail": true,
   "live_platforms": ["youtube", "twitch", "kick"],
   "live_max_height": 720,
+  "live_transcode_height": 0,
+  "live_transcode_keep_original": false,
 
   "monitor_enabled": true,
   "monitor_poll_interval_seconds": 300,

@@ -39,6 +39,8 @@ from .config import (
     LIVE_MAX_HEIGHT,
     LIVE_MIN_FREE_DISK_GB,
     LIVE_PLATFORMS,
+    LIVE_TRANSCODE_HEIGHT,
+    LIVE_TRANSCODE_KEEP_ORIGINAL,
 )
 
 logger = logging.getLogger(__name__)
@@ -385,6 +387,101 @@ async def _periodic_progress_reporter(state: dict, on_progress, interval_sec: in
             pass  # rate-limited / message-edit-not-modified / etc.
 
 
+def _transcode_to_height(path: str, target_h: int, keep_original: bool) -> str:
+    """Re-encode the recorded file to a lower resolution.
+
+    Two modes:
+      keep_original=True   → produce <name>.{H}p.mp4 sibling, return its path
+      keep_original=False  → replace the input file (smaller archive)
+
+    Returns the path to deliver. On any failure, returns the original path
+    (a working file is better than a broken transcode).
+
+    CPU cost: libx264 veryfast crf 23 → roughly 1-2x realtime per video.
+    A 1-hour 720p source transcodes to 480p in ~30-60 min on a typical CPU.
+    """
+    src = Path(path)
+    if not src.exists() or src.stat().st_size == 0 or target_h <= 0:
+        return path
+
+    # Skip if source is already at-or-below target (avoid pointless re-encode)
+    try:
+        import subprocess as _sp
+        probe = _sp.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=height", "-of", "csv=p=0", str(src)],
+            capture_output=True, text=True, timeout=30,
+        )
+        cur_h = int((probe.stdout or "0").strip() or 0)
+        if 0 < cur_h <= target_h:
+            logger.info("transcode: source is %dp (≤ target %dp), skipping", cur_h, target_h)
+            return path
+    except Exception:
+        pass  # if probe fails, just attempt transcode
+
+    # Output naming: foo.mp4 → foo.480p.mp4 (or replace if not keeping original)
+    out = src.with_name(f"{src.stem}.{target_h}p.mp4")
+    if not keep_original:
+        # Replace mode: write to a temp sibling, then rename over the original
+        out = src.with_name(f"{src.stem}.transcode.tmp.mp4")
+
+    import subprocess
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
+        "-i", str(src),
+        "-vf", f"scale=-2:{target_h}",  # -2 keeps width even, auto-derived
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    logger.info("transcode: %s → %dp (keep_original=%s)", src.name, target_h, keep_original)
+    try:
+        # No timeout — long streams can take real time. Caller is async-aware.
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except Exception as e:
+        logger.error("transcode: ffmpeg spawn failed: %s", e)
+        return path
+
+    if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+        logger.error(
+            "transcode: ffmpeg failed (rc=%s) — keeping original. stderr: %s",
+            proc.returncode, (proc.stderr or "")[:400],
+        )
+        try:
+            out.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return path
+
+    # Success path
+    if keep_original:
+        logger.info(
+            "transcode: produced %s (%.1f MB) alongside original (%.1f MB)",
+            out.name, out.stat().st_size / 1024 / 1024,
+            src.stat().st_size / 1024 / 1024,
+        )
+        return str(out)
+    else:
+        # Replace mode: rename tmp into the original's path, delete original
+        final = src  # replace at the original path
+        try:
+            out.replace(final)
+            logger.info(
+                "transcode: replaced %s with %dp version (%.1f MB)",
+                src.name, target_h, final.stat().st_size / 1024 / 1024,
+            )
+            return str(final)
+        except Exception as e:
+            logger.error("transcode: replace rename failed: %s", e)
+            if out.exists():
+                return str(out)
+            return path
+
+
 async def _stop_deadline_watchdog(stop_flag: dict, deadline_sec: int = 15):
     """Bridge-style watchdog: when stop_flag is set, give graceful path
     deadline_sec to terminate. If ffmpeg still alive after that, SIGTERM
@@ -700,6 +797,32 @@ async def record_live(
             if f not in finalized:
                 finalized.append(f)
     files = finalized
+
+    # Optional post-finalize transcode (config: live_transcode_height).
+    # Captures at full quality, then re-encodes for delivery. Skipped if
+    # the file is already at-or-below the target height. CPU-expensive on
+    # long recordings — let the user opt in via config.
+    if LIVE_TRANSCODE_HEIGHT > 0 and abort_reason in ("stream_ended", "user_stopped"):
+        loop = asyncio.get_running_loop()
+        transcoded: list[str] = []
+        for f in files:
+            try:
+                # Run in executor — ffmpeg can take real time on long recordings
+                new_path = await loop.run_in_executor(
+                    None,
+                    _transcode_to_height, f, LIVE_TRANSCODE_HEIGHT, LIVE_TRANSCODE_KEEP_ORIGINAL,
+                )
+                # If keep_original=True, deliver the smaller transcoded file but
+                # leave the original on disk (caller chooses what to send).
+                if LIVE_TRANSCODE_KEEP_ORIGINAL and new_path != f:
+                    transcoded.append(new_path)  # smaller for delivery
+                    transcoded.append(f)         # original for archive
+                else:
+                    transcoded.append(new_path)
+            except Exception as e:
+                logger.warning("transcode: skipping %s due to error: %s", f, e)
+                transcoded.append(f)
+        files = transcoded
 
     bytes_total = state["bytes"]
     if not bytes_total and files:

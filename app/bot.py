@@ -17,7 +17,11 @@ from telegram.ext import (
 
 from .config import ALLOWED_CHAT_IDS, DELETE_AFTER_SEND, LIVE_ENABLED, OWNER_CHAT_ID
 from .downloader import download, identify_post, send_files, _resolve_cookies
-from .i18n import LANG_LABELS, SUPPORTED_LANGS, format_duration, get_lang, set_lang, t
+from .i18n import (
+    LANG_LABELS, SUPPORTED_LANGS,
+    format_duration, format_local_time, format_tz_offset,
+    get_lang, get_tz_offset, set_lang, set_tz_offset, t,
+)
 from .interceptor import find_video_url
 from .live_downloader import detect_live, record_live
 from . import file_serve, stream_monitor, telethon_uploader
@@ -401,7 +405,6 @@ async def build() -> Application:
             await update.message.reply_text(t("watchlist_empty", lang))
             return
         lines = [t("watchlist_header", lang, count=len(entries))]
-        from datetime import datetime
         for e in entries:
             label = e.get("label") or e.get("url") or "?"
             url = e.get("url") or "?"
@@ -410,7 +413,7 @@ async def build() -> Application:
             tail = ""
             if stream_monitor.is_snoozed(e):
                 until = int(e.get("snoozed_until") or 0)
-                tail = f"  💤 until {datetime.fromtimestamp(until).strftime('%H:%M')}"
+                tail = f"  💤 until {format_local_time(until, chat_id)}"
             lines.append(f"{badge} {label}{tail}\n   {url}")
         await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
 
@@ -437,6 +440,30 @@ async def build() -> Application:
             InlineKeyboardButton(t("btn_lang_ru", lang), callback_data="lang:set:ru"),
         ]])
         await update.message.reply_text(t("lang_picker", lang), reply_markup=keyboard)
+
+    async def handle_timezone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+            return
+        lang = get_lang(chat_id)
+        if not ctx.args:
+            current = format_tz_offset(get_tz_offset(chat_id))
+            await update.message.reply_text(
+                t("tz_current", lang, tz=current) + "\n\n" + t("tz_usage", lang)
+            )
+            return
+        raw = ctx.args[0]
+        try:
+            offset = float(raw)
+        except ValueError:
+            await update.message.reply_text(t("tz_invalid", lang, value=raw))
+            return
+        if not set_tz_offset(chat_id, offset):
+            await update.message.reply_text(t("tz_invalid", lang, value=raw))
+            return
+        await update.message.reply_text(
+            t("tz_set", lang, tz=format_tz_offset(offset))
+        )
 
     async def handle_language_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -564,11 +591,7 @@ async def build() -> Application:
         if action in ("snooze1h", "snooze8h"):
             mins = 60 if action == "snooze1h" else 8 * 60
             expires_at = stream_monitor.snooze_streamer(url, mins)
-            from datetime import datetime
-            until_str = (
-                datetime.fromtimestamp(expires_at).strftime("%H:%M")
-                if expires_at else "?"
-            )
+            until_str = format_local_time(expires_at, chat_id) if expires_at else "?"
             duration_label = "1h" if action == "snooze1h" else "8h"
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
@@ -602,6 +625,7 @@ async def build() -> Application:
     _app.add_handler(CommandHandler("unwatch", handle_unwatch))
     _app.add_handler(CommandHandler("watchlist", handle_watchlist))
     _app.add_handler(CommandHandler("language", handle_language))
+    _app.add_handler(CommandHandler("timezone", handle_timezone))
     _app.add_handler(CallbackQueryHandler(handle_monitor_callback, pattern=r"^mon:"))
     _app.add_handler(CallbackQueryHandler(handle_language_callback, pattern=r"^lang:"))
     _app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

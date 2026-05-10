@@ -23,8 +23,10 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 LANG_FILE = Path(os.environ.get("LANG_FILE", "/data/lang.json"))
+TZ_FILE   = Path(os.environ.get("TZ_FILE",   "/data/tz.json"))
 SUPPORTED_LANGS = ("en", "ru")
 DEFAULT_LANG = "en"
+DEFAULT_TZ_OFFSET = 0.0  # UTC. Range: -12 to +14 (real-world UTC offsets).
 
 LANG_LABELS = {
     "en": "English",
@@ -108,6 +110,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_snooze_1h":        "💤 1h",
         "btn_snooze_8h":        "😴 8h",
         "monitor_snoozed":      "💤 Snoozed for {duration} (until {until})",
+
+        # /timezone
+        "tz_current":           "Current timezone: {tz}\n\nChange with: /timezone <offset>",
+        "tz_set":               "Timezone set to {tz}.",
+        "tz_invalid":           "Invalid offset: {value}. Range: -12 to +14.",
+        "tz_usage":             "Usage: /timezone <offset>\n\nExamples:\n  /timezone 8     → UTC+8 (Singapore)\n  /timezone -5    → UTC-5 (New York)\n  /timezone 5.5   → UTC+5:30 (India)",
     },
     "ru": {
         # Generic
@@ -185,6 +193,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_snooze_1h":        "💤 1ч",
         "btn_snooze_8h":        "😴 8ч",
         "monitor_snoozed":      "💤 Тишина на {duration} (до {until})",
+
+        # /timezone
+        "tz_current":           "Текущий часовой пояс: {tz}\n\nИзменить: /timezone <смещение>",
+        "tz_set":               "Часовой пояс установлен: {tz}.",
+        "tz_invalid":           "Неверное смещение: {value}. Диапазон: от -12 до +14.",
+        "tz_usage":             "Использование: /timezone <смещение>\n\nПримеры:\n  /timezone 8     → UTC+8 (Сингапур)\n  /timezone -5    → UTC-5 (Нью-Йорк)\n  /timezone 5.5   → UTC+5:30 (Индия)",
     },
 }
 
@@ -232,6 +246,74 @@ def set_lang(chat_id: int, lang: str) -> bool:
     except Exception as e:
         logger.error("i18n: failed to persist %s: %s", LANG_FILE, e)
     return True
+
+
+_tz_cache: dict[int, float] = {}
+_tz_loaded_from_disk = False
+
+
+def _load_tz_from_disk_once() -> None:
+    global _tz_loaded_from_disk
+    if _tz_loaded_from_disk:
+        return
+    _tz_loaded_from_disk = True
+    if not TZ_FILE.exists():
+        return
+    try:
+        with open(TZ_FILE) as f:
+            data = json.load(f)
+        for k, v in data.items():
+            try:
+                offset = float(v)
+                if -12 <= offset <= 14:
+                    _tz_cache[int(k)] = offset
+            except (ValueError, TypeError):
+                continue
+    except Exception as e:
+        logger.warning("i18n: failed to read %s: %s", TZ_FILE, e)
+
+
+def get_tz_offset(chat_id: int) -> float:
+    _load_tz_from_disk_once()
+    return _tz_cache.get(int(chat_id), DEFAULT_TZ_OFFSET)
+
+
+def set_tz_offset(chat_id: int, offset_hours: float) -> bool:
+    """Returns True if set, False if out of range."""
+    if offset_hours < -12 or offset_hours > 14:
+        return False
+    _load_tz_from_disk_once()
+    _tz_cache[int(chat_id)] = float(offset_hours)
+    try:
+        TZ_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = TZ_FILE.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in _tz_cache.items()}, f, indent=2, ensure_ascii=False)
+        tmp.replace(TZ_FILE)
+    except Exception as e:
+        logger.error("i18n: failed to persist %s: %s", TZ_FILE, e)
+    return True
+
+
+def format_tz_offset(offset: float) -> str:
+    """0 → 'UTC', 8 → 'UTC+8', -5 → 'UTC-5', 5.5 → 'UTC+5:30'."""
+    if offset == 0:
+        return "UTC"
+    sign = "+" if offset >= 0 else "-"
+    abs_offset = abs(offset)
+    hours = int(abs_offset)
+    mins = int(round((abs_offset - hours) * 60))
+    if mins == 0:
+        return f"UTC{sign}{hours}"
+    return f"UTC{sign}{hours}:{mins:02d}"
+
+
+def format_local_time(epoch_seconds: float, chat_id: int, fmt: str = "%H:%M") -> str:
+    """Format a UTC epoch as wall-clock time in the chat's configured timezone."""
+    from datetime import datetime, timedelta, timezone
+    offset = get_tz_offset(chat_id)
+    tz = timezone(timedelta(hours=offset))
+    return datetime.fromtimestamp(epoch_seconds, tz=tz).strftime(fmt)
 
 
 def t(key: str, lang: str = DEFAULT_LANG, **kwargs) -> str:

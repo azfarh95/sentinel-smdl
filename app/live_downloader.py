@@ -195,6 +195,110 @@ def _kill_orphan_ffmpeg_children(use_kill: bool = False) -> int:
     return killed
 
 
+def _finalize_partial_recording(path: str) -> str:
+    """Remux a possibly-broken livestream file so its duration metadata
+    matches the actual playable bytes.
+
+    Why this matters: livestream recordings interrupted mid-stream leave
+    .part files (or .ts/.mkv) whose moov atom / container index claims a
+    duration based on what the LIVE stream's elapsed-time was, not what
+    the recorded bytes actually contain. Android's gallery — and many
+    other players — read the metadata and trust it, so a 2-min recording
+    of a 3-hour stream displays as 3 hours of black frames.
+
+    Fix: ffmpeg remux with -c copy. Lossless (no re-encode), recomputes
+    duration from actual packet PTS, and writes a proper moov atom at
+    the start (+faststart) so streaming/seeking works.
+
+    Returns the remuxed path on success; returns the original path on
+    failure (a file with bad metadata is still better than no file).
+    """
+    src = Path(path)
+    if not src.exists() or src.stat().st_size == 0:
+        return path
+
+    # If it's already a clean .mp4 (no .part suffix) AND ffprobe agrees the
+    # duration is sane, skip remux. Cheap heuristic: just check extension.
+    # We always remux .part / .ts / .mkv since those are likely interrupted.
+    name = src.name.lower()
+    is_partial = (
+        name.endswith(".part")
+        or name.endswith(".mp4.part")
+        or name.endswith(".mkv.part")
+        or name.endswith(".ts")
+    )
+    if not is_partial:
+        return path
+
+    # Output: strip .part if present, otherwise change ext to .mp4
+    if name.endswith(".part"):
+        out_name = src.name[:-len(".part")]
+    else:
+        out_name = src.stem + ".mp4"
+    if not out_name.lower().endswith(".mp4"):
+        out_name += ".mp4"
+    out = src.with_name(out_name)
+
+    # Avoid clobbering an existing finalized file that yt-dlp already merged
+    # (rare but possible if both .part and final .mp4 are present).
+    if out.exists() and out != src and out.stat().st_size > 0:
+        logger.info("finalize: %s already exists, skipping remux of %s", out.name, src.name)
+        return str(out)
+
+    # Use a temp output then rename atomically — avoids leaving a half-written
+    # file at the target name if ffmpeg crashes.
+    tmp_out = src.with_name(out.name + ".finalize.tmp.mp4")
+
+    import subprocess
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
+        "-i", str(src),
+        "-c", "copy",
+        "-movflags", "+faststart",
+        str(tmp_out),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        logger.error("finalize: ffmpeg remux timed out for %s", src.name)
+        try:
+            tmp_out.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return path
+    except Exception as e:
+        logger.error("finalize: ffmpeg remux failed to spawn: %s", e)
+        return path
+
+    if proc.returncode != 0 or not tmp_out.exists() or tmp_out.stat().st_size == 0:
+        logger.error(
+            "finalize: ffmpeg remux failed (rc=%s) — keeping original. stderr: %s",
+            proc.returncode, (proc.stderr or "")[:400],
+        )
+        try:
+            tmp_out.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return path
+
+    # Success. Move tmp into place, delete original .part.
+    try:
+        tmp_out.replace(out)
+        if src != out:
+            src.unlink(missing_ok=True)
+        logger.info(
+            "finalize: remuxed %s → %s (%.1f MB)",
+            src.name, out.name, out.stat().st_size / 1024 / 1024,
+        )
+        return str(out)
+    except Exception as e:
+        logger.error("finalize: rename/cleanup failed: %s", e)
+        # tmp_out exists but wasn't moved — keep it as the result if we can
+        if tmp_out.exists():
+            return str(tmp_out)
+        return path
+
+
 async def _stop_deadline_watchdog(stop_flag: dict, deadline_sec: int = 15):
     """Bridge-style watchdog: when stop_flag is set, give graceful path
     deadline_sec to terminate. If ffmpeg still alive after that, SIGTERM
@@ -461,6 +565,22 @@ async def record_live(
                         files.append(str(f))
         except Exception:
             pass
+
+    # Finalize: any .part / .ts / .mkv file gets ffmpeg-remuxed so its
+    # container duration matches the actual playable bytes. Without this,
+    # interrupted recordings show 'wall-clock-of-stream' duration in
+    # players (Android gallery: 3 hours of black frames for a 2-min clip).
+    finalized: list[str] = []
+    for f in files:
+        try:
+            new_path = _finalize_partial_recording(f)
+            if new_path not in finalized:
+                finalized.append(new_path)
+        except Exception as e:
+            logger.warning("finalize: skipping %s due to error: %s", f, e)
+            if f not in finalized:
+                finalized.append(f)
+    files = finalized
 
     bytes_total = state["bytes"]
     if not bytes_total and files:

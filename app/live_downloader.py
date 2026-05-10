@@ -154,19 +154,12 @@ def _is_no_extractor(err_text: str) -> bool:
     return bool(_NO_EXTRACTOR_PATTERNS.search(err_text))
 
 
-def _kill_orphan_ffmpeg_children() -> int:
-    """Defensive cleanup: SIGTERM any ffmpeg/ffprobe child of THIS process.
-
-    Even with hls_prefer_native=True, certain code paths (post-process mux,
-    fragment merge) can spawn ffmpeg. If LiveAbort fires before yt-dlp
-    cleans those up, we'd leak orphan processes that keep writing.
-
-    Returns count of processes signaled. Linux-only (uses /proc).
-    """
+def _list_ffmpeg_children() -> list[int]:
+    """Enumerate ffmpeg/ffprobe PIDs that are children of THIS process."""
     if not os.path.isdir("/proc"):
-        return 0
+        return []
     my_pid = os.getpid()
-    killed = 0
+    pids = []
     try:
         for entry in os.listdir("/proc"):
             if not entry.isdigit():
@@ -179,15 +172,62 @@ def _kill_orphan_ffmpeg_children() -> int:
                 with open(f"/proc/{entry}/comm") as f:
                     comm = f.read().strip()
                 if comm in ("ffmpeg", "ffprobe"):
-                    pid = int(entry)
-                    os.kill(pid, signal.SIGTERM)
-                    killed += 1
-                    logger.info("killed orphan %s PID %d", comm, pid)
+                    pids.append(int(entry))
             except (FileNotFoundError, ProcessLookupError, PermissionError):
-                continue  # process exited between listdir and inspection
+                continue
     except Exception as e:
-        logger.warning("orphan cleanup failed: %s", e)
+        logger.warning("ffmpeg-list failed: %s", e)
+    return pids
+
+
+def _kill_orphan_ffmpeg_children(use_kill: bool = False) -> int:
+    """SIGTERM (or SIGKILL if use_kill=True) any ffmpeg/ffprobe child."""
+    sig = signal.SIGKILL if use_kill else signal.SIGTERM
+    sig_name = "SIGKILL" if use_kill else "SIGTERM"
+    killed = 0
+    for pid in _list_ffmpeg_children():
+        try:
+            os.kill(pid, sig)
+            killed += 1
+            logger.info("sent %s to ffmpeg-family PID %d", sig_name, pid)
+        except ProcessLookupError:
+            pass  # already gone
     return killed
+
+
+async def _stop_deadline_watchdog(stop_flag: dict, deadline_sec: int = 15):
+    """Bridge-style watchdog: when stop_flag is set, give graceful path
+    deadline_sec to terminate. If ffmpeg still alive after that, SIGTERM
+    the subprocess tree. After another deadline_sec, SIGKILL anything left.
+
+    Solves the orphan-ffmpeg case where yt-dlp sees the LiveAbort exception
+    in its progress hook but ffmpeg-as-external-downloader is blocking on
+    I/O and doesn't respond. Without this watchdog, yt-dlp's `ydl.download()`
+    waits indefinitely on ffmpeg, the LiveAbort never propagates up, and
+    bot.py never receives the result.
+    """
+    while True:
+        await asyncio.sleep(2)
+        if not stop_flag.get("stop"):
+            continue
+        # stop_flag is set — start the deadline timer
+        await asyncio.sleep(deadline_sec)
+        ffmpeg_pids = _list_ffmpeg_children()
+        if ffmpeg_pids:
+            logger.warning(
+                "stop_flag set %ds ago but ffmpeg children still alive: %s — sending SIGTERM",
+                deadline_sec, ffmpeg_pids,
+            )
+            _kill_orphan_ffmpeg_children(use_kill=False)
+            await asyncio.sleep(deadline_sec)
+            ffmpeg_pids = _list_ffmpeg_children()
+            if ffmpeg_pids:
+                logger.error(
+                    "ffmpeg ignored SIGTERM after another %ds — escalating to SIGKILL: %s",
+                    deadline_sec, ffmpeg_pids,
+                )
+                _kill_orphan_ffmpeg_children(use_kill=True)
+        return  # watchdog done — either ffmpeg gone, or we killed it
 
 
 async def record_live(
@@ -352,6 +392,15 @@ async def record_live(
     async with _get_live_semaphore():
         loop = asyncio.get_running_loop()
 
+        # Bridge-style watchdog: enforces stop_flag. If yt-dlp/ffmpeg ignore
+        # the graceful-exit path (Python progress-hook can't interrupt ffmpeg's
+        # blocking I/O), this kills the subprocess tree after a deadline.
+        watchdog_task = None
+        if stop_flag is not None:
+            watchdog_task = asyncio.create_task(
+                _stop_deadline_watchdog(stop_flag, deadline_sec=15)
+            )
+
         def _run():
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -382,6 +431,13 @@ async def record_live(
             abort_reason = "unknown"
             state["abort_detail"] = str(e)[:300]
         finally:
+            # Cancel the watchdog if recording finished naturally before deadline
+            if watchdog_task and not watchdog_task.done():
+                watchdog_task.cancel()
+                try:
+                    await watchdog_task
+                except asyncio.CancelledError:
+                    pass
             # Defensive: kill any ffmpeg/ffprobe children. With native HLS
             # downloader this should be a no-op, but if a code path slips
             # through to ffmpeg we don't leak orphan recorders.

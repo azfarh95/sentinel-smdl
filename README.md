@@ -157,4 +157,17 @@ TBD — leaning MIT for community-friendly distribution. Do not redistribute the
 
 ## Status
 
-Development active. Carve-out candidate from the [Project Sentinel](../docs/architecture/OVERVIEW.md) monorepo, pending: own LICENSE, example smdl.json, install-on-fresh-VPS test.
+Active development. Carve-out candidate from the [Project Sentinel](../docs/architecture/OVERVIEW.md) monorepo.
+
+### Roadmap
+
+| Stage | Scope | State |
+|---|---|---|
+| **V1 — Discovery + Docker** | Telegram bot + yt-dlp/gallery-dl + livestream recording + dual-path delivery + RecorderBridge stopgap | 🟢 Active — debugging the long tail of platform-specific edge cases (Twitch ffmpeg force, etc.) |
+| **V2 — UX + mini-app** | Dedicated SMDL mini-app (TOTP-gated web UI for managing recordings, viewing history, downloading files); UX trimming on the Telegram side | ⚪ Scoped, not started |
+| **V3 — PyInstaller native binary** | `smdl-windows-x64.exe` / `smdl-linux-x64` / `smdl-macos-arm64` published in GitHub Releases. No Docker required. | ⚪ |
+| **V4 — MSI packaging** | Inno Setup wrapper around V3 binary: Windows wizard, service registration, Start Menu entry, uninstaller | ⚪ |
+
+V1 must stabilise (1-2 months without major regressions) before V2 starts. Each stage is independently shippable; users can pick whichever level of polish suits them.
+
+Pending for V1 carve-out: own LICENSE, example `smdl.example.json`, fresh-VPS install test, GHCR-published image (`ghcr.io/azfarh95/smdl:tag`).

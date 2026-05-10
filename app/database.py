@@ -76,6 +76,30 @@ async def set_url_cache(url: str, files: list[str], platform: str | None, upload
         await db.commit()
 
 
+async def cache_stats() -> dict:
+    """Return {count, oldest, newest} for the URL cache."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM url_cache"
+        ) as cur:
+            row = await cur.fetchone()
+    if not row or not row[0]:
+        return {"count": 0, "oldest": None, "newest": None}
+    return {"count": row[0], "oldest": row[1], "newest": row[2]}
+
+
+async def clear_cache(url: str | None = None) -> int:
+    """Clear cache. If url given, only that entry; otherwise everything.
+    Returns the count of rows removed."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if url is None:
+            cur = await db.execute("DELETE FROM url_cache")
+        else:
+            cur = await db.execute("DELETE FROM url_cache WHERE url = ?", (_normalise_url(url),))
+        await db.commit()
+        return cur.rowcount or 0
+
+
 async def get_setting(key: str, default: str = "") -> str:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(

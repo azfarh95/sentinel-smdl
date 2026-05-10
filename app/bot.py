@@ -546,6 +546,90 @@ async def build() -> Application:
         except Exception:
             pass
 
+    async def handle_storage_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not _is_owner(chat_id):
+            await update.message.reply_text(t("owner_only", get_lang(chat_id)))
+            return
+        lang = get_lang(chat_id)
+        import shutil, asyncio as _asyncio
+        from . import database as db
+        from datetime import datetime
+        from .i18n import format_local_time
+
+        def _scan():
+            base = Path(DOWNLOADS_DIR)
+            total = used = free = 0
+            try:
+                u = shutil.disk_usage(str(base))
+                total, used, free = u.total, u.used, u.free
+            except Exception:
+                pass
+            live_dir = base / "live"
+            def _stat_dir(d: Path) -> tuple[int, int]:
+                count = total_bytes = 0
+                if d.exists():
+                    for f in d.rglob("*"):
+                        try:
+                            if f.is_file():
+                                count += 1
+                                total_bytes += f.stat().st_size
+                        except Exception:
+                            pass
+                return count, total_bytes
+            live_count, live_bytes = _stat_dir(live_dir)
+            all_count, all_bytes  = _stat_dir(base)
+            dl_count  = all_count - live_count
+            dl_bytes  = all_bytes  - live_bytes
+            return total, free, dl_count, dl_bytes, live_count, live_bytes
+
+        loop = _asyncio.get_running_loop()
+        total, free, dl_count, dl_bytes, live_count, live_bytes = await loop.run_in_executor(None, _scan)
+        cs = await db.cache_stats()
+
+        def _fmt_size(b: int) -> str:
+            for unit in ("B", "KB", "MB", "GB", "TB"):
+                if b < 1024 or unit == "TB":
+                    return f"{b:.1f} {unit}"
+                b /= 1024
+
+        def _fmt_dt(s):
+            if not s: return "—"
+            try:
+                from datetime import datetime, timezone as _tz
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                return format_local_time(dt.timestamp(), chat_id, "%Y-%m-%d %H:%M")
+            except Exception:
+                return s[:16]
+
+        await update.message.reply_text(t(
+            "storage_stats", lang,
+            free_gb=free / (1024 ** 3),
+            total_gb=total / (1024 ** 3),
+            downloads_count=dl_count,
+            downloads_size=_fmt_size(dl_bytes),
+            live_count=live_count,
+            live_size=_fmt_size(live_bytes),
+            cache_count=cs["count"],
+            cache_oldest=_fmt_dt(cs["oldest"]),
+            cache_newest=_fmt_dt(cs["newest"]),
+        ))
+
+    async def handle_clear_cache(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not _is_owner(chat_id):
+            await update.message.reply_text(t("owner_only", get_lang(chat_id)))
+            return
+        lang = get_lang(chat_id)
+        from . import database as db
+        target_url = ctx.args[0] if ctx.args else None
+        removed = await db.clear_cache(target_url)
+        if target_url and removed == 0:
+            await update.message.reply_text(t("cache_url_not_found", lang, url=target_url))
+            return
+        plural = "y" if removed == 1 else "ies"  # English-only quirk; ru template ignores
+        await update.message.reply_text(t("cache_cleared", lang, count=removed, plural=plural))
+
     async def handle_default_video_size(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
@@ -759,6 +843,8 @@ async def build() -> Application:
     _app.add_handler(CommandHandler("timezone", handle_timezone))
     _app.add_handler(CommandHandler("transcode", handle_transcode))
     _app.add_handler(CommandHandler("default_video_size", handle_default_video_size))
+    _app.add_handler(CommandHandler("storage_stats", handle_storage_stats))
+    _app.add_handler(CommandHandler("clear_cache", handle_clear_cache))
     _app.add_handler(CallbackQueryHandler(handle_monitor_callback, pattern=r"^mon:"))
     _app.add_handler(CallbackQueryHandler(handle_language_callback, pattern=r"^lang:"))
     _app.add_handler(CallbackQueryHandler(handle_transcode_callback, pattern=r"^tc:"))

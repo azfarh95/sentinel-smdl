@@ -141,6 +141,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_vq_1080":          "📺 1080p",
         "btn_vq_720":           "🖥 720p",
         "btn_vq_360":           "📱 360p",
+
+        # /storage_stats + /clear_cache
+        "storage_stats":        "📊 Storage\n\nFree on /downloads: {free_gb:.1f} GB / {total_gb:.0f} GB total\nDownloads: {downloads_count} files, {downloads_size}\nLive recordings: {live_count} files, {live_size}\n\n💾 URL cache: {cache_count} entries\nOldest: {cache_oldest}\nNewest: {cache_newest}",
+        "cache_cleared":        "🧹 Cache cleared. Removed {count} entr{plural}.",
+        "cache_clear_usage":    "Usage: /clear_cache       — clear everything\n       /clear_cache <url> — clear one URL",
+        "cache_url_not_found":  "ℹ URL not in cache: {url}",
     },
     "ru": {
         # Generic
@@ -247,6 +253,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_vq_1080":          "📺 1080p",
         "btn_vq_720":           "🖥 720p",
         "btn_vq_360":           "📱 360p",
+
+        # /storage_stats + /clear_cache
+        "storage_stats":        "📊 Хранилище\n\nСвободно на /downloads: {free_gb:.1f} ГБ из {total_gb:.0f} ГБ\nЗагрузки: {downloads_count} файлов, {downloads_size}\nЭфиры: {live_count} файлов, {live_size}\n\n💾 Кэш URL: {cache_count} записей\nСтарейшая: {cache_oldest}\nНовейшая: {cache_newest}",
+        "cache_cleared":        "🧹 Кэш очищен. Удалено {count} запис{plural}.",
+        "cache_clear_usage":    "Использование: /clear_cache       — очистить всё\n              /clear_cache <url> — очистить одну ссылку",
+        "cache_url_not_found":  "ℹ URL не в кэше: {url}",
     },
 }
 

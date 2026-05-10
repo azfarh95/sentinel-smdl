@@ -513,6 +513,13 @@ async def record_live(
                 raise
             except yt_dlp.utils.DownloadError as e:
                 msg = str(e)
+                # User-initiated stop wins over any DownloadError. yt-dlp's
+                # progress hook can't intercept ffmpeg-as-external-downloader,
+                # so when the watchdog SIGTERMs ffmpeg on /stop_livestream,
+                # yt-dlp surfaces the kill as "ffmpeg exited with code 255".
+                # That isn't a real error — it's the user-stop landing.
+                if stop_flag is not None and stop_flag.get("stop"):
+                    raise LiveAbort("user_stopped", "stop requested by user")
                 if _is_auth_failure(msg):
                     raise LiveAbort("session_fail", msg[:300])
                 if _is_no_extractor(msg):
@@ -522,6 +529,10 @@ async def record_live(
                     return  # natural end
                 raise LiveAbort("download_error", msg[:300])
             except Exception as e:
+                # Same logic — defensive against any other exception type
+                # raised after a user-initiated stop.
+                if stop_flag is not None and stop_flag.get("stop"):
+                    raise LiveAbort("user_stopped", "stop requested by user")
                 raise LiveAbort("unknown", str(e)[:300])
 
         try:

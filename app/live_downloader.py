@@ -522,6 +522,8 @@ async def record_live(
     cookiepath: str | None,
     on_progress: callable | None = None,
     stop_flag: dict | None = None,
+    transcode_height: int | None = None,
+    transcode_keep_original: bool | None = None,
 ) -> dict:
     """Record an active livestream.
 
@@ -798,11 +800,13 @@ async def record_live(
                 finalized.append(f)
     files = finalized
 
-    # Optional post-finalize transcode (config: live_transcode_height).
-    # Captures at full quality, then re-encodes for delivery. Skipped if
-    # the file is already at-or-below the target height. CPU-expensive on
-    # long recordings — let the user opt in via config.
-    if LIVE_TRANSCODE_HEIGHT > 0 and abort_reason in ("stream_ended", "user_stopped"):
+    # Optional post-finalize transcode. Per-chat override (via kwargs) wins
+    # over the global config defaults — lets a /transcode telegram command
+    # set this without restarting the container.
+    effective_h    = LIVE_TRANSCODE_HEIGHT       if transcode_height is None        else int(transcode_height)
+    effective_keep = LIVE_TRANSCODE_KEEP_ORIGINAL if transcode_keep_original is None else bool(transcode_keep_original)
+
+    if effective_h > 0 and abort_reason in ("stream_ended", "user_stopped"):
         loop = asyncio.get_running_loop()
         transcoded: list[str] = []
         for f in files:
@@ -810,11 +814,11 @@ async def record_live(
                 # Run in executor — ffmpeg can take real time on long recordings
                 new_path = await loop.run_in_executor(
                     None,
-                    _transcode_to_height, f, LIVE_TRANSCODE_HEIGHT, LIVE_TRANSCODE_KEEP_ORIGINAL,
+                    _transcode_to_height, f, effective_h, effective_keep,
                 )
                 # If keep_original=True, deliver the smaller transcoded file but
                 # leave the original on disk (caller chooses what to send).
-                if LIVE_TRANSCODE_KEEP_ORIGINAL and new_path != f:
+                if effective_keep and new_path != f:
                     transcoded.append(new_path)  # smaller for delivery
                     transcoded.append(f)         # original for archive
                 else:

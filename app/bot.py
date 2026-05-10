@@ -19,8 +19,9 @@ from .config import ALLOWED_CHAT_IDS, DELETE_AFTER_SEND, LIVE_ENABLED, OWNER_CHA
 from .downloader import download, identify_post, send_files, _resolve_cookies
 from .i18n import (
     LANG_LABELS, SUPPORTED_LANGS,
-    format_duration, format_local_time, format_tz_offset,
-    get_lang, get_tz_offset, set_lang, set_tz_offset, t,
+    format_duration, format_local_time, format_transcode_summary, format_tz_offset,
+    get_lang, get_transcode_pref, get_tz_offset,
+    set_lang, set_transcode_pref, set_tz_offset, t,
 )
 from .interceptor import find_video_url
 from .live_downloader import detect_live, record_live
@@ -196,8 +197,13 @@ async def build() -> Application:
                 except Exception:
                     pass  # rate-limited / not modified / message gone
 
+            tc_h, tc_keep = get_transcode_pref(chat_id)
             try:
-                live_result = await record_live(url, cookiepath, on_progress=_on_progress, stop_flag=stop_flag)
+                live_result = await record_live(
+                    url, cookiepath,
+                    on_progress=_on_progress, stop_flag=stop_flag,
+                    transcode_height=tc_h, transcode_keep_original=tc_keep,
+                )
             finally:
                 _active_live_jobs.pop(chat_id, None)
 
@@ -481,6 +487,61 @@ async def build() -> Application:
             t("tz_set", lang, tz=format_tz_offset(offset))
         )
 
+    async def handle_transcode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+            return
+        lang = get_lang(chat_id)
+        cur_h, cur_keep = get_transcode_pref(chat_id)
+        current = format_transcode_summary(cur_h, cur_keep, lang)
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(t("btn_transcode_off", lang),   callback_data="tc:set:0:0")],
+            [
+                InlineKeyboardButton(t("btn_transcode_480_r", lang), callback_data="tc:set:480:0"),
+                InlineKeyboardButton(t("btn_transcode_240_r", lang), callback_data="tc:set:240:0"),
+            ],
+            [
+                InlineKeyboardButton(t("btn_transcode_480_k", lang), callback_data="tc:set:480:1"),
+                InlineKeyboardButton(t("btn_transcode_240_k", lang), callback_data="tc:set:240:1"),
+            ],
+        ])
+        await update.message.reply_text(
+            t("transcode_picker", lang, current=current),
+            reply_markup=keyboard,
+        )
+
+    async def handle_transcode_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id is None:
+            return
+        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+            return
+        data = query.data or ""
+        if not data.startswith("tc:set:"):
+            return
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        try:
+            height = int(parts[2])
+            keep   = parts[3] == "1"
+        except ValueError:
+            return
+        lang = get_lang(chat_id)
+        if not set_transcode_pref(chat_id, height, keep):
+            return
+        summary = format_transcode_summary(height, keep, lang)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.edit_message_text(t("transcode_set", lang, summary=summary))
+        except Exception:
+            pass
+
     async def handle_language_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         if query is None:
@@ -534,8 +595,13 @@ async def build() -> Application:
             except Exception:
                 pass
 
+        tc_h, tc_keep = get_transcode_pref(chat_id)
         try:
-            live_result = await record_live(url, cookiepath, on_progress=_on_progress, stop_flag=stop_flag)
+            live_result = await record_live(
+                url, cookiepath,
+                on_progress=_on_progress, stop_flag=stop_flag,
+                transcode_height=tc_h, transcode_keep_original=tc_keep,
+            )
         except Exception as e:
             await status_msg.edit_text(t("monitor_recording_crashed", lang, error=str(e)))
             return
@@ -642,7 +708,9 @@ async def build() -> Application:
     _app.add_handler(CommandHandler("watchlist", handle_watchlist))
     _app.add_handler(CommandHandler("language", handle_language))
     _app.add_handler(CommandHandler("timezone", handle_timezone))
+    _app.add_handler(CommandHandler("transcode", handle_transcode))
     _app.add_handler(CallbackQueryHandler(handle_monitor_callback, pattern=r"^mon:"))
     _app.add_handler(CallbackQueryHandler(handle_language_callback, pattern=r"^lang:"))
+    _app.add_handler(CallbackQueryHandler(handle_transcode_callback, pattern=r"^tc:"))
     _app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return _app

@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 LANG_FILE = Path(os.environ.get("LANG_FILE", "/data/lang.json"))
 TZ_FILE   = Path(os.environ.get("TZ_FILE",   "/data/tz.json"))
+TRANSCODE_FILE = Path(os.environ.get("TRANSCODE_FILE", "/data/transcode.json"))
 SUPPORTED_LANGS = ("en", "ru")
 DEFAULT_LANG = "en"
 DEFAULT_TZ_OFFSET = 0.0  # UTC. Range: -12 to +14 (real-world UTC offsets).
@@ -117,6 +118,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "tz_set":               "Timezone set to {tz}.",
         "tz_invalid":           "Invalid offset: {value}. Range: -12 to +14.",
         "tz_usage":             "Usage: /timezone <offset>\n\nExamples:\n  /timezone 8     → UTC+8 (Singapore)\n  /timezone -5    → UTC-5 (New York)\n  /timezone 5.5   → UTC+5:30 (India)",
+
+        # /transcode
+        "transcode_picker":     "Pick a post-recording transcode option:\n\nCurrent: {current}",
+        "transcode_set":        "Transcode set: {summary}",
+        "transcode_off":        "Off — no transcode",
+        "transcode_replace":    "{height}p (replaces original)",
+        "transcode_keep":       "{height}p (keeps original as archive)",
+        "btn_transcode_off":    "❌ Off",
+        "btn_transcode_480_r":  "🔻 480p · replace",
+        "btn_transcode_240_r":  "🔻 240p · replace",
+        "btn_transcode_480_k":  "📦 480p + keep archive",
+        "btn_transcode_240_k":  "📦 240p + keep archive",
     },
     "ru": {
         # Generic
@@ -201,6 +214,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "tz_set":               "Часовой пояс установлен: {tz}.",
         "tz_invalid":           "Неверное смещение: {value}. Диапазон: от -12 до +14.",
         "tz_usage":             "Использование: /timezone <смещение>\n\nПримеры:\n  /timezone 8     → UTC+8 (Сингапур)\n  /timezone -5    → UTC-5 (Нью-Йорк)\n  /timezone 5.5   → UTC+5:30 (Индия)",
+
+        # /transcode
+        "transcode_picker":     "Выберите режим перекодировки после записи:\n\nСейчас: {current}",
+        "transcode_set":        "Перекодировка установлена: {summary}",
+        "transcode_off":        "Выкл — без перекодировки",
+        "transcode_replace":    "{height}p (заменяет оригинал)",
+        "transcode_keep":       "{height}p (сохраняет оригинал как архив)",
+        "btn_transcode_off":    "❌ Выкл",
+        "btn_transcode_480_r":  "🔻 480p · заменить",
+        "btn_transcode_240_r":  "🔻 240p · заменить",
+        "btn_transcode_480_k":  "📦 480p + архив",
+        "btn_transcode_240_k":  "📦 240p + архив",
     },
 }
 
@@ -316,6 +341,67 @@ def format_local_time(epoch_seconds: float, chat_id: int, fmt: str = "%H:%M") ->
     offset = get_tz_offset(chat_id)
     tz = timezone(timedelta(hours=offset))
     return datetime.fromtimestamp(epoch_seconds, tz=tz).strftime(fmt)
+
+
+_transcode_cache: dict[int, tuple[int, bool]] = {}
+_transcode_loaded = False
+ALLOWED_TRANSCODE_HEIGHTS = (0, 240, 480)
+
+
+def _load_transcode_once() -> None:
+    global _transcode_loaded
+    if _transcode_loaded:
+        return
+    _transcode_loaded = True
+    if not TRANSCODE_FILE.exists():
+        return
+    try:
+        with open(TRANSCODE_FILE) as f:
+            data = json.load(f)
+        for k, v in data.items():
+            try:
+                # v is [height, keep_original]
+                if isinstance(v, (list, tuple)) and len(v) == 2:
+                    h, keep = int(v[0]), bool(v[1])
+                    if h in ALLOWED_TRANSCODE_HEIGHTS:
+                        _transcode_cache[int(k)] = (h, keep)
+            except (ValueError, TypeError):
+                continue
+    except Exception as e:
+        logger.warning("i18n: failed to read %s: %s", TRANSCODE_FILE, e)
+
+
+def get_transcode_pref(chat_id: int) -> tuple[int, bool]:
+    """Return (height, keep_original). (0, False) = off."""
+    _load_transcode_once()
+    return _transcode_cache.get(int(chat_id), (0, False))
+
+
+def set_transcode_pref(chat_id: int, height: int, keep_original: bool) -> bool:
+    if height not in ALLOWED_TRANSCODE_HEIGHTS:
+        return False
+    _load_transcode_once()
+    _transcode_cache[int(chat_id)] = (int(height), bool(keep_original))
+    try:
+        TRANSCODE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = TRANSCODE_FILE.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(
+                {str(k): list(v) for k, v in _transcode_cache.items()},
+                f, indent=2, ensure_ascii=False,
+            )
+        tmp.replace(TRANSCODE_FILE)
+    except Exception as e:
+        logger.error("i18n: failed to persist %s: %s", TRANSCODE_FILE, e)
+    return True
+
+
+def format_transcode_summary(height: int, keep_original: bool, lang: str = DEFAULT_LANG) -> str:
+    if height == 0:
+        return t("transcode_off", lang)
+    if keep_original:
+        return t("transcode_keep", lang, height=height)
+    return t("transcode_replace", lang, height=height)
 
 
 def t(key: str, lang: str = DEFAULT_LANG, **kwargs) -> str:

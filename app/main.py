@@ -8,8 +8,8 @@ from fastapi import FastAPI
 
 from . import database as db
 from . import file_serve
+from . import interceptor  # noqa: F401 — triggers plugin auto-load at startup
 from . import stream_monitor
-from . import stripchat_patch  # noqa: F401  — applies extractor monkey-patch on import
 from .bot import build
 from .downloader import start_cleanup_loop
 

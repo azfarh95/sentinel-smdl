@@ -101,10 +101,18 @@ def _get_live_semaphore() -> asyncio.Semaphore:
 
 # Hosts behind Cloudflare bot management. yt-dlp's default TLS fingerprint
 # gets HTTP 406 from these — add --impersonate=chrome via curl_cffi to bypass.
-_CLOUDFLARE_HOSTS = (
-    "stripchat.com", "xhamsterlive.com", "chaturbate.com",
-    "cam4.com", "bongacams.com", "bongacams.net",
-)
+# Core ships an empty set; plugins register specific hosts via
+# register_cloudflare_host(...). Keeps host-specific knowledge out of the
+# public scope while letting the impersonation MECHANISM be public.
+_CLOUDFLARE_HOSTS: set[str] = set()
+
+
+def register_cloudflare_host(*hosts: str) -> None:
+    """Plugin entry-point: declare additional hosts that need Chrome TLS
+    impersonation to bypass Cloudflare bot challenges."""
+    for h in hosts:
+        if h:
+            _CLOUDFLARE_HOSTS.add(h.lower())
 
 
 def _needs_impersonate(url: str) -> bool:
@@ -128,19 +136,30 @@ def _add_impersonate_if_needed(ydl_opts: dict, url: str) -> dict:
     return ydl_opts
 
 
+# Platform-name labels: hostname-substring → friendly name. Core ships
+# mainstream platforms. Plugins can append via register_platform_label.
+_PLATFORM_LABELS: list[tuple[tuple[str, ...], str]] = [
+    (("youtube.com", "youtu.be"),       "youtube"),
+    (("twitch.tv",),                    "twitch"),
+    (("kick.com",),                     "kick"),
+    (("tiktok.com",),                   "tiktok"),
+    (("instagram.com",),                "instagram"),
+    (("facebook.com", "fb.com"),        "facebook"),
+]
+
+
+def register_platform_label(label: str, *host_substrings: str) -> None:
+    """Plugin entry-point: register a friendly label for a hostname pattern."""
+    if host_substrings:
+        _PLATFORM_LABELS.append((tuple(host_substrings), label))
+
+
 def _platform_of(url: str) -> str:
     """Pure classifier — returns a friendly platform name, no allow/block decision."""
     u = url.lower()
-    if "youtube.com" in u or "youtu.be" in u: return "youtube"
-    if "twitch.tv" in u:                       return "twitch"
-    if "kick.com" in u:                        return "kick"
-    if "tiktok.com" in u:                      return "tiktok"
-    if "instagram.com" in u:                   return "instagram"
-    if "facebook.com" in u or "fb.com" in u:   return "facebook"
-    if "chaturbate.com" in u:                  return "chaturbate"
-    if "stripchat.com" in u:                   return "stripchat"
-    if "cam4.com" in u:                        return "cam4"
-    if "bongacams.com" in u or "bongacams.net" in u: return "bongacams"
+    for hosts, label in _PLATFORM_LABELS:
+        if any(h in u for h in hosts):
+            return label
     return "other"
 
 
@@ -678,8 +697,6 @@ async def record_live(
     if cookiepath:
         ydl_opts["cookiefile"] = cookiepath
     _add_impersonate_if_needed(ydl_opts, url)
-    # Apply Stripchat extractor patch (idempotent).
-    from . import stripchat_patch  # noqa: F401
 
     async with _get_live_semaphore():
         loop = asyncio.get_running_loop()

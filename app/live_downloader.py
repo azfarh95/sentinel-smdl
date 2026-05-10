@@ -394,11 +394,15 @@ async def record_live(
     if state["filepath"] and Path(state["filepath"]).exists():
         files = [state["filepath"]]
     else:
-        # Recording may have been written to a partial file under LIVE_DIR
+        # Recording may have been left as a .part file (yt-dlp didn't finalize)
+        # — include those in the fallback search so we don't lose multi-GB
+        # recordings to "files: []" and silently skip the delivery message.
         try:
-            for f in Path(LIVE_DIR).rglob("*.mp4"):
-                if f.stat().st_mtime >= state["started_at"]:
-                    files.append(str(f))
+            patterns = ("*.mp4", "*.mp4.part", "*.mkv", "*.mkv.part", "*.ts")
+            for pat in patterns:
+                for f in Path(LIVE_DIR).rglob(pat):
+                    if f.stat().st_mtime >= state["started_at"] and str(f) not in files:
+                        files.append(str(f))
         except Exception:
             pass
 

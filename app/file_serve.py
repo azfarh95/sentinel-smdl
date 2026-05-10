@@ -77,6 +77,23 @@ def _is_tailnet_source(client_ip: str) -> bool:
         return False
 
 
+def _is_tailscale_serve_proxy(client_ip: str, headers) -> bool:
+    """When `tailscale serve --https=PORT TARGET` proxies a tailnet peer to
+    our backend, the source IP at our app is 127.0.0.1 (same-host loopback)
+    BUT Tailscale injects identity headers like `Tailscale-User-Login`,
+    `Tailscale-User-Display-Name`, `Tailscale-User-Profile-Pic`. CF Tunnel
+    and host-loopback access don't set those headers — clean discriminator.
+    """
+    if client_ip not in ("127.0.0.1", "::1"):
+        return False
+    # Any of these headers means tailscale serve forwarded a tailnet request
+    for h in ("tailscale-user-login", "tailscale-user-display-name",
+              "tailscale-user-profile-pic"):
+        if headers.get(h):
+            return True
+    return False
+
+
 def sign_share_url(filename: str, ttl_sec: int = SHARE_DEFAULT_TTL_SEC) -> str | None:
     """Generate a public share URL for a file. Returns full URL or None if not configured."""
     if not SHARE_SECRET or not PUBLIC_BASE_URL:
@@ -125,12 +142,16 @@ def _verify_share_token(token: str, filename: str) -> bool:
 
 @router.get("/m/{filepath:path}")
 async def serve_tailnet(filepath: str, request: Request):
-    """Tailnet-only file serve. Requires source IP in 100.64.0.0/10."""
+    """Tailnet-only file serve. Accept either:
+       (a) source IP in 100.64.0.0/10 (direct tailnet), or
+       (b) source 127.0.0.1 + Tailscale-User-* header (request came through
+           `tailscale serve` which loopback-forwards from a tailnet peer).
+    """
     client_ip = request.client.host if request.client else ""
-    # Allow X-Forwarded-For only from trusted proxies (none in this setup).
-    # We bind directly; client.host is the real source.
-    if not _is_tailnet_source(client_ip):
-        logger.info("/m/ refused: client_ip=%s not in tailnet", client_ip)
+    direct_tailnet = _is_tailnet_source(client_ip)
+    via_serve     = _is_tailscale_serve_proxy(client_ip, request.headers)
+    if not (direct_tailnet or via_serve):
+        logger.info("/m/ refused: client_ip=%s, no Tailscale-User header", client_ip)
         raise HTTPException(status_code=403, detail="Tailnet-only endpoint")
 
     resolved = _resolve_safe(filepath)

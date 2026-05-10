@@ -130,10 +130,13 @@ async def build() -> Application:
 
         if info.get("error"):
             is_private = info.get("is_private", False)
-            err_text = (
-                t("private_account", lang) if is_private
-                else t("could_not_identify", lang, error=info["error"][:200])
-            )
+            err = info["error"]
+            if "mouflon" in err.lower():
+                err_text = t("live_mouflon_blocked", lang)
+            elif is_private:
+                err_text = t("private_account", lang)
+            else:
+                err_text = t("could_not_identify", lang, error=err[:200])
             await status_msg.edit_text(err_text)
             return
 
@@ -216,6 +219,8 @@ async def build() -> Application:
                 summary = t("live_user_stopped", lang, mins=mins, mb=mb)
             elif reason == "session_fail":
                 summary = t("live_session_fail", lang, mins=mins, mb=mb)
+            elif reason == "mouflon_blocked":
+                summary = t("live_mouflon_blocked", lang)
             elif reason == "no_extractor":
                 attempts = _live_url_fail_count[fail_key]
                 if attempts >= LIVE_NO_EXTRACTOR_RETRY_BUDGET:
@@ -238,7 +243,12 @@ async def build() -> Application:
 
             await status_msg.edit_text(summary)
 
-            if files:
+            # Mouflon-blocked recordings are ad/promo content, not what the
+            # user asked for — skip file delivery entirely so the bot doesn't
+            # spam users with 24-second Stripchat ads.
+            skip_delivery = reason == "mouflon_blocked"
+
+            if files and not skip_delivery:
                 first = files[0]
                 first_path = Path(first)
                 size_mb = round(first_path.stat().st_size / 1024 / 1024, 1) if first_path.exists() else 0
@@ -254,6 +264,12 @@ async def build() -> Application:
                     # signed URLs scale better than waiting on a 2 GB upload).
                     links = _build_delivery_links(first)
                     await msg.reply_text(_format_delivery_message(size_mb, links, lang=lang))
+            elif files and skip_delivery:
+                # Clean up the captured ad file so it doesn't pile up on disk.
+                try:
+                    Path(files[0]).unlink(missing_ok=True)
+                except Exception:
+                    pass
             return
 
         # ── Normal (non-live) download ─────────────────────────────────────────

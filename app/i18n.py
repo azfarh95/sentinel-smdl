@@ -64,6 +64,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "live_platform_not_allowed": "⚠ {detail}",
         "live_disk_low":        "⚠ {detail}",
         "live_other_abort":     "⚠ Stopped: {reason} · {mins} min · {mb:.0f} MB · {detail}",
+        "live_mouflon_blocked": "🛡 Stripchat anti-recording (Mouflon) blocked this stream. Only a short ad was served. The room is gated against bot recordings.",
 
         # /stop_livestream + /live_status
         "no_active_live":       "No active livestream recording in this chat.",
@@ -147,6 +148,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "live_platform_not_allowed": "⚠ {detail}",
         "live_disk_low":        "⚠ {detail}",
         "live_other_abort":     "⚠ Остановлено: {reason} · {mins} мин · {mb:.0f} МБ · {detail}",
+        "live_mouflon_blocked": "🛡 Защита Stripchat (Mouflon) заблокировала стрим. Сервер выдал короткую рекламу вместо эфира. Эта комната закрыта для бот-записей.",
 
         # /stop_livestream + /live_status
         "no_active_live":       "В этом чате нет активной записи эфира.",

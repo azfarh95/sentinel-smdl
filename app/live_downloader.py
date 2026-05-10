@@ -617,6 +617,8 @@ async def record_live(
                 # That isn't a real error — it's the user-stop landing.
                 if stop_flag is not None and stop_flag.get("stop"):
                     raise LiveAbort("user_stopped", "stop requested by user")
+                if "mouflon" in msg.lower():
+                    raise LiveAbort("mouflon_blocked", msg[:300])
                 if _is_auth_failure(msg):
                     raise LiveAbort("session_fail", msg[:300])
                 if _is_no_extractor(msg):
@@ -705,6 +707,22 @@ async def record_live(
             bytes_total = sum(Path(f).stat().st_size for f in files)
         except Exception:
             pass
+
+    # Defensive Mouflon heuristic: if a Stripchat-family "natural end" recording
+    # came back in <60 sec with <10 MB, it's almost certainly the Mouflon
+    # advert (a 24-second VOD ad served instead of the real stream). Reclassify
+    # so the bot reports honestly and doesn't deliver an ad as the file.
+    if (
+        abort_reason == "stream_ended"
+        and elapsed < 60
+        and bytes_total < 10 * 1024 * 1024
+        and any(h in url.lower() for h in ("stripchat.com", "xhamsterlive.com"))
+    ):
+        abort_reason = "mouflon_blocked"
+        state["abort_detail"] = (
+            "Stripchat Mouflon anti-recording intercepted the stream. "
+            "Only a short ad/promo was captured."
+        )
 
     return {
         "ok":               abort_reason == "stream_ended",

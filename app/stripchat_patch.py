@@ -83,11 +83,56 @@ def _patched_real_extract(self, url):
         if isinstance(h, str) and h and h not in hosts:
             hosts.append(h)
 
+    # Mouflon anti-recording probe. Stripchat's CDN serves a 24-second VOD
+    # advert playlist (tag: #EXT-X-MOUFLON-ADVERT) to non-browser clients
+    # instead of the real live HLS, even with TLS impersonation + cookies +
+    # Referer. The ad playlist has EXT-X-PLAYLIST-TYPE:VOD + EXT-X-ENDLIST,
+    # so yt-dlp downloads ~1 MB of promo content and considers the recording
+    # "ended naturally" — useless. Detect and fail clearly.
     formats = []
     for host in hosts:
+        master_url = f'https://edge-hls.{host}/hls/{stream_name}/master/{stream_name}_auto.m3u8'
+        # Probe the master playlist first so we can read the variants and
+        # check the first variant for the Mouflon-advert marker.
+        master = None
+        try:
+            master = self._download_webpage(
+                master_url, video_id,
+                note=f'Probing master playlist (host={host})',
+                errnote='Failed to fetch master playlist',
+                fatal=False,
+            )
+        except Exception:
+            pass
+        if not master:
+            continue
+
+        # Pull variant URLs from the master and probe one for Mouflon.
+        import re as _re
+        variant_urls = _re.findall(r'^https?://[^\s]+\.m3u8.*$', master, _re.MULTILINE)
+        if variant_urls:
+            try:
+                variant = self._download_webpage(
+                    variant_urls[0], video_id,
+                    note='Probing variant for Mouflon-advert',
+                    errnote='Variant fetch failed',
+                    fatal=False,
+                )
+            except Exception:
+                variant = None
+            if variant and 'MOUFLON-ADVERT' in variant:
+                raise ExtractorError(
+                    'Stripchat anti-recording (Mouflon) active. The CDN is '
+                    'serving the bot-defense ad playlist instead of the live '
+                    'stream. This stream cannot be recorded without a '
+                    'logged-in browser session that bypasses Mouflon.',
+                    expected=True,
+                )
+
+        # Clean playlist — proceed with format extraction.
         formats = self._extract_m3u8_formats(
-            f'https://edge-hls.{host}/hls/{stream_name}/master/{stream_name}_auto.m3u8',
-            video_id, ext='mp4', m3u8_id='hls', fatal=False, live=True,
+            master_url, video_id, ext='mp4', m3u8_id='hls',
+            fatal=False, live=True,
         )
         if formats:
             break

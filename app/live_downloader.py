@@ -226,12 +226,26 @@ async def record_live(
                 state["abort_detail"] = err[:300]
                 raise LiveAbort("session_fail", err[:300])
 
+    # Bridge yt-dlp's own logger into ours so we can SEE what it's doing.
+    # With quiet: True (the previous default) yt-dlp errors got swallowed,
+    # leaving 0-byte .part files with no diagnostic trail.
+    class _YtdlpLogger:
+        def debug(self, msg):
+            if msg.startswith("[debug]"):
+                logger.debug("yt-dlp: %s", msg)
+            else:
+                logger.info("yt-dlp: %s", msg)
+        def info(self, msg):    logger.info("yt-dlp: %s", msg)
+        def warning(self, msg): logger.warning("yt-dlp: %s", msg)
+        def error(self, msg):   logger.error("yt-dlp: %s", msg)
+
     ydl_opts = {
         "format":               "bestvideo[height<=1080]+bestaudio/best",
         "outtmpl":              f"{LIVE_DIR}/%(extractor)s/%(uploader,uploader_id)s/%(title).80s.%(timestamp)s.%(ext)s",
         "merge_output_format":  "mp4",
-        "quiet":                True,
-        "no_warnings":          True,
+        "logger":               _YtdlpLogger(),
+        "quiet":                False,
+        "no_warnings":          False,
         "progress_hooks":       [hook],
         "wait_for_video":       (1, 30),  # if 'is_upcoming', poll up to 30s — anything longer, give up
         # CRITICAL: zero retries. Auth/session failures should NOT loop.

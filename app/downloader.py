@@ -31,6 +31,10 @@ _SITE_COOKIE_MAP = {
     "twitter.com":   "twitter",
     "facebook.com":  "facebook",
     "fb.com":        "facebook",
+    "twitch.tv":     "twitch",
+    "kick.com":      "kick",
+    "youtube.com":   "youtube",
+    "youtu.be":      "youtube",
 }
 
 

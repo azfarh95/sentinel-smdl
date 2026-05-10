@@ -169,6 +169,13 @@ async def record_live(
 
     Path(LIVE_DIR).mkdir(parents=True, exist_ok=True)
 
+    # Capture the *running* event loop on the calling (asyncio) thread BEFORE
+    # we hand off to run_in_executor. The hook runs in the executor's worker
+    # thread where asyncio.get_event_loop() returns a fresh, non-running loop
+    # on Python 3.12 — calling run_coroutine_threadsafe on that is a silent
+    # no-op. Capturing here and closing over it fixes that.
+    main_loop = asyncio.get_running_loop()
+
     state = {
         "started_at": time.time(),
         "last_heartbeat": 0.0,
@@ -193,10 +200,10 @@ async def record_live(
                     "bytes":           state["bytes"],
                     "detail":          "live",
                 }),
-                asyncio.get_event_loop(),
+                main_loop,
             )
         except RuntimeError:
-            # No running loop (we're in run_in_executor). Fire-and-forget.
+            # Loop not running — fire-and-forget.
             pass
 
     def hook(d):

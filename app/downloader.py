@@ -118,13 +118,17 @@ async def identify_post(url: str) -> dict:
         else:
             media_type, count = "video", 1
 
+    is_live = bool(info.get("is_live")) or (info.get("live_status") or "").lower() in ("is_live", "is_upcoming", "post_live")
+
     return {
         "platform":    info.get("extractor_key", "unknown"),
         "uploader":    info.get("uploader") or info.get("channel"),
         "uploader_id": info.get("uploader_id") or info.get("channel_id"),
-        "media_type":  media_type,
+        "media_type":  "live" if is_live else media_type,
         "count":       count,
         "is_private":  False,
+        "is_live":     is_live,
+        "live_status": (info.get("live_status") or "").lower() or None,
         "title":       info.get("title"),
     }
 

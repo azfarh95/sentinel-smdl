@@ -4,5 +4,12 @@
   "default_quality": "1080p",
   "max_concurrent_downloads": 2,
   "delete_after_send": false,
-  "temp_ttl_hours": 24
+  "temp_ttl_hours": 24,
+
+  "live_enabled": true,
+  "live_max_concurrent": 1,
+  "live_heartbeat_seconds": 300,
+  "live_min_free_disk_gb": 10,
+  "live_abort_on_session_fail": true,
+  "live_platforms": ["youtube", "twitch", "kick"]
 }

@@ -33,6 +33,12 @@ _DEFAULTS: dict = {
     # adds up quickly on long recordings. 720p60 ≈ ~3.5 Mbps = ~25 MB/min.
     # 480p ≈ ~1.5 Mbps = ~12 MB/min. Set to 0 for unlimited (== source).
     "live_max_height":        720,
+    # Stream monitor (V1) — polls a watchlist of channel/streamer URLs and
+    # DMs the user when one goes live, with Yes/No inline buttons to start
+    # recording. Watchlist is owned/managed via /watch /unwatch /watchlist.
+    "monitor_enabled":              True,
+    "monitor_poll_interval_seconds": 300,   # 5 min — respects rate-limits, low overhead
+    "monitor_probe_timeout_seconds": 30,    # max wait per yt-dlp probe before treating as offline
 }
 
 logger = logging.getLogger(__name__)
@@ -74,3 +80,8 @@ LIVE_MIN_FREE_DISK_GB:      int       = int(_cfg["live_min_free_disk_gb"])
 LIVE_ABORT_ON_SESSION_FAIL: bool      = bool(_cfg["live_abort_on_session_fail"])
 LIVE_PLATFORMS:             set[str]  = {str(p).lower() for p in _cfg["live_platforms"]}
 LIVE_MAX_HEIGHT:            int       = int(_cfg["live_max_height"])
+
+# Stream monitor (V1)
+MONITOR_ENABLED:                bool = bool(_cfg["monitor_enabled"])
+MONITOR_POLL_INTERVAL_SECONDS:  int  = int(_cfg["monitor_poll_interval_seconds"])
+MONITOR_PROBE_TIMEOUT_SECONDS:  int  = int(_cfg["monitor_probe_timeout_seconds"])

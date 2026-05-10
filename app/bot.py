@@ -5,14 +5,21 @@ import logging
 import os
 from pathlib import Path
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from .config import ALLOWED_CHAT_IDS, DELETE_AFTER_SEND, LIVE_ENABLED, OWNER_CHAT_ID
 from .downloader import download, identify_post, send_files, _resolve_cookies
 from .interceptor import find_video_url
 from .live_downloader import detect_live, record_live
-from . import file_serve, telethon_uploader
+from . import file_serve, stream_monitor, telethon_uploader
 
 DOWNLOADS_DIR = os.environ.get("DOWNLOADS_DIR", "/downloads")
 
@@ -350,8 +357,171 @@ async def build() -> Application:
             f"⏱ {elapsed_min} min · use /stop_livestream to halt"
         )
 
+    # ── Stream monitor commands ────────────────────────────────────────────
+    def _is_owner(chat_id: int) -> bool:
+        # Watchlist is a global single-list resource — owner-only by design (V1).
+        return OWNER_CHAT_ID is not None and chat_id == OWNER_CHAT_ID
+
+    async def handle_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not _is_owner(chat_id):
+            await update.message.reply_text("Owner only.")
+            return
+        if not ctx.args:
+            await update.message.reply_text(
+                "Usage: /watch <url>\nExample: /watch https://twitch.tv/some_streamer"
+            )
+            return
+        url = ctx.args[0]
+        label = " ".join(ctx.args[1:]) if len(ctx.args) > 1 else None
+        added, msg_text = stream_monitor.add_to_watchlist(url, label=label, added_by=chat_id)
+        await update.message.reply_text(("✅ " if added else "ℹ ") + msg_text)
+
+    async def handle_unwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not _is_owner(chat_id):
+            await update.message.reply_text("Owner only.")
+            return
+        if not ctx.args:
+            await update.message.reply_text("Usage: /unwatch <url>")
+            return
+        removed, msg_text = stream_monitor.remove_from_watchlist(ctx.args[0])
+        await update.message.reply_text(("🗑 " if removed else "ℹ ") + msg_text)
+
+    async def handle_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not _is_owner(chat_id):
+            await update.message.reply_text("Owner only.")
+            return
+        entries = stream_monitor.list_watchlist()
+        if not entries:
+            await update.message.reply_text("Watchlist is empty.\nAdd one with: /watch <url>")
+            return
+        lines = [f"📺 Watchlist ({len(entries)})"]
+        for e in entries:
+            label = e.get("label") or e.get("url") or "?"
+            url = e.get("url") or "?"
+            status = stream_monitor._last_status.get(url, "?")
+            badge = {"live": "🔴", "offline": "⚫", "?": "⚪"}.get(status, "⚪")
+            lines.append(f"{badge} {label}\n   {url}")
+        await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
+
+    async def _run_monitor_recording(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, url: str):
+        """Background task spawned from monitor 'Yes' button. Keeps the live
+        flow self-contained — does NOT share retry-budget state with manual
+        flow (monitor URLs are owner-vetted, no retry-budget gate needed)."""
+        platform = stream_monitor._probe_is_live(url)  # cheap re-probe
+        uploader = (platform or {}).get("uploader") or "stream"
+        status_msg = await ctx.bot.send_message(
+            chat_id=chat_id,
+            text=f"🔴 Recording · @{uploader}\nStarting…",
+        )
+        cookiepath = _resolve_cookies(url)
+        stop_flag = {"stop": False}
+        _active_live_jobs[chat_id] = {
+            "stop_flag":  stop_flag,
+            "url":        url,
+            "started_at": __import__("time").time(),
+            "uploader":   uploader,
+            "platform":   "monitor",
+        }
+
+        async def _on_progress(p):
+            elapsed = p.get("elapsed_seconds", 0)
+            mb = (p.get("bytes", 0)) / (1024 * 1024)
+            mins = elapsed // 60
+            try:
+                await status_msg.edit_text(
+                    f"🔴 Recording · @{uploader}\n"
+                    f"⏱ {mins} min · 💾 {mb:.0f} MB · still live"
+                )
+            except Exception:
+                pass
+
+        try:
+            live_result = await record_live(url, cookiepath, on_progress=_on_progress, stop_flag=stop_flag)
+        except Exception as e:
+            await status_msg.edit_text(f"⚠ Recording crashed: {e}")
+            return
+        finally:
+            _active_live_jobs.pop(chat_id, None)
+
+        mins = live_result["duration_seconds"] // 60
+        mb = live_result["bytes_downloaded"] / (1024 * 1024)
+        files = live_result.get("files") or []
+        reason = live_result["abort_reason"]
+        if reason == "stream_ended":
+            summary = f"✓ Recording ended naturally · {mins} min · {mb:.0f} MB"
+        elif reason == "user_stopped":
+            summary = f"⏹ Stopped by /stop_livestream · {mins} min · {mb:.0f} MB saved"
+        elif reason == "session_fail":
+            summary = f"⚠ Session/auth failed at {mins} min · {mb:.0f} MB saved"
+        else:
+            summary = f"⚠ Stopped: {reason} · {mins} min · {mb:.0f} MB · {live_result.get('detail', '')[:120]}"
+        await status_msg.edit_text(summary)
+
+        if files:
+            first = files[0]
+            first_path = Path(first)
+            size_mb = round(first_path.stat().st_size / 1024 / 1024, 1) if first_path.exists() else 0
+            if size_mb < 50:
+                with open(first, "rb") as f:
+                    await ctx.bot.send_video(
+                        chat_id=chat_id, video=f,
+                        read_timeout=180, write_timeout=180,
+                    )
+            else:
+                links = _build_delivery_links(first)
+                await ctx.bot.send_message(chat_id=chat_id, text=_format_delivery_message(size_mb, links))
+
+    async def handle_monitor_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id is None or not _is_owner(chat_id):
+            try:
+                await query.answer("Owner only", show_alert=True)
+            except Exception:
+                pass
+            return
+        data = query.data or ""
+        if not data.startswith("mon:"):
+            return
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            return
+        action, url = parts[1], parts[2]
+        if action == "skip":
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.edit_message_text(
+                    text=(query.message.text or "") + "\n\n⏭ Skipped",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            return
+        if action == "rec":
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.edit_message_text(
+                    text=(query.message.text or "") + "\n\n🎬 Recording starting…",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            # Fire-and-forget — record_live runs for hours and must not block
+            # other update processing.
+            asyncio.create_task(_run_monitor_recording(ctx, chat_id, url))
+
     _app.add_handler(CommandHandler("stop_livestream", handle_stop_livestream))
     _app.add_handler(CommandHandler("stop_livestream_download", handle_stop_livestream))  # alias matching user phrasing
     _app.add_handler(CommandHandler("live_status", handle_live_status))
+    _app.add_handler(CommandHandler("watch", handle_watch))
+    _app.add_handler(CommandHandler("unwatch", handle_unwatch))
+    _app.add_handler(CommandHandler("watchlist", handle_watchlist))
+    _app.add_handler(CallbackQueryHandler(handle_monitor_callback, pattern=r"^mon:"))
     _app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return _app

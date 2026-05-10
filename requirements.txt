@@ -5,3 +5,9 @@ yt-dlp
 gallery-dl
 aiosqlite
 telethon==1.40.0
+# curl_cffi enables yt-dlp's --impersonate flag (Chrome TLS fingerprint).
+# Required for Cloudflare-protected sites (Stripchat, Chaturbate, etc.) that
+# return HTTP 406 on default Python/urllib TLS handshake.
+# Pinned to <0.15 because yt-dlp 2026.03.17 only supports 0.10.x–0.14.x;
+# 0.15+ raises ImportError at module load.
+curl_cffi>=0.10,<0.15

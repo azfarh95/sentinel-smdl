@@ -97,6 +97,35 @@ def _get_live_semaphore() -> asyncio.Semaphore:
     return _live_semaphore
 
 
+# Hosts behind Cloudflare bot management. yt-dlp's default TLS fingerprint
+# gets HTTP 406 from these — add --impersonate=chrome via curl_cffi to bypass.
+_CLOUDFLARE_HOSTS = (
+    "stripchat.com", "xhamsterlive.com", "chaturbate.com",
+    "cam4.com", "bongacams.com", "bongacams.net",
+)
+
+
+def _needs_impersonate(url: str) -> bool:
+    u = url.lower()
+    return any(h in u for h in _CLOUDFLARE_HOSTS)
+
+
+def _add_impersonate_if_needed(ydl_opts: dict, url: str) -> dict:
+    """Mutate ydl_opts to add Chrome TLS impersonation for sites that need it.
+    Silent no-op if curl_cffi isn't installed (logs a warning instead)."""
+    if not _needs_impersonate(url):
+        return ydl_opts
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        ydl_opts["impersonate"] = ImpersonateTarget("chrome")
+    except ImportError:
+        logger.warning(
+            "Cloudflare-protected URL detected but curl_cffi not installed — "
+            "yt-dlp will likely get HTTP 406. Install with: pip install curl_cffi"
+        )
+    return ydl_opts
+
+
 def _platform_of(url: str) -> str:
     """Pure classifier — returns a friendly platform name, no allow/block decision."""
     u = url.lower()
@@ -549,6 +578,7 @@ async def record_live(
         ydl_opts["live_from_start"] = True
     if cookiepath:
         ydl_opts["cookiefile"] = cookiepath
+    _add_impersonate_if_needed(ydl_opts, url)
 
     async with _get_live_semaphore():
         loop = asyncio.get_running_loop()

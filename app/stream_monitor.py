@@ -97,6 +97,28 @@ def list_watchlist() -> list[dict[str, Any]]:
     return _load_watchlist()
 
 
+def snooze_streamer(url: str, minutes: int) -> int:
+    """Set snoozed_until on a watchlist entry to now + minutes. Returns the
+    epoch seconds at which the snooze expires (0 if URL not in watchlist)."""
+    entries = _load_watchlist()
+    expires_at = int(time.time() + minutes * 60)
+    found = False
+    for e in entries:
+        if e.get("url") == url:
+            e["snoozed_until"] = expires_at
+            found = True
+            break
+    if found:
+        _save_watchlist(entries)
+        return expires_at
+    return 0
+
+
+def is_snoozed(entry: dict[str, Any]) -> bool:
+    snoozed_until = int(entry.get("snoozed_until") or 0)
+    return snoozed_until > time.time()
+
+
 def _probe_is_live(url: str) -> dict[str, Any]:
     """Synchronous yt-dlp probe. Returns {is_live, title, uploader, error}.
 
@@ -160,6 +182,19 @@ async def _poll_once(app: Application, entries: list[dict[str, Any]]) -> None:
         new = "live" if is_live else "offline"
         _last_status[url] = new
 
+        # Snooze check: if user explicitly snoozed this streamer, skip the
+        # prompt regardless of state transition. We still update _last_status
+        # above so that when snooze expires we don't immediately re-prompt
+        # for a streamer who's been live the whole time.
+        if is_snoozed(entry):
+            if prev != "live" and is_live:
+                until = int(entry.get("snoozed_until") or 0)
+                logger.info(
+                    "monitor: %s went LIVE but is snoozed until %s — skipping prompt",
+                    label, until,
+                )
+            continue
+
         if prev != "live" and is_live:
             # OFFLINE → LIVE transition. Notify owner with inline keyboard.
             uploader = result.get("uploader") or label
@@ -169,10 +204,16 @@ async def _poll_once(app: Application, entries: list[dict[str, Any]]) -> None:
                 "monitor_live_prompt", owner_lang,
                 uploader=uploader, title=title, url=url,
             )
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton(t("btn_yes_record", owner_lang), callback_data=f"mon:rec:{url}"),
-                InlineKeyboardButton(t("btn_skip", owner_lang),       callback_data=f"mon:skip:{url}"),
-            ]])
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(t("btn_yes_record", owner_lang), callback_data=f"mon:rec:{url}"),
+                    InlineKeyboardButton(t("btn_skip", owner_lang),       callback_data=f"mon:skip:{url}"),
+                ],
+                [
+                    InlineKeyboardButton(t("btn_snooze_1h", owner_lang), callback_data=f"mon:snooze1h:{url}"),
+                    InlineKeyboardButton(t("btn_snooze_8h", owner_lang), callback_data=f"mon:snooze8h:{url}"),
+                ],
+            ])
             try:
                 await app.bot.send_message(
                     chat_id=OWNER_CHAT_ID,

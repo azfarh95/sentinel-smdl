@@ -299,6 +299,59 @@ def _finalize_partial_recording(path: str) -> str:
         return path
 
 
+async def _periodic_progress_reporter(state: dict, on_progress, interval_sec: int = 60):
+    """Timer-based progress emitter — runs every interval_sec.
+
+    Why this exists: yt-dlp's progress hook only fires when yt-dlp is the
+    downloader. For Twitch live HLS, yt-dlp delegates to ffmpeg, and the
+    hook never fires during the actual recording — only at start/finish.
+    Without this timer, the user sees a stale 'Recording 1 min · 43 MB'
+    forever until the recording stops.
+
+    This task reads the current .part file size from disk so progress
+    updates work regardless of which downloader yt-dlp picked.
+    """
+    while not state.get("done"):
+        try:
+            await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            return
+        if state.get("done"):
+            return
+        # If we don't yet know the output filepath, hunt for the newest
+        # .part file in LIVE_DIR (created since this recording started).
+        filepath = state.get("filepath")
+        if not filepath:
+            try:
+                started = state.get("started_at", 0)
+                candidates = [
+                    p for p in Path(LIVE_DIR).rglob("*.part")
+                    if p.stat().st_mtime >= started
+                ]
+                if candidates:
+                    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+                    filepath = str(newest)
+                    state["filepath"] = filepath
+            except Exception:
+                pass
+        # Read on-disk size for the .part (or completed .mp4) file
+        if filepath:
+            try:
+                state["bytes"] = Path(filepath).stat().st_size
+            except (OSError, FileNotFoundError):
+                pass
+        elapsed = int(time.time() - state["started_at"])
+        try:
+            await on_progress({
+                "status":          "recording",
+                "elapsed_seconds": elapsed,
+                "bytes":           state["bytes"],
+                "detail":          "live",
+            })
+        except Exception:
+            pass  # rate-limited / message-edit-not-modified / etc.
+
+
 async def _stop_deadline_watchdog(stop_flag: dict, deadline_sec: int = 15):
     """Bridge-style watchdog: when stop_flag is set, give graceful path
     deadline_sec to terminate. If ffmpeg still alive after that, SIGTERM
@@ -505,6 +558,14 @@ async def record_live(
                 _stop_deadline_watchdog(stop_flag, deadline_sec=15)
             )
 
+        # Timer-based progress reporter — guarantees periodic UI updates
+        # even when ffmpeg is the downloader and yt-dlp's hook isn't firing.
+        progress_task = None
+        if on_progress is not None:
+            progress_task = asyncio.create_task(
+                _periodic_progress_reporter(state, on_progress, interval_sec=60)
+            )
+
         def _run():
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -546,11 +607,20 @@ async def record_live(
             abort_reason = "unknown"
             state["abort_detail"] = str(e)[:300]
         finally:
+            # Mark recording done so the progress reporter exits its loop
+            state["done"] = True
             # Cancel the watchdog if recording finished naturally before deadline
             if watchdog_task and not watchdog_task.done():
                 watchdog_task.cancel()
                 try:
                     await watchdog_task
+                except asyncio.CancelledError:
+                    pass
+            # Cancel the progress reporter
+            if progress_task and not progress_task.done():
+                progress_task.cancel()
+                try:
+                    await progress_task
                 except asyncio.CancelledError:
                     pass
             # Defensive: kill any ffmpeg/ffprobe children. With native HLS

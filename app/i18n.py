@@ -53,7 +53,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "live_disabled":        "{platform} · @{uploader} · 🔴 LIVE\nLive recording is disabled in config (live_enabled=false).",
         "live_site_unsupported": "{platform} · 🔴 LIVE\n⚠ Site not supported / not configured yet (yt-dlp can't extract a live stream from this URL after {budget} attempts).\n\nIf you think this should work, the site may need a yt-dlp extractor update or cookies.",
         "live_started":         "{platform} · @{uploader} · 🔴 LIVE\nRecording started — heartbeats every 5 min. Will auto-stop on stream end or session failure.",
-        "live_progress":        "🔴 Recording · @{uploader}\n⏱ {mins} min · 💾 {mb:.0f} MB · still live",
+        "live_progress":        "🔴 Recording · @{uploader}\n⏱ {duration} · 💾 {mb:.1f} MB",
         "live_ended_natural":   "✓ Recording ended naturally · {mins} min · {mb:.0f} MB",
         "live_user_stopped":    "⏹ Stopped by /stop_livestream · {mins} min · {mb:.0f} MB saved",
         "live_session_fail":    "⚠ Session/auth failed at {mins} min · {mb:.0f} MB saved\nCookie likely expired — refresh cookies and retry.",
@@ -66,8 +66,8 @@ STRINGS: dict[str, dict[str, str]] = {
         # /stop_livestream + /live_status
         "no_active_live":       "No active livestream recording in this chat.",
         "no_active_live_short": "No active livestream recording.",
-        "stop_requested":       "⏹ Stop requested for {platform} · @{uploader} ({elapsed_min} min in). Finalizing the file…",
-        "live_status_active":   "🔴 Recording · {platform} · @{uploader}\n⏱ {elapsed_min} min · use /stop_livestream to halt",
+        "stop_requested":       "⏹ Stop requested for {platform} · @{uploader} ({duration} in). Finalizing the file…",
+        "live_status_active":   "🔴 Recording · {platform} · @{uploader}\n⏱ {duration} · use /stop_livestream to halt",
 
         # Normal download
         "downloading":          "{platform} · @{uploader} · {media_label}\nDownloading...",
@@ -105,6 +105,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "monitor_starting":     "🎬 Recording starting…",
         "monitor_record_starting": "🔴 Recording · @{uploader}\nStarting…",
         "monitor_recording_crashed": "⚠ Recording crashed: {error}",
+        "btn_snooze_1h":        "💤 1h",
+        "btn_snooze_8h":        "😴 8h",
+        "monitor_snoozed":      "💤 Snoozed for {duration} (until {until})",
     },
     "ru": {
         # Generic
@@ -127,7 +130,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "live_disabled":        "{platform} · @{uploader} · 🔴 ЭФИР\nЗапись эфиров отключена в настройках (live_enabled=false).",
         "live_site_unsupported": "{platform} · 🔴 ЭФИР\n⚠ Сайт не поддерживается / ещё не настроен (yt-dlp не смог извлечь поток после {budget} попыток).\n\nЕсли это должно работать — возможно, нужно обновить yt-dlp или cookies.",
         "live_started":         "{platform} · @{uploader} · 🔴 ЭФИР\nЗапись началась — обновления каждые 5 минут. Автоматически остановится при завершении эфира или ошибке сессии.",
-        "live_progress":        "🔴 Запись · @{uploader}\n⏱ {mins} мин · 💾 {mb:.0f} МБ · эфир продолжается",
+        "live_progress":        "🔴 Запись · @{uploader}\n⏱ {duration} · 💾 {mb:.1f} МБ",
         "live_ended_natural":   "✓ Запись завершилась естественно · {mins} мин · {mb:.0f} МБ",
         "live_user_stopped":    "⏹ Остановлено через /stop_livestream · {mins} мин · {mb:.0f} МБ сохранено",
         "live_session_fail":    "⚠ Ошибка сессии/авторизации на {mins} мин · {mb:.0f} МБ сохранено\nВероятно, истёк срок cookie — обновите cookie и повторите.",
@@ -140,8 +143,8 @@ STRINGS: dict[str, dict[str, str]] = {
         # /stop_livestream + /live_status
         "no_active_live":       "В этом чате нет активной записи эфира.",
         "no_active_live_short": "Нет активной записи эфира.",
-        "stop_requested":       "⏹ Запрошена остановка {platform} · @{uploader} ({elapsed_min} мин в эфире). Завершаю файл…",
-        "live_status_active":   "🔴 Запись · {platform} · @{uploader}\n⏱ {elapsed_min} мин · /stop_livestream чтобы остановить",
+        "stop_requested":       "⏹ Запрошена остановка {platform} · @{uploader} ({duration} в эфире). Завершаю файл…",
+        "live_status_active":   "🔴 Запись · {platform} · @{uploader}\n⏱ {duration} · /stop_livestream чтобы остановить",
 
         # Normal download
         "downloading":          "{platform} · @{uploader} · {media_label}\nСкачиваю...",
@@ -179,6 +182,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "monitor_starting":     "🎬 Запись начинается…",
         "monitor_record_starting": "🔴 Запись · @{uploader}\nЗапуск…",
         "monitor_recording_crashed": "⚠ Запись прервалась с ошибкой: {error}",
+        "btn_snooze_1h":        "💤 1ч",
+        "btn_snooze_8h":        "😴 8ч",
+        "monitor_snoozed":      "💤 Тишина на {duration} (до {until})",
     },
 }
 
@@ -239,3 +245,16 @@ def t(key: str, lang: str = DEFAULT_LANG, **kwargs) -> str:
     except (KeyError, IndexError, ValueError) as e:
         logger.warning("i18n: format failed for key=%s lang=%s: %s", key, lang, e)
         return template
+
+
+def format_duration(seconds: int | float) -> str:
+    """Format a duration as H:MM:SS (or MM:SS for under an hour).
+
+    Examples: 7 → '0:07', 332 → '5:32', 3932 → '1:05:32'.
+    """
+    s = int(max(0, seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m}:{sec:02d}"

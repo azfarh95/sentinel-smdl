@@ -17,7 +17,7 @@ from telegram.ext import (
 
 from .config import ALLOWED_CHAT_IDS, DELETE_AFTER_SEND, LIVE_ENABLED, OWNER_CHAT_ID
 from .downloader import download, identify_post, send_files, _resolve_cookies
-from .i18n import LANG_LABELS, SUPPORTED_LANGS, get_lang, set_lang, t
+from .i18n import LANG_LABELS, SUPPORTED_LANGS, format_duration, get_lang, set_lang, t
 from .interceptor import find_video_url
 from .live_downloader import detect_live, record_live
 from . import file_serve, stream_monitor, telethon_uploader
@@ -181,13 +181,13 @@ async def build() -> Application:
                 elapsed = p.get("elapsed_seconds", 0)
                 bytes_  = p.get("bytes", 0)
                 mb      = bytes_ / (1024 * 1024) if bytes_ else 0
-                mins    = elapsed // 60
                 try:
                     await status_msg.edit_text(
-                        t("live_progress", lang, uploader=uploader, mins=mins, mb=mb)
+                        t("live_progress", lang,
+                          uploader=uploader, duration=format_duration(elapsed), mb=mb)
                     )
                 except Exception:
-                    pass  # rate-limited or message gone
+                    pass  # rate-limited / not modified / message gone
 
             try:
                 live_result = await record_live(url, cookiepath, on_progress=_on_progress, stop_flag=stop_flag)
@@ -327,10 +327,12 @@ async def build() -> Application:
             await update.message.reply_text(t("no_active_live", lang))
             return
         job["stop_flag"]["stop"] = True
-        elapsed_min = int((__import__("time").time() - job["started_at"]) // 60)
-        logger.info("  stop_flag set; %s min elapsed; replying confirmation", elapsed_min)
+        elapsed_sec = int(__import__("time").time() - job["started_at"])
+        logger.info("  stop_flag set; %s sec elapsed; replying confirmation", elapsed_sec)
         await update.message.reply_text(
-            t("stop_requested", lang, platform=job["platform"], uploader=job["uploader"], elapsed_min=elapsed_min)
+            t("stop_requested", lang,
+              platform=job["platform"], uploader=job["uploader"],
+              duration=format_duration(elapsed_sec))
         )
 
     async def handle_live_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -343,9 +345,11 @@ async def build() -> Application:
         if not job:
             await update.message.reply_text(t("no_active_live_short", lang))
             return
-        elapsed_min = int((__import__("time").time() - job["started_at"]) // 60)
+        elapsed_sec = int(__import__("time").time() - job["started_at"])
         await update.message.reply_text(
-            t("live_status_active", lang, platform=job["platform"], uploader=job["uploader"], elapsed_min=elapsed_min)
+            t("live_status_active", lang,
+              platform=job["platform"], uploader=job["uploader"],
+              duration=format_duration(elapsed_sec))
         )
 
     # ── Stream monitor commands ────────────────────────────────────────────
@@ -397,12 +401,17 @@ async def build() -> Application:
             await update.message.reply_text(t("watchlist_empty", lang))
             return
         lines = [t("watchlist_header", lang, count=len(entries))]
+        from datetime import datetime
         for e in entries:
             label = e.get("label") or e.get("url") or "?"
             url = e.get("url") or "?"
             status = stream_monitor._last_status.get(url, "?")
             badge = {"live": "🔴", "offline": "⚫", "?": "⚪"}.get(status, "⚪")
-            lines.append(f"{badge} {label}\n   {url}")
+            tail = ""
+            if stream_monitor.is_snoozed(e):
+                until = int(e.get("snoozed_until") or 0)
+                tail = f"  💤 until {datetime.fromtimestamp(until).strftime('%H:%M')}"
+            lines.append(f"{badge} {label}{tail}\n   {url}")
         await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
 
     async def handle_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -474,10 +483,10 @@ async def build() -> Application:
         async def _on_progress(p):
             elapsed = p.get("elapsed_seconds", 0)
             mb = (p.get("bytes", 0)) / (1024 * 1024)
-            mins = elapsed // 60
             try:
                 await status_msg.edit_text(
-                    t("live_progress", lang, uploader=uploader, mins=mins, mb=mb)
+                    t("live_progress", lang,
+                      uploader=uploader, duration=format_duration(elapsed), mb=mb)
                 )
             except Exception:
                 pass
@@ -547,6 +556,27 @@ async def build() -> Application:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.edit_message_text(
                     text=(query.message.text or "") + "\n\n" + t("monitor_skipped", lang),
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            return
+        if action in ("snooze1h", "snooze8h"):
+            mins = 60 if action == "snooze1h" else 8 * 60
+            expires_at = stream_monitor.snooze_streamer(url, mins)
+            from datetime import datetime
+            until_str = (
+                datetime.fromtimestamp(expires_at).strftime("%H:%M")
+                if expires_at else "?"
+            )
+            duration_label = "1h" if action == "snooze1h" else "8h"
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.edit_message_text(
+                    text=(query.message.text or "") + "\n\n" + t(
+                        "monitor_snoozed", lang,
+                        duration=duration_label, until=until_str,
+                    ),
                     disable_web_page_preview=True,
                 )
             except Exception:

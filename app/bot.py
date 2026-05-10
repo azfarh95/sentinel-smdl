@@ -30,7 +30,11 @@ def get_application() -> Application:
 
 async def build() -> Application:
     global _app
-    _app = Application.builder().token(SMDL_BOT_TOKEN).build()
+    # concurrent_updates=True is REQUIRED — without it, python-telegram-bot
+    # processes updates sequentially. A long-running live recording would
+    # block /stop_livestream and any other incoming message until the
+    # recording finishes, defeating the whole point of having a stop command.
+    _app = Application.builder().token(SMDL_BOT_TOKEN).concurrent_updates(True).build()
 
     async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         msg = update.effective_message

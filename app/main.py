@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from . import database as db
+from . import file_serve
 from .bot import build
 from .downloader import start_cleanup_loop
 
@@ -45,6 +46,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SM-DL — Social Media Downloader", lifespan=lifespan)
+app.include_router(file_serve.router)
 
 
 @app.get("/health")

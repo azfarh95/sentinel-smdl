@@ -12,7 +12,48 @@ from .config import ALLOWED_CHAT_IDS, DELETE_AFTER_SEND, LIVE_ENABLED, OWNER_CHA
 from .downloader import download, identify_post, send_files, _resolve_cookies
 from .interceptor import find_video_url
 from .live_downloader import detect_live, record_live
-from . import telethon_uploader
+from . import file_serve, telethon_uploader
+
+DOWNLOADS_DIR = os.environ.get("DOWNLOADS_DIR", "/downloads")
+
+
+def _build_delivery_links(filepath: str) -> dict:
+    """Given an absolute filepath under DOWNLOADS_DIR, build the tailnet + share URLs.
+
+    Returns {"tailnet": str | None, "share": str | None, "rel": str}.
+    Both URLs are 'optional' — if Tailscale isn't bound or share secret missing,
+    the corresponding entry is None.
+    """
+    try:
+        rel = str(Path(filepath).resolve().relative_to(Path(DOWNLOADS_DIR).resolve()))
+    except ValueError:
+        rel = Path(filepath).name  # fall back to basename if outside downloads root
+
+    out = {"rel": rel, "tailnet": None, "share": None}
+
+    # Path 2 — tailnet. Resolve the host's tailnet IP from env var (set by
+    # docker-compose once Phase 1.5 binds smdl to the tailnet IP). If unset,
+    # we still emit a hostname fallback that works once MagicDNS is on.
+    tailnet_host = os.environ.get("SMDL_TAILNET_HOST", "sentinel-host.tail.az-sentinel.xyz")
+    out["tailnet"] = f"http://{tailnet_host}:8096/m/{rel}"
+
+    # Path 1 — public signed share. Requires SMDL_PUBLIC_BASE_URL + share secret.
+    share = file_serve.sign_share_url(rel)
+    if share:
+        out["share"] = share
+
+    return out
+
+
+def _format_delivery_message(size_mb: float, links: dict, expires_hours: int = 24) -> str:
+    parts = [f"📁 File ready · {size_mb:.0f} MB"]
+    if links.get("tailnet"):
+        parts.append(f"🔒 Tailnet (you, on mesh):\n{links['tailnet']}")
+    if links.get("share"):
+        parts.append(f"🌍 Share link (anyone, expires in {expires_hours}h):\n{links['share']}")
+    if not links.get("tailnet") and not links.get("share"):
+        parts.append(f"⚠ No delivery method configured. File is at /downloads/{links['rel']}")
+    return "\n\n".join(parts)
 
 # Active livestream recordings, keyed by chat_id.
 # Each entry: {"stop_flag": {"stop": False}, "url": str, "started_at": float}
@@ -163,24 +204,12 @@ async def build() -> Application:
                         await ctx.bot.send_video(chat_id=chat_id, video=f,
                                                  caption=info.get("title"),
                                                  read_timeout=180, write_timeout=180)
-                elif telethon_uploader.is_configured():
-                    # Too big for bot API; fall back to user-account upload (2 GB cap)
-                    await msg.reply_text(f"📤 Uploading {size_mb} MB via user account…")
-                    up = await telethon_uploader.upload_file(
-                        first, chat_id, caption=info.get("title"),
-                    )
-                    if up.get("ok"):
-                        await msg.reply_text(f"✓ Uploaded ({size_mb} MB)")
-                    else:
-                        await msg.reply_text(
-                            f"📁 Saved to `{first}` ({size_mb} MB)\n"
-                            f"User-account upload failed: {up.get('error')} — {up.get('detail','')[:120]}"
-                        )
                 else:
-                    await msg.reply_text(
-                        f"📁 Saved to `{first}` ({size_mb} MB) — too big for Telegram inline send "
-                        f"and user-account uploader is not configured."
-                    )
+                    # Too big for bot API. Send delivery links (tailnet + signed share).
+                    # Skip telethon upload for live recordings (Twitch can be hours long;
+                    # signed URLs scale better than waiting on a 2 GB upload).
+                    links = _build_delivery_links(first)
+                    await msg.reply_text(_format_delivery_message(size_mb, links))
             return
 
         # ── Normal (non-live) download ─────────────────────────────────────────
@@ -223,7 +252,7 @@ async def build() -> Application:
                             pass
             elif send_result.get("error") == "file_too_large":
                 size_mb_local = send_result['size_mb']
-                if telethon_uploader.is_configured():
+                if telethon_uploader.is_configured() and size_mb_local < 1900:  # leave headroom under 2 GB
                     await status_msg.edit_text(f"📤 Uploading {size_mb_local} MB via user account…")
                     up = await telethon_uploader.upload_file(
                         files[0], chat_id, caption=info.get("title"),
@@ -231,15 +260,13 @@ async def build() -> Application:
                     if up.get("ok"):
                         await status_msg.edit_text(f"✓ Uploaded ({size_mb_local} MB)")
                     else:
-                        await status_msg.edit_text(
-                            f"📁 Saved locally at {files[0]} ({size_mb_local} MB)\n"
-                            f"User-account upload failed: {up.get('error')}"
-                        )
+                        # Fall through to delivery links
+                        links = _build_delivery_links(files[0])
+                        await status_msg.edit_text(_format_delivery_message(size_mb_local, links))
                 else:
-                    await status_msg.edit_text(
-                        f"File too large for Telegram ({size_mb_local} MB). "
-                        f"Saved locally at {files[0]}"
-                    )
+                    # Too large or no telethon — go straight to links
+                    links = _build_delivery_links(files[0])
+                    await status_msg.edit_text(_format_delivery_message(size_mb_local, links))
             else:
                 await status_msg.edit_text(f"Send failed: {send_result.get('error')}")
 

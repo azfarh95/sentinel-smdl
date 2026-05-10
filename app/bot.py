@@ -18,10 +18,11 @@ from telegram.ext import (
 from .config import ALLOWED_CHAT_IDS, DELETE_AFTER_SEND, LIVE_ENABLED, OWNER_CHAT_ID
 from .downloader import download, identify_post, send_files, _resolve_cookies
 from .i18n import (
-    LANG_LABELS, SUPPORTED_LANGS,
-    format_duration, format_local_time, format_transcode_summary, format_tz_offset,
-    get_lang, get_transcode_pref, get_tz_offset,
-    set_lang, set_transcode_pref, set_tz_offset, t,
+    ALLOWED_VIDEO_QUALITIES, LANG_LABELS, SUPPORTED_LANGS,
+    format_duration, format_local_time, format_transcode_summary,
+    format_tz_offset, format_video_quality_summary,
+    get_lang, get_transcode_pref, get_tz_offset, get_video_quality,
+    set_lang, set_transcode_pref, set_tz_offset, set_video_quality, t,
 )
 from .interceptor import find_video_url
 from .live_downloader import detect_live, record_live
@@ -284,7 +285,10 @@ async def build() -> Application:
                 t("downloading", lang, platform=platform, uploader=uploader, media_label=media_label)
             )
 
-            result = await download(url, media_type=media_type, is_owner=is_owner)
+            result = await download(
+                url, media_type=media_type, is_owner=is_owner,
+                quality=get_video_quality(chat_id),
+            )
 
             if result.get("error"):
                 await status_msg.edit_text(t("download_failed", lang, error=result["error"]))
@@ -542,6 +546,51 @@ async def build() -> Application:
         except Exception:
             pass
 
+    async def handle_default_video_size(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+            return
+        lang = get_lang(chat_id)
+        current = format_video_quality_summary(get_video_quality(chat_id), lang)
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(t("btn_vq_best", lang), callback_data="vq:set:best"),
+                InlineKeyboardButton(t("btn_vq_1080", lang), callback_data="vq:set:1080p"),
+            ],
+            [
+                InlineKeyboardButton(t("btn_vq_720",  lang), callback_data="vq:set:720p"),
+                InlineKeyboardButton(t("btn_vq_360",  lang), callback_data="vq:set:360p"),
+            ],
+        ])
+        await update.message.reply_text(
+            t("vq_picker", lang, current=current),
+            reply_markup=keyboard,
+        )
+
+    async def handle_default_video_size_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id is None:
+            return
+        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+            return
+        data = query.data or ""
+        if not data.startswith("vq:set:"):
+            return
+        new_q = data[len("vq:set:"):]
+        if not set_video_quality(chat_id, new_q):
+            return
+        lang = get_lang(chat_id)
+        summary = format_video_quality_summary(new_q, lang)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.edit_message_text(t("vq_set", lang, value=summary))
+        except Exception:
+            pass
+
     async def handle_language_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         if query is None:
@@ -709,8 +758,10 @@ async def build() -> Application:
     _app.add_handler(CommandHandler("language", handle_language))
     _app.add_handler(CommandHandler("timezone", handle_timezone))
     _app.add_handler(CommandHandler("transcode", handle_transcode))
+    _app.add_handler(CommandHandler("default_video_size", handle_default_video_size))
     _app.add_handler(CallbackQueryHandler(handle_monitor_callback, pattern=r"^mon:"))
     _app.add_handler(CallbackQueryHandler(handle_language_callback, pattern=r"^lang:"))
     _app.add_handler(CallbackQueryHandler(handle_transcode_callback, pattern=r"^tc:"))
+    _app.add_handler(CallbackQueryHandler(handle_default_video_size_callback, pattern=r"^vq:"))
     _app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return _app

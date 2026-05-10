@@ -167,8 +167,13 @@ async def download(
     url: str,
     media_type: str | None = None,
     is_owner: bool = True,
+    quality: str | None = None,
 ) -> dict:
-    """Download url. Returns {files: [...], cached: bool} or {error: str}."""
+    """Download url. Returns {files: [...], cached: bool} or {error: str}.
+
+    If quality is None, falls back to the global DEFAULT_QUALITY config.
+    Per-chat preference (via /default_video_size) flows through here.
+    """
     temp = not is_owner
 
     if not temp:
@@ -188,9 +193,9 @@ async def download(
                     None, _gallery_dl_run, out_dir, url, cookiepath
                 )
             else:
-                quality   = DEFAULT_QUALITY
+                effective_quality = quality or DEFAULT_QUALITY
                 merge_fmt = "mp4"
-                fmt_str   = _quality_to_format(quality)
+                fmt_str   = _quality_to_format(effective_quality)
 
                 if temp:
                     outtmpl = f"{out_dir}/%(title).80s.%(ext)s"

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 LANG_FILE = Path(os.environ.get("LANG_FILE", "/data/lang.json"))
 TZ_FILE   = Path(os.environ.get("TZ_FILE",   "/data/tz.json"))
 TRANSCODE_FILE = Path(os.environ.get("TRANSCODE_FILE", "/data/transcode.json"))
+VIDEO_QUALITY_FILE = Path(os.environ.get("VIDEO_QUALITY_FILE", "/data/video_quality.json"))
 SUPPORTED_LANGS = ("en", "ru")
 DEFAULT_LANG = "en"
 DEFAULT_TZ_OFFSET = 0.0  # UTC. Range: -12 to +14 (real-world UTC offsets).
@@ -130,6 +131,16 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_transcode_240_r":  "🔻 240p · replace",
         "btn_transcode_480_k":  "📦 480p + keep archive",
         "btn_transcode_240_k":  "📦 240p + keep archive",
+
+        # /default_video_size — quality for non-live downloads (TikTok, IG, etc.)
+        "vq_picker":            "Pick default video quality for non-live downloads:\n\nCurrent: {current}",
+        "vq_set":               "Default video size set to {value}.",
+        "vq_label_best":        "Best available (1080p+ if present)",
+        "vq_label_height":      "{height}p",
+        "btn_vq_best":          "🥇 Best",
+        "btn_vq_1080":          "📺 1080p",
+        "btn_vq_720":           "🖥 720p",
+        "btn_vq_360":           "📱 360p",
     },
     "ru": {
         # Generic
@@ -226,6 +237,16 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_transcode_240_r":  "🔻 240p · заменить",
         "btn_transcode_480_k":  "📦 480p + архив",
         "btn_transcode_240_k":  "📦 240p + архив",
+
+        # /default_video_size — quality for non-live downloads
+        "vq_picker":            "Качество видео по умолчанию для обычных загрузок:\n\nСейчас: {current}",
+        "vq_set":               "Качество видео установлено: {value}.",
+        "vq_label_best":        "Лучшее доступное (1080p+ если есть)",
+        "vq_label_height":      "{height}p",
+        "btn_vq_best":          "🥇 Лучшее",
+        "btn_vq_1080":          "📺 1080p",
+        "btn_vq_720":           "🖥 720p",
+        "btn_vq_360":           "📱 360p",
     },
 }
 
@@ -402,6 +423,65 @@ def format_transcode_summary(height: int, keep_original: bool, lang: str = DEFAU
     if keep_original:
         return t("transcode_keep", lang, height=height)
     return t("transcode_replace", lang, height=height)
+
+
+_video_quality_cache: dict[int, str] = {}
+_video_quality_loaded = False
+# Supported values. "best" means the bot picks whatever yt-dlp considers
+# best (typically the source resolution); the rest cap to that height.
+ALLOWED_VIDEO_QUALITIES = ("best", "1080p", "720p", "360p")
+DEFAULT_VIDEO_QUALITY = "best"
+
+
+def _load_video_quality_once() -> None:
+    global _video_quality_loaded
+    if _video_quality_loaded:
+        return
+    _video_quality_loaded = True
+    if not VIDEO_QUALITY_FILE.exists():
+        return
+    try:
+        with open(VIDEO_QUALITY_FILE) as f:
+            data = json.load(f)
+        for k, v in data.items():
+            try:
+                if str(v) in ALLOWED_VIDEO_QUALITIES:
+                    _video_quality_cache[int(k)] = str(v)
+            except (ValueError, TypeError):
+                continue
+    except Exception as e:
+        logger.warning("i18n: failed to read %s: %s", VIDEO_QUALITY_FILE, e)
+
+
+def get_video_quality(chat_id: int) -> str:
+    """Return the chat's video-quality preference ('best' / '1080p' / '720p' / '360p')."""
+    _load_video_quality_once()
+    return _video_quality_cache.get(int(chat_id), DEFAULT_VIDEO_QUALITY)
+
+
+def set_video_quality(chat_id: int, quality: str) -> bool:
+    if quality not in ALLOWED_VIDEO_QUALITIES:
+        return False
+    _load_video_quality_once()
+    _video_quality_cache[int(chat_id)] = quality
+    try:
+        VIDEO_QUALITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = VIDEO_QUALITY_FILE.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(
+                {str(k): v for k, v in _video_quality_cache.items()},
+                f, indent=2, ensure_ascii=False,
+            )
+        tmp.replace(VIDEO_QUALITY_FILE)
+    except Exception as e:
+        logger.error("i18n: failed to persist %s: %s", VIDEO_QUALITY_FILE, e)
+    return True
+
+
+def format_video_quality_summary(quality: str, lang: str = DEFAULT_LANG) -> str:
+    if quality == "best":
+        return t("vq_label_best", lang)
+    return t("vq_label_height", lang, height=quality.rstrip("p"))
 
 
 def t(key: str, lang: str = DEFAULT_LANG, **kwargs) -> str:

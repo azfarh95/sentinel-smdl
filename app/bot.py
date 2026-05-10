@@ -59,6 +59,13 @@ def _format_delivery_message(size_mb: float, links: dict, expires_hours: int = 2
 # Each entry: {"stop_flag": {"stop": False}, "url": str, "started_at": float}
 _active_live_jobs: dict[int, dict] = {}
 
+# Per-URL no-extractor fail counter (chat_id -> {url: n}). Resets on success.
+# After 3 consecutive 'no_extractor' failures we tell the user the site isn't
+# supported, instead of letting them keep trying. Only no_extractor counts;
+# auth/disk/transient failures are user-fixable and don't increment.
+LIVE_NO_EXTRACTOR_RETRY_BUDGET = 3
+_live_url_fail_count: dict[tuple[int, str], int] = {}
+
 logger = logging.getLogger(__name__)
 
 SMDL_BOT_TOKEN = os.environ["SMDL_BOT_TOKEN"]
@@ -136,6 +143,20 @@ async def build() -> Application:
                 )
                 return
 
+            # Retry budget — if we've already failed 3+ times on THIS url for THIS
+            # chat with 'no_extractor' (yt-dlp doesn't support the site), tell
+            # the user upfront instead of trying again.
+            fail_key = (chat_id, url)
+            if _live_url_fail_count.get(fail_key, 0) >= LIVE_NO_EXTRACTOR_RETRY_BUDGET:
+                await status_msg.edit_text(
+                    f"{platform} · 🔴 LIVE\n"
+                    f"⚠ Site not supported / not configured yet (yt-dlp can't extract "
+                    f"a live stream from this URL after {LIVE_NO_EXTRACTOR_RETRY_BUDGET} attempts).\n\n"
+                    f"If you think this should work, the site may need a yt-dlp extractor "
+                    f"update (`yt-dlp -U` inside the smdl container) or cookies."
+                )
+                return
+
             await status_msg.edit_text(
                 f"{platform} · @{uploader} · 🔴 LIVE\n"
                 f"Recording started — heartbeats every 5 min. Will auto-stop on stream end or session failure."
@@ -176,6 +197,13 @@ async def build() -> Application:
             mb    = live_result["bytes_downloaded"] / (1024 * 1024)
             files = live_result.get("files") or []
 
+            # Track per-URL no_extractor count. Success/auth-fail/disk-low/etc
+            # don't count — only the "yt-dlp can't extract this site" cases.
+            if live_result["abort_reason"] == "no_extractor":
+                _live_url_fail_count[fail_key] = _live_url_fail_count.get(fail_key, 0) + 1
+            elif live_result["abort_reason"] in ("stream_ended", "user_stopped"):
+                _live_url_fail_count.pop(fail_key, None)  # reset on confirmed-working
+
             if live_result["abort_reason"] == "stream_ended":
                 summary = f"✓ Recording ended naturally · {mins} min · {mb:.0f} MB"
             elif live_result["abort_reason"] == "user_stopped":
@@ -185,6 +213,19 @@ async def build() -> Application:
                     f"⚠ Session/auth failed at {mins} min · {mb:.0f} MB saved\n"
                     f"Cookie likely expired — refresh cookies and retry."
                 )
+            elif live_result["abort_reason"] == "no_extractor":
+                attempts = _live_url_fail_count[fail_key]
+                if attempts >= LIVE_NO_EXTRACTOR_RETRY_BUDGET:
+                    summary = (
+                        f"⚠ Site not supported / not configured yet.\n"
+                        f"yt-dlp couldn't extract a live stream from this URL after {attempts} attempts."
+                    )
+                else:
+                    remaining = LIVE_NO_EXTRACTOR_RETRY_BUDGET - attempts
+                    summary = (
+                        f"⚠ yt-dlp couldn't extract this URL ({attempts}/{LIVE_NO_EXTRACTOR_RETRY_BUDGET} attempts)\n"
+                        f"Try again — {remaining} more attempts before site is marked as not configured."
+                    )
             elif live_result["abort_reason"] == "platform_not_allowed":
                 summary = f"⚠ {live_result['detail']}"
             elif live_result["abort_reason"] == "disk_low":

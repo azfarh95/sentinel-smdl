@@ -64,6 +64,28 @@ _AUTH_FAIL_PATTERNS = re.compile(
     r")"
 )
 
+# Patterns indicating yt-dlp doesn't support / can't extract from this site.
+# Distinct from auth failures — retrying helps for auth, never for these.
+_NO_EXTRACTOR_PATTERNS = re.compile(
+    r"(?i)("
+    r"unsupported\s*url|"
+    r"no\s*video\s*formats?\s*found|"
+    r"no\s*suitable\s*extractor|"
+    r"no\s*extractor\s*matches|"
+    r"requested\s*format\s*is\s*not\s*available|"
+    r"no\s*streams?\s*available"
+    r")"
+)
+
+
+def _classify_yt_dlp_error(err_text: str) -> str:
+    """Map yt-dlp error text to one of: 'session_fail', 'no_extractor', 'transient', 'unknown'."""
+    if _AUTH_FAIL_PATTERNS.search(err_text):
+        return "session_fail"
+    if _NO_EXTRACTOR_PATTERNS.search(err_text):
+        return "no_extractor"
+    return "transient"
+
 
 _live_semaphore: asyncio.Semaphore | None = None
 
@@ -75,21 +97,27 @@ def _get_live_semaphore() -> asyncio.Semaphore:
     return _live_semaphore
 
 
-def _platform_allowed(url: str) -> tuple[bool, str]:
+def _platform_of(url: str) -> str:
+    """Pure classifier — returns a friendly platform name, no allow/block decision."""
     u = url.lower()
-    if "youtube.com" in u or "youtu.be" in u:
-        return ("youtube" in LIVE_PLATFORMS, "youtube")
-    if "twitch.tv" in u:
-        return ("twitch" in LIVE_PLATFORMS, "twitch")
-    if "kick.com" in u:
-        return ("kick" in LIVE_PLATFORMS, "kick")
-    if "tiktok.com" in u:
-        return ("tiktok" in LIVE_PLATFORMS, "tiktok")
-    if "instagram.com" in u:
-        return ("instagram" in LIVE_PLATFORMS, "instagram")
-    if "facebook.com" in u or "fb.com" in u:
-        return ("facebook" in LIVE_PLATFORMS, "facebook")
-    return (False, "unknown")
+    if "youtube.com" in u or "youtu.be" in u: return "youtube"
+    if "twitch.tv" in u:                       return "twitch"
+    if "kick.com" in u:                        return "kick"
+    if "tiktok.com" in u:                      return "tiktok"
+    if "instagram.com" in u:                   return "instagram"
+    if "facebook.com" in u or "fb.com" in u:   return "facebook"
+    return "other"
+
+
+def _platform_allowed(url: str) -> tuple[bool, str]:
+    """Adaptive policy: trust yt-dlp's 1700+ extractors. The LIVE_PLATFORMS
+    whitelist is now ADVISORY rather than a gate — used only to flag
+    'known-good' platforms in user messages. Any URL is allowed; yt-dlp
+    decides via extraction. Failures bubble up as LiveAbort with reason
+    'no_extractor' / 'no_format' which the bot turns into the user-friendly
+    'Site not supported / not configured yet' after the retry budget is spent.
+    """
+    return (True, _platform_of(url))
 
 
 def _free_disk_gb(path: str) -> float:
@@ -120,6 +148,10 @@ class LiveAbort(Exception):
 
 def _is_auth_failure(err_text: str) -> bool:
     return bool(_AUTH_FAIL_PATTERNS.search(err_text))
+
+
+def _is_no_extractor(err_text: str) -> bool:
+    return bool(_NO_EXTRACTOR_PATTERNS.search(err_text))
 
 
 def _kill_orphan_ffmpeg_children() -> int:
@@ -330,6 +362,8 @@ async def record_live(
                 msg = str(e)
                 if _is_auth_failure(msg):
                     raise LiveAbort("session_fail", msg[:300])
+                if _is_no_extractor(msg):
+                    raise LiveAbort("no_extractor", msg[:300])
                 # Stream-ended is the canonical "this is fine" terminal state
                 if any(k in msg.lower() for k in ("ended", "no longer live", "stream is offline")):
                     return  # natural end

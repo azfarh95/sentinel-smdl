@@ -93,6 +93,12 @@ LIVE_MAX_HEIGHT:            int       = int(_cfg["live_max_height"])
 LIVE_TRANSCODE_HEIGHT:      int       = int(_cfg["live_transcode_height"])
 LIVE_TRANSCODE_KEEP_ORIGINAL: bool    = bool(_cfg["live_transcode_keep_original"])
 
+# OneDrive integration (Phase 2 — wired up). Lives in smdl.json so the Admin
+# tab can toggle without code edits. _cfg_get() in miniapp reads file first.
+ONEDRIVE_MODE:                 str  = str(_cfg.get("onedrive_mode") or "on_demand")
+ONEDRIVE_FOLDER:               str  = str(_cfg.get("onedrive_folder") or "/SMDL")
+ONEDRIVE_DELETE_AFTER_UPLOAD:  bool = bool(_cfg.get("onedrive_delete_after_upload") or False)
+
 # Stream monitor (V1)
 MONITOR_ENABLED:                bool = bool(_cfg["monitor_enabled"])
 MONITOR_POLL_INTERVAL_SECONDS:  int  = int(_cfg["monitor_poll_interval_seconds"])

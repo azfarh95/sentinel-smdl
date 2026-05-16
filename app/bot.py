@@ -16,6 +16,8 @@ from telegram.ext import (
 )
 
 from .config import ALLOWED_CHAT_IDS, DELETE_AFTER_SEND, LIVE_ENABLED, OWNER_CHAT_ID
+from . import auth as _auth
+from . import database as _db_users   # ← record_interaction lives here
 from .downloader import download, identify_post, send_files, _resolve_cookies
 from .i18n import (
     ALLOWED_VIDEO_QUALITIES, LANG_LABELS, SUPPORTED_LANGS,
@@ -106,8 +108,43 @@ async def build() -> Application:
             return
 
         chat_id = msg.chat_id
-        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
-            logger.info("Ignoring chat_id %s (not in ALLOWED_CHAT_IDS)", chat_id)
+
+        # Record the interaction so this user appears in /admin/users. Done
+        # BEFORE the auth gate so a freshly-banned user can still be seen in
+        # the directory with the latest last_seen timestamp. Skip groups
+        # (chat_id there is the group ID, not the user).
+        try:
+            chat_type = getattr(getattr(msg, "chat", None), "type", "")
+            if chat_type == "private":
+                u = update.effective_user
+                await _db_users.record_interaction(
+                    chat_id,
+                    username=(u.username if u else None),
+                    first_name=(u.first_name if u else None),
+                    last_name=(u.last_name if u else None),
+                )
+        except Exception as _e:
+            logger.warning("record_interaction failed: %s", _e)
+
+        # Central auth gate: owner always allowed; banned users rejected;
+        # admin-only mode rejects everyone except owner.
+        if not await _auth.is_authorized(chat_id):
+            decision = await _auth.classify(chat_id)
+            logger.info("Rejecting chat_id %s: %s", chat_id, decision)
+            try:
+                if decision == "deny_admin_only":
+                    await msg.reply_text("🔒 Service is in admin-only mode. Try again later.")
+                elif decision == "deny_banned":
+                    await msg.reply_text("⛔ Your access to this bot has been revoked.")
+                elif decision == "deny_pending":
+                    # Nudge them toward the handshake — don't leave them confused.
+                    await msg.reply_text(
+                        "⏳ Your access is pending approval.\n\n"
+                        "Send /start to see your access code, then forward it to "
+                        "the bot's owner. Codes expire in 1 minute — use "
+                        "/regenerate_token if yours did."
+                    )
+            except Exception: pass
             return
 
         result = find_video_url(msg.text)
@@ -118,6 +155,12 @@ async def build() -> Application:
         platform, url = result
         logger.info("Video URL detected [%s]: %s", platform, url[:80])
         lang = get_lang(chat_id)
+
+        # Per-site blocklist (admin-managed). Owner bypasses.
+        if not _auth.is_owner(chat_id) and await _auth.is_platform_blocked(url):
+            from .stream_monitor import extract_platform as _ep
+            await msg.reply_text(f"⛔ Downloads from {_ep(url)} are disabled by the admin.")
+            return
 
         status_msg = await msg.reply_text(t("identifying", lang, platform=platform))
 
@@ -308,7 +351,53 @@ async def build() -> Application:
                 detail = f"{sent} file{'s' if sent > 1 else ''}" + (f" · {size} MB" if size else "") + cached_tag
                 await status_msg.edit_text(t("sent_short", lang, detail=detail))
 
-                if DELETE_AFTER_SEND and not cached:
+                # Per-user download history (Mini App reads this). Never crash
+                # the user flow if telemetry write fails.
+                try:
+                    from . import database as _db
+                    await _db.record_download(chat_id, url, files, platform, uploader)
+                except Exception as _e:
+                    logger.warning("record_download failed: %s", _e)
+
+                # OneDrive mirror — only when mode is 'auto_after_send'. The
+                # on_demand path is triggered from the Mini App's Downloads
+                # tab instead. Fire-and-forget so a slow upload doesn't block
+                # the Telegram reply path.
+                try:
+                    from .miniapp import _cfg_get as _od_cfg_get
+                    od_mode = (_od_cfg_get("onedrive_mode") or "on_demand").lower()
+                    if od_mode == "auto_after_send":
+                        from . import onedrive as _od
+                        folder = _od_cfg_get("onedrive_folder") or "/SMDL"
+                        delete_after = bool(_od_cfg_get("onedrive_delete_after_upload"))
+                        async def _mirror():
+                            summary = await _od.auto_upload_files(
+                                files, platform, uploader,
+                                base_folder=folder,
+                                delete_after_upload=delete_after,
+                            )
+                            if summary["sent_count"]:
+                                logger.info("OneDrive: mirrored %d files (%.1f MB)",
+                                            summary["sent_count"], summary["total_bytes"]/1024**2)
+                            if summary["failed_count"]:
+                                logger.warning("OneDrive: %d uploads failed: %s",
+                                               summary["failed_count"], summary["failed"][:3])
+                        asyncio.create_task(_mirror())
+                except Exception as _e:
+                    logger.warning("OneDrive auto-mirror dispatch failed: %s", _e)
+
+                # Local-cleanup behavior: if OneDrive's delete_after_upload is
+                # on, skip the DELETE_AFTER_SEND clear here — the OneDrive
+                # task will unlink only AFTER successful upload (safer order).
+                _od_will_delete = False
+                try:
+                    from .miniapp import _cfg_get as _cgc
+                    _od_will_delete = (
+                        (_cgc("onedrive_mode") or "").lower() == "auto_after_send"
+                        and bool(_cgc("onedrive_delete_after_upload"))
+                    )
+                except Exception: pass
+                if DELETE_AFTER_SEND and not cached and not _od_will_delete:
                     for fp in files:
                         try:
                             Path(fp).unlink()
@@ -340,8 +429,8 @@ async def build() -> Application:
         chat_id = update.effective_chat.id
         active_chats = [j.chat_id for j in bridge.list_active()]
         logger.info("CMD /stop_livestream from chat=%s | active_jobs=%s", chat_id, active_chats)
-        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
-            logger.info("  rejected: chat not in ALLOWED_CHAT_IDS=%s", ALLOWED_CHAT_IDS)
+        if not await _auth.is_authorized(chat_id):
+            logger.info("  rejected: chat_id %s not authorized", chat_id)
             return
         lang = get_lang(chat_id)
         status = await bridge.stop(chat_id)
@@ -360,7 +449,7 @@ async def build() -> Application:
         chat_id = update.effective_chat.id
         active = [j.chat_id for j in bridge.list_active()]
         logger.info("CMD /live_status from chat=%s | active_jobs=%s", chat_id, active)
-        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        if not await _auth.is_authorized(chat_id):
             return
         lang = get_lang(chat_id)
         status = bridge.status(chat_id)
@@ -436,7 +525,7 @@ async def build() -> Application:
 
     async def handle_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
-        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        if not await _auth.is_authorized(chat_id):
             return
         # Direct form: /language en  or  /language ru
         if ctx.args:
@@ -460,7 +549,7 @@ async def build() -> Application:
 
     async def handle_timezone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
-        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        if not await _auth.is_authorized(chat_id):
             return
         lang = get_lang(chat_id)
         if not ctx.args:
@@ -484,7 +573,7 @@ async def build() -> Application:
 
     async def handle_transcode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
-        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        if not await _auth.is_authorized(chat_id):
             return
         lang = get_lang(chat_id)
         cur_h, cur_keep = get_transcode_pref(chat_id)
@@ -514,7 +603,7 @@ async def build() -> Application:
         chat_id = query.message.chat_id if query.message else None
         if chat_id is None:
             return
-        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        if not await _auth.is_authorized(chat_id):
             return
         data = query.data or ""
         if not data.startswith("tc:set:"):
@@ -623,7 +712,7 @@ async def build() -> Application:
 
     async def handle_default_video_size(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
-        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        if not await _auth.is_authorized(chat_id):
             return
         lang = get_lang(chat_id)
         current = format_video_quality_summary(get_video_quality(chat_id), lang)
@@ -650,7 +739,7 @@ async def build() -> Application:
         chat_id = query.message.chat_id if query.message else None
         if chat_id is None:
             return
-        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        if not await _auth.is_authorized(chat_id):
             return
         data = query.data or ""
         if not data.startswith("vq:set:"):
@@ -674,7 +763,7 @@ async def build() -> Application:
         chat_id = query.message.chat_id if query.message else None
         if chat_id is None:
             return
-        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        if not await _auth.is_authorized(chat_id):
             return
         data = query.data or ""
         if not data.startswith("lang:set:"):
@@ -778,11 +867,15 @@ async def build() -> Application:
         if len(parts) < 3:
             return
         action, url = parts[1], parts[2]
+        # Replace the prompt with a single-line confirmation so the chat
+        # log stays terse (`[user] — Snoozed 8h (until xx:xx)`), not a
+        # growing wall of LIVE-prompt history.
+        uploader = stream_monitor.extract_username(url) or "?"
         if action == "skip":
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.edit_message_text(
-                    text=(query.message.text or "") + "\n\n" + t("monitor_skipped", lang),
+                    text=t("monitor_skipped", lang, uploader=uploader),
                     disable_web_page_preview=True,
                 )
             except Exception:
@@ -796,8 +889,9 @@ async def build() -> Application:
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.edit_message_text(
-                    text=(query.message.text or "") + "\n\n" + t(
+                    text=t(
                         "monitor_snoozed", lang,
+                        uploader=uploader,
                         duration=duration_label, until=until_str,
                     ),
                     disable_web_page_preview=True,
@@ -809,7 +903,7 @@ async def build() -> Application:
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.edit_message_text(
-                    text=(query.message.text or "") + "\n\n" + t("monitor_starting", lang),
+                    text=t("monitor_starting", lang, uploader=uploader),
                     disable_web_page_preview=True,
                 )
             except Exception:
@@ -818,28 +912,144 @@ async def build() -> Application:
             # other update processing.
             asyncio.create_task(_run_monitor_recording(ctx, chat_id, url))
 
+    async def _record_user(update: Update) -> None:
+        """Tiny helper: UPSERT the user into the directory. Skips group and
+        channel chats (Telegram chat_id is the GROUP id there, not the user,
+        so recording it would create a phantom 'user' per group)."""
+        chat = update.effective_chat
+        if not chat or getattr(chat, "type", "") != "private":
+            return
+        try:
+            u = update.effective_user
+            await _db_users.record_interaction(
+                chat.id,
+                username=(u.username if u else None),
+                first_name=(u.first_name if u else None),
+                last_name=(u.last_name if u else None),
+            )
+        except Exception as _e:
+            logger.warning("record_interaction failed: %s", _e)
+
+    def _dashboard_keyboard() -> InlineKeyboardMarkup | None:
+        url = os.environ.get("WEBAPP_URL", "").strip()
+        if not url:
+            return None
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("📱 Open dashboard", web_app=WebAppInfo(url=url))
+        ]])
+
+    def _pending_welcome_text(name: str, row: dict) -> str:
+        """Welcome shown to pending users. Deliberately does NOT identify
+        the bot owner — legitimate users know who to forward the code to."""
+        code = row.get("pending_code") or "(error: no code on file)"
+        return (
+            f"👋 Hi {name}!  This bot is invite-only.\n\n"
+            f"Your one-time access code:\n\n"
+            f"🔑  *{code}*\n\n"
+            "Forward this code to the bot's owner — they're expecting it. "
+            "You'll be approved on their side and can use the bot right after.\n\n"
+            "⏱ Codes expire in *1 minute*. If yours expires before you can "
+            "share it, send /regenerate\\_token for a fresh one."
+        )
+
+    async def handle_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """First-touch handler. Records the user, branches on status:
+          - pending → show approval code + instructions
+          - active  → welcome + dashboard button
+          - banned  → polite revoke notice
+          - admin-only mode → "try again later"
+        """
+        row = None
+        try:
+            u = update.effective_user
+            chat_id = update.effective_chat.id
+            row = await _db_users.record_interaction(
+                chat_id,
+                username=(u.username if u else None),
+                first_name=(u.first_name if u else None),
+                last_name=(u.last_name if u else None),
+            )
+        except Exception as _e:
+            logger.warning("record_interaction failed in /start: %s", _e)
+
+        chat_id = update.effective_chat.id
+        decision = await _auth.classify(chat_id)
+        u = update.effective_user
+        name = (u.first_name if u else None) or "there"
+
+        if decision == "deny_admin_only":
+            await update.message.reply_text("🔒 Service is in admin-only mode. Try again later.")
+            return
+        if decision == "deny_banned":
+            await update.message.reply_text("⛔ Your access to this bot has been revoked.")
+            return
+        if decision == "deny_pending":
+            text = _pending_welcome_text(name, row or {})
+            await update.message.reply_markdown(text)
+            return
+
+        # decision == "allow" — owner or already-approved user.
+        kb = _dashboard_keyboard()
+        welcome = (
+            f"👋 Hi {name}!  Welcome to SM-DL.\n\n"
+            "Send me any video URL (Twitch, YouTube, Instagram, TikTok, …) "
+            "and I'll grab it for you.\n\n"
+            "Use the button below to open the dashboard, or type "
+            "/dashboard any time."
+        ) if kb else (
+            f"👋 Hi {name}!  Welcome to SM-DL.\n\n"
+            "Send me any video URL and I'll grab it for you.\n\n"
+            "(Dashboard isn't configured on this instance.)"
+        )
+        await update.message.reply_text(welcome, reply_markup=kb)
+
+    async def handle_regenerate_token(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Force-rotate the user's pending approval code. Owner-bypasses
+        (they don't need a code) and approved users get told they're already in."""
+        chat_id = update.effective_chat.id
+        u = update.effective_user
+        name = (u.first_name if u else None) or "there"
+        if _auth.is_owner(chat_id):
+            await update.message.reply_text("You're the owner — no code needed.")
+            return
+        # Refresh contact info + (if pending) rotate via record_interaction
+        # path only after we know status. Use rotate_pending_code directly:
+        row = await _db_users.rotate_pending_code(chat_id)
+        if row is None:
+            # Either active or banned (rotate_pending_code only matches pending).
+            decision = await _auth.classify(chat_id)
+            if decision == "allow":
+                await update.message.reply_text("You're already approved — no code needed.")
+            elif decision == "deny_banned":
+                await update.message.reply_text("⛔ Your access to this bot has been revoked.")
+            else:
+                # Unknown user (never /started). Suggest the right entrypoint.
+                await update.message.reply_text("Send /start first.")
+            return
+        await update.message.reply_markdown(_pending_welcome_text(name, row))
+
     async def handle_dashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Open the Mini App dashboard. Requires WEBAPP_URL env var (or
         webapp_url config key)."""
+        await _record_user(update)
         chat_id = update.effective_chat.id
-        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        if not await _auth.is_authorized(chat_id):
             return
         lang = get_lang(chat_id)
-        url = os.environ.get("WEBAPP_URL", "").strip()
-        if not url:
+        kb = _dashboard_keyboard()
+        if kb is None:
             await update.message.reply_text(
                 "Mini App URL not configured. Set WEBAPP_URL env var "
                 "(e.g. https://media.az-sentinel.xyz/app) and restart the container."
             )
             return
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📱 Open dashboard", web_app=WebAppInfo(url=url))
-        ]])
         await update.message.reply_text(
             "Tap below to open the SM-DL dashboard inside Telegram:",
-            reply_markup=keyboard,
+            reply_markup=kb,
         )
 
+    _app.add_handler(CommandHandler("start", handle_start))
+    _app.add_handler(CommandHandler("regenerate_token", handle_regenerate_token))
     _app.add_handler(CommandHandler("dashboard", handle_dashboard))
     _app.add_handler(CommandHandler("app", handle_dashboard))   # alias
     _app.add_handler(CommandHandler("stop_livestream", handle_stop_livestream))

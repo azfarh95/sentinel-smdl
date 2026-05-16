@@ -24,6 +24,40 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db()
+    # First-boot: default-block adult cam platforms so they don't appear in
+    # non-owner UX. Owner can flip them back on in Admin → Sites.
+    try:
+        from . import auth as _auth
+        if await _auth.seed_default_blocklist_if_unset():
+            logger.info("Seeded default site blocklist: %s",
+                        _auth.DEFAULT_BLOCKED_PLATFORMS)
+    except Exception as _e:
+        logger.warning("seed_default_blocklist_if_unset failed: %s", _e)
+
+    # Self-heal: an earlier release (pre-fix) inserted the owner's row as
+    # 'pending'. Flip any owner row back to active so it stops showing in
+    # the Admin → Pending list. Also drop any pending row whose chat_id is
+    # negative — those are Telegram group chats wrongly recorded by an
+    # earlier bug.
+    try:
+        from .config import OWNER_CHAT_ID
+        import aiosqlite as _aio
+        async with _aio.connect(db.DB_PATH) as conn:
+            if OWNER_CHAT_ID is not None:
+                cur = await conn.execute(
+                    "UPDATE users SET status='active', pending_code=NULL, "
+                    "pending_expires_at=NULL "
+                    "WHERE chat_id = ? AND status = 'pending'",
+                    (int(OWNER_CHAT_ID),),
+                )
+                if cur.rowcount:
+                    logger.info("Healed owner row: flipped %d pending row(s) to active", cur.rowcount)
+            cur = await conn.execute("DELETE FROM users WHERE chat_id < 0")
+            if cur.rowcount:
+                logger.info("Cleaned up %d group-chat user rows (chat_id < 0)", cur.rowcount)
+            await conn.commit()
+    except Exception as _e:
+        logger.warning("user-row self-heal failed: %s", _e)
     asyncio.create_task(start_cleanup_loop())
 
     # Bot initialization is best-effort. A bad/missing token must NOT crash

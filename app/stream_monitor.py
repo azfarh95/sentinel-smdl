@@ -27,9 +27,11 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yt_dlp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -69,6 +71,87 @@ def _save_watchlist(entries: list[dict[str, Any]]) -> None:
     tmp.replace(WATCHLIST_FILE)
 
 
+# Hostname-substring → human-readable platform label. Matched in order, so
+# longer/more-specific keys should come first. Falls back to title-cased
+# second-level domain ("foo.bar.com" → "Bar").
+_PLATFORM_MAP: list[tuple[str, str]] = [
+    ("chaturbate.com",   "Chaturbate"),
+    ("stripchat.com",    "Stripchat"),
+    ("bongacams.com",    "BongaCams"),
+    ("cam4.com",         "Cam4"),
+    ("twitch.tv",        "Twitch"),
+    ("kick.com",         "Kick"),
+    ("youtube.com",      "YouTube"),
+    ("youtu.be",         "YouTube"),
+    ("instagram.com",    "Instagram"),
+    ("tiktok.com",       "TikTok"),
+    ("twitter.com",      "Twitter/X"),
+    ("x.com",            "Twitter/X"),
+    ("facebook.com",     "Facebook"),
+    ("fb.watch",         "Facebook"),
+    ("reddit.com",       "Reddit"),
+    ("vimeo.com",        "Vimeo"),
+    ("rumble.com",       "Rumble"),
+    ("dlive.tv",         "DLive"),
+    ("trovo.live",       "Trovo"),
+    ("bilibili.com",     "Bilibili"),
+    ("douyu.com",        "Douyu"),
+]
+
+
+def extract_platform(url: str) -> str:
+    """Return a display platform name (e.g. 'Twitch', 'Chaturbate') from URL.
+    Falls back to a title-cased second-level domain so unknown sites still
+    group sensibly in the Mini App."""
+    try:
+        p = urlparse(url if "://" in url else f"https://{url}")
+        host = (p.hostname or "").lower().lstrip(".")
+        if host.startswith("www."):
+            host = host[4:]
+        for needle, label in _PLATFORM_MAP:
+            if needle in host:
+                return label
+        parts = host.split(".")
+        if len(parts) >= 2:
+            return parts[-2].capitalize()
+        return host or "Other"
+    except Exception:
+        return "Other"
+
+
+def extract_username(url: str) -> str:
+    """Pull a display username out of a streamer URL.
+
+    Examples:
+      chaturbate.com/dewdropdoll/   → dewdropdoll
+      twitch.tv/somechannel         → somechannel
+      kick.com/streamer             → streamer
+      youtube.com/@handle           → handle
+      youtube.com/c/channel         → channel
+      Anything weird                → host/path-suffix fallback (never empty)
+    """
+    try:
+        p = urlparse(url if "://" in url else f"https://{url}")
+        host = (p.hostname or "").lower().lstrip("www.")
+        path = (p.path or "").strip("/")
+        if not path:
+            return host or url
+        parts = [seg for seg in path.split("/") if seg]
+        # youtube.com/@handle  → handle
+        if parts and parts[0].startswith("@"):
+            return parts[0][1:]
+        # youtube.com/c/channel | youtube.com/user/x | youtube.com/channel/UCxxxx
+        if parts[0] in ("c", "user", "channel") and len(parts) > 1:
+            return parts[1]
+        # tiktok.com/@user
+        if "tiktok" in host and parts[0].startswith("@"):
+            return parts[0][1:]
+        # twitch / kick / chaturbate / stripchat / cam4 / generic → first path segment
+        return parts[0]
+    except Exception:
+        return url
+
+
 def add_to_watchlist(url: str, label: str | None = None, added_by: int | None = None) -> tuple[bool, str]:
     """Returns (added, message). Idempotent — duplicate URL returns (False, ...)."""
     entries = _load_watchlist()
@@ -84,17 +167,86 @@ def add_to_watchlist(url: str, label: str | None = None, added_by: int | None = 
     return True, f"Now watching {url}"
 
 
-def remove_from_watchlist(url: str) -> tuple[bool, str]:
+def remove_from_watchlist(url: str, chat_id: int | None = None) -> tuple[bool, str]:
+    """Remove a watchlist entry. If `chat_id` is given, only removes when the
+    entry's `added_by` matches (so user A can't delete user B's entries from
+    the Mini App). Owner uses chat_id=None to bypass."""
     entries = _load_watchlist()
-    new = [e for e in entries if e.get("url") != url]
+    def _kept(e):
+        if e.get("url") != url: return True
+        if chat_id is not None and e.get("added_by") != chat_id: return True
+        return False
+    new = [e for e in entries if _kept(e)]
     if len(new) == len(entries):
         return False, f"Not in watchlist: {url}"
     _save_watchlist(new)
     return True, f"Removed {url}"
 
 
-def list_watchlist() -> list[dict[str, Any]]:
-    return _load_watchlist()
+def list_watchlist(chat_id: int | None = None) -> list[dict[str, Any]]:
+    """Return watchlist entries. If `chat_id` given, filters to entries this
+    user added. Owner uses chat_id=None to see all."""
+    entries = _load_watchlist()
+    if chat_id is None:
+        return entries
+    return [e for e in entries if e.get("added_by") == chat_id]
+
+
+def update_watchlist_entry(old_url: str, new_url: str | None = None,
+                            label: str | None = None,
+                            chat_id: int | None = None) -> tuple[bool, str]:
+    """Edit a watchlist entry in place. If `chat_id` is given, only updates
+    when the entry's `added_by` matches. Owner uses chat_id=None to bypass.
+
+    If `new_url` is given and differs from old_url, also remaps the in-memory
+    status entry so the green/red dot doesn't reset to 'unknown'."""
+    entries = _load_watchlist()
+    target = None
+    for e in entries:
+        if e.get("url") == old_url:
+            if chat_id is not None and e.get("added_by") != chat_id:
+                return False, "Not your entry"
+            target = e
+            break
+    if target is None:
+        return False, f"Not in watchlist: {old_url}"
+    # Reject duplicate URL collisions
+    if new_url and new_url != old_url:
+        if any(e.get("url") == new_url for e in entries):
+            return False, f"Already watching {new_url}"
+        target["url"] = new_url
+        # Migrate status cache so the dot survives the rename.
+        if old_url in _last_status:
+            _last_status[new_url] = _last_status.pop(old_url)
+    if label is not None:
+        target["label"] = label or target.get("url")
+    _save_watchlist(entries)
+    return True, "Updated"
+
+
+def set_muted(url: str, muted: bool, chat_id: int | None = None) -> tuple[bool, str]:
+    """Flip the `muted` flag on a watchlist entry. Muted entries are still
+    polled (so the green/red dot stays current) but no LIVE prompt is sent."""
+    entries = _load_watchlist()
+    for e in entries:
+        if e.get("url") == url:
+            if chat_id is not None and e.get("added_by") != chat_id:
+                return False, "Not your entry"
+            e["muted"] = bool(muted)
+            _save_watchlist(entries)
+            return True, "Muted" if muted else "Unmuted"
+    return False, f"Not in watchlist: {url}"
+
+
+def get_status(url: str) -> str:
+    """Return last-seen status for a URL: 'live' | 'offline' | 'unknown'."""
+    return _last_status.get(url, "unknown")
+
+
+def get_status_map() -> dict[str, str]:
+    """Snapshot of all known URL → status mappings (live/offline). Used by the
+    Mini App to colour the row dot without making N HTTP probes."""
+    return dict(_last_status)
 
 
 def snooze_streamer(url: str, minutes: int) -> int:
@@ -185,6 +337,14 @@ async def _poll_once(app: Application, entries: list[dict[str, Any]]) -> None:
         new = "live" if is_live else "offline"
         _last_status[url] = new
 
+        # Mute check: muted entries are still probed (so the Mini App dot
+        # stays current) but never trigger a Telegram prompt. Mute is
+        # indefinite; snooze is time-bound.
+        if entry.get("muted"):
+            if prev != "live" and is_live:
+                logger.info("monitor: %s went LIVE but is muted — skipping prompt", label)
+            continue
+
         # Snooze check: if user explicitly snoozed this streamer, skip the
         # prompt regardless of state transition. We still update _last_status
         # above so that when snooze expires we don't immediately re-prompt
@@ -200,12 +360,14 @@ async def _poll_once(app: Application, entries: list[dict[str, Any]]) -> None:
 
         if prev != "live" and is_live:
             # OFFLINE → LIVE transition. Notify owner with inline keyboard.
-            uploader = result.get("uploader") or label
-            title = (result.get("title") or "")[:120]
+            # Prefer the URL-extracted username (stable: 'dewdropdoll') over
+            # yt-dlp's `uploader` field (sometimes blank or human-name).
+            uname = extract_username(url) or (result.get("uploader") or label)
+            platform = extract_platform(url)
             owner_lang = get_lang(OWNER_CHAT_ID)
             text = t(
                 "monitor_live_prompt", owner_lang,
-                uploader=uploader, title=title, url=url,
+                platform=platform, uploader=uname,
             )
             keyboard = InlineKeyboardMarkup([
                 [

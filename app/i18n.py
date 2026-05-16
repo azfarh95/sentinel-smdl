@@ -100,19 +100,21 @@ STRINGS: dict[str, dict[str, str]] = {
         "watchlist_empty":      "Watchlist is empty.\nAdd one with: /watch <url>",
         "watchlist_header":     "📺 Watchlist ({count})",
 
-        # Stream monitor live notification
-        "monitor_live_prompt":  "🔴 LIVE — {uploader}\n{title}\n\n{url}\n\nRecord this stream?",
+        # Stream monitor live notification — one-liner pattern so the
+        # snooze/skip/rec follow-ups can replace the whole bubble instead of
+        # appending to a verbose prompt.
+        "monitor_live_prompt":  "🔴 {platform} — {uploader} is online. Record stream?",
         "btn_yes_record":       "✅ Yes — Record",
         "btn_skip":             "❌ Skip",
         "btn_lang_en":          "English",
         "btn_lang_ru":          "Русский",
-        "monitor_skipped":      "⏭ Skipped",
-        "monitor_starting":     "🎬 Recording starting…",
+        "monitor_skipped":      "{uploader} — ⏭ Skipped",
+        "monitor_starting":     "{uploader} — 🎬 Recording starting…",
         "monitor_record_starting": "🔴 Recording · @{uploader}\nStarting…",
         "monitor_recording_crashed": "⚠ Recording crashed: {error}",
         "btn_snooze_1h":        "💤 1h",
         "btn_snooze_8h":        "😴 8h",
-        "monitor_snoozed":      "💤 Snoozed for {duration} (until {until})",
+        "monitor_snoozed":      "{uploader} — 💤 Snoozed for {duration} (until {until})",
 
         # /timezone
         "tz_current":           "Current timezone: {tz}\n\nChange with: /timezone <offset>",
@@ -212,19 +214,19 @@ STRINGS: dict[str, dict[str, str]] = {
         "watchlist_empty":      "Список отслеживания пуст.\nДобавить: /watch <url>",
         "watchlist_header":     "📺 Список отслеживания ({count})",
 
-        # Stream monitor live notification
-        "monitor_live_prompt":  "🔴 ЭФИР — {uploader}\n{title}\n\n{url}\n\nЗаписать этот стрим?",
+        # Stream monitor live notification — see English block for rationale.
+        "monitor_live_prompt":  "🔴 {platform} — {uploader} в эфире. Записать?",
         "btn_yes_record":       "✅ Да — записать",
         "btn_skip":             "❌ Пропустить",
         "btn_lang_en":          "English",
         "btn_lang_ru":          "Русский",
-        "monitor_skipped":      "⏭ Пропущено",
-        "monitor_starting":     "🎬 Запись начинается…",
+        "monitor_skipped":      "{uploader} — ⏭ Пропущено",
+        "monitor_starting":     "{uploader} — 🎬 Запись начинается…",
         "monitor_record_starting": "🔴 Запись · @{uploader}\nЗапуск…",
         "monitor_recording_crashed": "⚠ Запись прервалась с ошибкой: {error}",
         "btn_snooze_1h":        "💤 1ч",
         "btn_snooze_8h":        "😴 8ч",
-        "monitor_snoozed":      "💤 Тишина на {duration} (до {until})",
+        "monitor_snoozed":      "{uploader} — 💤 Тишина на {duration} (до {until})",
 
         # /timezone
         "tz_current":           "Текущий часовой пояс: {tz}\n\nИзменить: /timezone <смещение>",

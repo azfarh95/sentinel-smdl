@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from . import database as db
 from . import file_serve
 from . import interceptor  # noqa: F401 — triggers plugin auto-load at startup
+from . import miniapp
 from . import stream_monitor
 from .bot import build
 from .downloader import start_cleanup_loop
@@ -75,6 +76,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SM-DL — Social Media Downloader", lifespan=lifespan)
 app.include_router(file_serve.router)
+app.include_router(miniapp.router)
 
 
 @app.get("/health")

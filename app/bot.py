@@ -5,7 +5,7 @@ import logging
 import os
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -818,6 +818,30 @@ async def build() -> Application:
             # other update processing.
             asyncio.create_task(_run_monitor_recording(ctx, chat_id, url))
 
+    async def handle_dashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Open the Mini App dashboard. Requires WEBAPP_URL env var (or
+        webapp_url config key)."""
+        chat_id = update.effective_chat.id
+        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+            return
+        lang = get_lang(chat_id)
+        url = os.environ.get("WEBAPP_URL", "").strip()
+        if not url:
+            await update.message.reply_text(
+                "Mini App URL not configured. Set WEBAPP_URL env var "
+                "(e.g. https://media.az-sentinel.xyz/app) and restart the container."
+            )
+            return
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📱 Open dashboard", web_app=WebAppInfo(url=url))
+        ]])
+        await update.message.reply_text(
+            "Tap below to open the SM-DL dashboard inside Telegram:",
+            reply_markup=keyboard,
+        )
+
+    _app.add_handler(CommandHandler("dashboard", handle_dashboard))
+    _app.add_handler(CommandHandler("app", handle_dashboard))   # alias
     _app.add_handler(CommandHandler("stop_livestream", handle_stop_livestream))
     _app.add_handler(CommandHandler("stop_livestream_download", handle_stop_livestream))  # alias matching user phrasing
     _app.add_handler(CommandHandler("live_status", handle_live_status))

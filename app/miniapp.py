@@ -40,6 +40,34 @@ from .recorder_bridge import bridge
 CONFIG_FILE = os.environ.get("CONFIG_FILE", "/config/smdl.json")
 DOWNLOADS_DIR = os.environ.get("DOWNLOADS_DIR", "/downloads")
 
+# config.py exposes UPPER_SNAKE module constants, not a .get() function.
+# Some keys also rename between the JSON schema and the module constants.
+_KEY_TO_ATTR = {
+    "max_concurrent_downloads": "MAX_CONCURRENT",
+    # everything else: key.upper() works
+}
+
+
+def _cfg_get(key: str, default=None):
+    """Read a config value. Order: JSON file (so UI edits are live) → module
+    constant (loaded at import) → caller-provided default."""
+    file_cfg = _read_config_file_safe()
+    if key in file_cfg:
+        return file_cfg[key]
+    attr = _KEY_TO_ATTR.get(key, key.upper())
+    return getattr(_cfg, attr, default)
+
+
+def _read_config_file_safe() -> dict:
+    """Forward-declared shim so _cfg_get can call into the file reader
+    defined later in the module."""
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            import json as _j
+            return _j.load(f)
+    except Exception:
+        return {}
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -93,7 +121,7 @@ def _validate_init_data(init_data: str, bot_token: str, max_age_s: int = 3600) -
 def _owner_only(payload: dict) -> int:
     """Confirm the validated initData belongs to the configured owner.
     Returns the owner chat_id."""
-    owner = _cfg.get("owner_chat_id")
+    owner = _cfg_get("owner_chat_id")
     if owner is None:
         raise HTTPException(status_code=503, detail="OWNER_CHAT_ID not configured")
     user_id = (payload.get("user") or {}).get("id")
@@ -143,7 +171,7 @@ async def _list_recent_downloads(limit: int = 50) -> list[dict]:
 
 def _list_platforms() -> dict:
     """Return supported (from live_downloader) + configured (from config) platforms."""
-    configured_live = list(_cfg.get("live_platforms") or [])
+    configured_live = list(_cfg_get("live_platforms") or [])
     # Registered labels — flatten host_substrings + label
     registered = [
         {"label": label, "hosts": list(hosts)}
@@ -199,7 +227,7 @@ class StreamStopBody(BaseModel):
 @router.get("/api/miniapp/whoami")
 async def whoami(request: Request):
     p = await _verify(request)
-    return {"user": p.get("user"), "owner": _cfg.get("owner_chat_id")}
+    return {"user": p.get("user"), "owner": _cfg_get("owner_chat_id")}
 
 
 @router.get("/api/miniapp/downloads")
@@ -346,7 +374,7 @@ async def get_config(request: Request):
     # Current values come from the loaded _cfg module (single source of truth).
     current_values = {}
     for s in EDITABLE_SETTINGS:
-        current_values[s["key"]] = _cfg.get(s["key"])
+        current_values[s["key"]] = _cfg_get(s["key"])
     return {
         "settings": EDITABLE_SETTINGS,
         "values": current_values,

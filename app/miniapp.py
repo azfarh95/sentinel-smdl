@@ -104,7 +104,14 @@ def _owner_only(payload: dict) -> int:
 
 async def _verify(request: Request) -> dict:
     """Common request guard: pull X-Init-Data header, validate, owner-check."""
-    bot_token = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN") or ""
+    # bot.py reads SMDL_BOT_TOKEN — keep this in sync. Fall back to the
+    # generic names for cross-deployment portability.
+    bot_token = (
+        os.environ.get("SMDL_BOT_TOKEN")
+        or os.environ.get("BOT_TOKEN")
+        or os.environ.get("TELEGRAM_BOT_TOKEN")
+        or ""
+    )
     if not bot_token:
         raise HTTPException(status_code=503, detail="bot token not configured")
     init_data = request.headers.get("x-init-data") or ""

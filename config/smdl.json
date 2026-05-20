@@ -18,5 +18,26 @@
 
   "monitor_enabled": true,
   "monitor_poll_interval_seconds": 300,
-  "monitor_probe_timeout_seconds": 30
+  "monitor_probe_timeout_seconds": 30,
+
+  "scraper_enabled": true,
+  "scraper_timezone": "Asia/Singapore",
+  "scraper_human_hours_start": "08:00",
+  "scraper_human_hours_end": "23:00",
+  "scraper_daily_sessions": 3,
+  "scraper_default_interval_hours_instagram": 6,
+  "scraper_default_interval_hours_tiktok": 4,
+  "scraper_min_interval_hours": 2,
+  "scraper_max_interval_hours": 48,
+  "scraper_inter_probe_gap_min": 30,
+  "scraper_inter_probe_gap_max": 180,
+  "scraper_playlist_end": 5,
+  "scraper_warmup_days": 7,
+  "scraper_ceiling_ig_per_day": 30,
+  "scraper_ceiling_tt_per_day": 50,
+  "scraper_cooldown_hours_after_block": 24,
+  "scraper_cold_browse_enabled": true,
+  "scraper_disable_after_failures": 5,
+  "scraper_subdir": "scraper",
+  "scraper_notify_per_post": true
 }

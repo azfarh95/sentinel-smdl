@@ -276,9 +276,16 @@ async def get_status() -> dict:
 
 def _normalize_remote_path(p: str) -> str:
     """Microsoft Graph expects '/foo/bar/baz.mp4' under /me/drive/root:
-    Strip leading slashes, then collapse repeats."""
+    Strip leading slashes, collapse repeats, AND percent-encode each
+    segment. Critical for files with '#' (URL fragment delimiter), '?',
+    '&', and other Graph-reserved characters in their names — left raw
+    they truncate or malform the request URL.
+
+    `quote(..., safe="")` percent-encodes EVERYTHING except unreserved
+    chars; the `/` separators are added back by the join."""
+    from urllib.parse import quote
     parts = [seg for seg in p.replace("\\", "/").split("/") if seg]
-    return "/" + "/".join(parts)
+    return "/" + "/".join(quote(seg, safe="") for seg in parts)
 
 
 async def _check_quota(token: str, file_size: int) -> None:
@@ -328,8 +335,14 @@ async def upload_file(local_path: str, remote_path: str) -> dict:
 
     if size <= SIMPLE_UPLOAD_THRESHOLD:
         url = f"{GRAPH_BASE}/me/drive/root:{dest}:/content"
-        async with httpx.AsyncClient(timeout=60.0) as client, src.open("rb") as fh:
-            r = await client.put(url, content=fh.read(),
+        # NOTE: `Path.open("rb")` returns a sync BufferedReader — cannot be
+        # combined with `async with`. Split them: httpx client is async, the
+        # file handle is sync. Read the body fully into memory first (size
+        # ≤4 MB by SIMPLE_UPLOAD_THRESHOLD, so memory cost is bounded).
+        with src.open("rb") as fh:
+            body = fh.read()
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.put(url, content=body,
                                  headers={"Authorization": f"Bearer {token}",
                                           "Content-Type": "application/octet-stream"})
             r.raise_for_status()
@@ -347,33 +360,37 @@ async def upload_file(local_path: str, remote_path: str) -> dict:
         upload_url = r.json()["uploadUrl"]
 
     # PUT chunks. Each chunk requires a Content-Range header.
-    async with httpx.AsyncClient(timeout=120.0) as client, src.open("rb") as fh:
-        offset = 0
-        last_resp = None
-        while offset < size:
-            chunk = fh.read(CHUNK_SIZE)
-            if not chunk:
-                break
-            end = offset + len(chunk) - 1
-            r = await client.put(
-                upload_url,
-                content=chunk,
-                headers={
-                    "Content-Length": str(len(chunk)),
-                    "Content-Range":  f"bytes {offset}-{end}/{size}",
-                },
-            )
-            # 202 Accepted = more chunks expected; 201/200 = done.
-            if r.status_code not in (200, 201, 202):
-                # Best-effort cancel the session before bubbling.
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as c2:
-                        await c2.delete(upload_url)
-                except Exception: pass
-                r.raise_for_status()
-            last_resp = r
-            offset = end + 1
-        return last_resp.json() if last_resp is not None else {}
+    # Same sync/async fix as above — file handle is sync, client is async,
+    # so they can't share an `async with` clause. Use a regular `with` for
+    # the file inside the async `with` for the client.
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        with src.open("rb") as fh:
+            offset = 0
+            last_resp = None
+            while offset < size:
+                chunk = fh.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                end = offset + len(chunk) - 1
+                r = await client.put(
+                    upload_url,
+                    content=chunk,
+                    headers={
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range":  f"bytes {offset}-{end}/{size}",
+                    },
+                )
+                # 202 Accepted = more chunks expected; 201/200 = done.
+                if r.status_code not in (200, 201, 202):
+                    # Best-effort cancel the session before bubbling.
+                    try:
+                        async with httpx.AsyncClient(timeout=5.0) as c2:
+                            await c2.delete(upload_url)
+                    except Exception: pass
+                    r.raise_for_status()
+                last_resp = r
+                offset = end + 1
+            return last_resp.json() if last_resp is not None else {}
 
 
 async def test_upload() -> dict:

@@ -71,7 +71,166 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN pending_code TEXT")
         if "pending_expires_at" not in cols:
             await db.execute("ALTER TABLE users ADD COLUMN pending_expires_at TEXT")
+        # Approved groups — chat_ids of Telegram groups the owner has trusted.
+        # Members of these groups can use the bot WITHOUT per-user approval.
+        # Trade-off: bot replies are visible to the whole group; download
+        # history attributes to the group's chat_id (shared by all members).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS approved_groups (
+                chat_id     INTEGER PRIMARY KEY,
+                label       TEXT,
+                approved_by INTEGER NOT NULL,
+                approved_at TEXT NOT NULL
+            )
+        """)
+        # Profile scraper (V1) — owner-only IG/TikTok profile auto-monitor.
+        # One row per profile being scraped. `last_post_ids` is the JSON list
+        # of the most-recent N post IDs seen on the last successful probe;
+        # next probe diffs against this to find new posts. `next_probe_at` is
+        # the scheduler index — the burst-session scheduler picks profiles
+        # whose `next_probe_at` is in the past and bundles them into a session.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS scraper_profiles (
+                url            TEXT PRIMARY KEY,
+                platform       TEXT NOT NULL,
+                username       TEXT,
+                label          TEXT,
+                enabled        INTEGER NOT NULL DEFAULT 1,
+                last_check_at  TEXT,
+                next_probe_at  TEXT,
+                last_post_ids  TEXT NOT NULL DEFAULT '[]',
+                downloaded_count INTEGER NOT NULL DEFAULT 0,
+                failure_count  INTEGER NOT NULL DEFAULT 0,
+                last_error     TEXT,
+                last_http_code INTEGER,
+                added_by       INTEGER NOT NULL,
+                added_at       TEXT NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sp_next
+            ON scraper_profiles (next_probe_at) WHERE enabled = 1
+        """)
+        # Per-cookie state — failure-cluster detection, daily ceiling, warmup
+        # anchor, stable UA pinning. Cookie identity is the file basename
+        # (e.g. 'instagram', 'tiktok') matching `_resolve_cookies()` in
+        # downloader.py. Auto-populated on first probe.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS scraper_cookies (
+                cookie_key        TEXT PRIMARY KEY,
+                first_seen_at     TEXT NOT NULL,
+                user_agent        TEXT,
+                last_block_at     TEXT,
+                cooldown_until    TEXT,
+                probes_today      INTEGER NOT NULL DEFAULT 0,
+                probes_today_date TEXT,
+                consecutive_blocks INTEGER NOT NULL DEFAULT 0,
+                alerted_at        TEXT
+            )
+        """)
+        # ── Sticker maker ────────────────────────────────────────────────────
+        # Drafts = user-uploaded videos pending edit. TTL 6h via cleanup loop.
+        # Stickers = finalized rows committed to a user's pack.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sticker_drafts (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id           INTEGER NOT NULL,
+                telegram_file_id  TEXT NOT NULL,
+                file_path         TEXT NOT NULL,
+                mime_type         TEXT,
+                duration_s        REAL,
+                width             INTEGER,
+                height            INTEGER,
+                uploaded_at       TEXT NOT NULL,
+                expires_at        TEXT NOT NULL,
+                status            TEXT NOT NULL DEFAULT 'awaiting_edit',
+                error             TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_sticker_drafts_user_status
+            ON sticker_drafts(user_id, status)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_sticker_drafts_expires
+            ON sticker_drafts(expires_at)
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sticker_packs (
+                user_id      INTEGER PRIMARY KEY,
+                pack_name    TEXT NOT NULL UNIQUE,
+                pack_title   TEXT NOT NULL,
+                telegram_url TEXT,
+                created_at   TEXT NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS stickers (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id           INTEGER NOT NULL,
+                pack_name         TEXT NOT NULL,
+                source_draft_id   INTEGER,
+                emoji             TEXT NOT NULL,
+                telegram_file_id  TEXT,
+                webm_path         TEXT,
+                created_at        TEXT NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_stickers_user
+            ON stickers(user_id)
+        """)
         await db.commit()
+
+
+async def is_group_approved(chat_id: int) -> bool:
+    """Fast lookup used by the auth gate. Expects a negative chat_id (groups)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM approved_groups WHERE chat_id = ? LIMIT 1",
+            (int(chat_id),),
+        ) as cur:
+            return (await cur.fetchone()) is not None
+
+
+async def list_approved_groups() -> list[dict]:
+    out: list[dict] = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM approved_groups ORDER BY approved_at DESC"
+        ) as cur:
+            async for row in cur:
+                out.append(dict(row))
+    return out
+
+
+async def approve_group(chat_id: int, label: str | None,
+                         approved_by: int) -> bool:
+    """Insert (or refresh label for) an approved group. Refuses positive
+    chat_ids — those are DMs and use the per-user flow."""
+    if int(chat_id) >= 0:
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO approved_groups (chat_id, label, approved_by, approved_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                label = excluded.label
+        """, (int(chat_id), label, int(approved_by), now))
+        await db.commit()
+        return True
+
+
+async def unapprove_group(chat_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM approved_groups WHERE chat_id = ?",
+            (int(chat_id),),
+        )
+        await db.commit()
+        return (cur.rowcount or 0) > 0
 
 
 import secrets as _secrets
@@ -420,3 +579,452 @@ async def set_setting(key: str, value: str):
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """, (key, value))
         await db.commit()
+
+
+# ── Profile scraper helpers ──────────────────────────────────────────────────
+
+
+async def scraper_add_profile(url: str, platform: str, username: str | None,
+                              label: str | None, added_by: int) -> bool:
+    """Insert a profile to monitor. Idempotent — duplicate URL returns False.
+    Caller is expected to have already validated platform + extracted username."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute("""
+                INSERT INTO scraper_profiles
+                    (url, platform, username, label, enabled, added_by, added_at,
+                     next_probe_at)
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+            """, (_normalise_url(url), platform, username, label, int(added_by), now, now))
+            await db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
+
+
+async def scraper_remove_profile(url: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM scraper_profiles WHERE url = ?",
+            (_normalise_url(url),),
+        )
+        await db.commit()
+        return (cur.rowcount or 0) > 0
+
+
+async def scraper_list_profiles(platform: str | None = None,
+                                 enabled_only: bool = False) -> list[dict]:
+    out: list[dict] = []
+    q = "SELECT * FROM scraper_profiles"
+    args: tuple = ()
+    where: list[str] = []
+    if platform:
+        where.append("platform = ?")
+        args = args + (platform,)
+    if enabled_only:
+        where.append("enabled = 1")
+    if where:
+        q += " WHERE " + " AND ".join(where)
+    q += " ORDER BY platform, username, url"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(q, args) as cur:
+            async for row in cur:
+                d = dict(row)
+                try:    d["last_post_ids"] = json.loads(d.get("last_post_ids") or "[]")
+                except: d["last_post_ids"] = []
+                out.append(d)
+    return out
+
+
+async def scraper_get_profile(url: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM scraper_profiles WHERE url = ?",
+            (_normalise_url(url),),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:    d["last_post_ids"] = json.loads(d.get("last_post_ids") or "[]")
+        except: d["last_post_ids"] = []
+        return d
+
+
+async def scraper_set_enabled(url: str, enabled: bool,
+                               reset_failures: bool = False) -> bool:
+    """Pause / resume polling for one profile."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if reset_failures:
+            cur = await db.execute("""
+                UPDATE scraper_profiles
+                SET enabled = ?, failure_count = 0, last_error = NULL
+                WHERE url = ?
+            """, (1 if enabled else 0, _normalise_url(url)))
+        else:
+            cur = await db.execute("""
+                UPDATE scraper_profiles SET enabled = ? WHERE url = ?
+            """, (1 if enabled else 0, _normalise_url(url)))
+        await db.commit()
+        return (cur.rowcount or 0) > 0
+
+
+async def scraper_due_profiles(now_iso: str, platform: str | None = None,
+                                limit: int = 20) -> list[dict]:
+    """Return enabled profiles whose `next_probe_at` is in the past (or null).
+    Used by the burst-session scheduler to pick a session's batch."""
+    out: list[dict] = []
+    q = """
+        SELECT * FROM scraper_profiles
+        WHERE enabled = 1
+          AND (next_probe_at IS NULL OR next_probe_at <= ?)
+    """
+    args: tuple = (now_iso,)
+    if platform:
+        q += " AND platform = ?"
+        args = args + (platform,)
+    q += " ORDER BY (next_probe_at IS NULL) DESC, next_probe_at ASC LIMIT ?"
+    args = args + (int(limit),)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(q, args) as cur:
+            async for row in cur:
+                d = dict(row)
+                try:    d["last_post_ids"] = json.loads(d.get("last_post_ids") or "[]")
+                except: d["last_post_ids"] = []
+                out.append(d)
+    return out
+
+
+async def scraper_update_probe_result(
+    url: str,
+    *,
+    last_post_ids: list[str] | None = None,
+    next_probe_at: str,
+    http_code: int | None = None,
+    error: str | None = None,
+    failure_reset: bool = False,
+    failure_increment: bool = False,
+    new_downloads: int = 0,
+) -> None:
+    """Persist the outcome of a single probe. last_post_ids is overwritten
+    (caller is responsible for merging if they want history beyond the last N)."""
+    sets: list[str] = ["last_check_at = ?", "next_probe_at = ?",
+                       "last_http_code = ?", "last_error = ?"]
+    now = datetime.now(timezone.utc).isoformat()
+    args: list = [now, next_probe_at, http_code, error]
+    if last_post_ids is not None:
+        sets.append("last_post_ids = ?")
+        args.append(json.dumps(list(last_post_ids)))
+    if failure_reset:
+        sets.append("failure_count = 0")
+    elif failure_increment:
+        sets.append("failure_count = failure_count + 1")
+    if new_downloads:
+        sets.append("downloaded_count = downloaded_count + ?")
+        args.append(int(new_downloads))
+    args.append(_normalise_url(url))
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            f"UPDATE scraper_profiles SET {', '.join(sets)} WHERE url = ?",
+            args,
+        )
+        await db.commit()
+
+
+# ── scraper_cookies state ────────────────────────────────────────────────────
+
+
+async def cookie_ensure(cookie_key: str, user_agent: str) -> dict:
+    """Idempotently create a cookie state row. Sets the warmup anchor +
+    pinned UA on first sight. Returns the persisted row."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("""
+            INSERT INTO scraper_cookies (cookie_key, first_seen_at, user_agent)
+            VALUES (?, ?, ?)
+            ON CONFLICT(cookie_key) DO NOTHING
+        """, (cookie_key, now, user_agent))
+        await db.commit()
+        async with db.execute(
+            "SELECT * FROM scraper_cookies WHERE cookie_key = ?", (cookie_key,)
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else {}
+
+
+async def cookie_get(cookie_key: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM scraper_cookies WHERE cookie_key = ?", (cookie_key,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def cookie_record_probe(cookie_key: str, today: str) -> int:
+    """Bump probes_today for a cookie. Resets when probes_today_date doesn't
+    match the supplied YYYY-MM-DD. Returns the new count."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT probes_today, probes_today_date FROM scraper_cookies "
+            "WHERE cookie_key = ?", (cookie_key,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return 0
+        if (row["probes_today_date"] or "") != today:
+            new_count = 1
+            await db.execute("""
+                UPDATE scraper_cookies
+                SET probes_today = 1, probes_today_date = ?
+                WHERE cookie_key = ?
+            """, (today, cookie_key))
+        else:
+            new_count = int(row["probes_today"] or 0) + 1
+            await db.execute("""
+                UPDATE scraper_cookies
+                SET probes_today = ?
+                WHERE cookie_key = ?
+            """, (new_count, cookie_key))
+        await db.commit()
+        return new_count
+
+
+async def cookie_mark_block(cookie_key: str, cooldown_iso: str) -> None:
+    """Record a 401/403/429 hit on this cookie + extend cooldown."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE scraper_cookies SET
+                last_block_at      = ?,
+                cooldown_until     = ?,
+                consecutive_blocks = consecutive_blocks + 1
+            WHERE cookie_key = ?
+        """, (now, cooldown_iso, cookie_key))
+        await db.commit()
+
+
+async def cookie_mark_success(cookie_key: str) -> None:
+    """A clean 200 — reset the consecutive-block counter."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE scraper_cookies SET consecutive_blocks = 0
+            WHERE cookie_key = ?
+        """, (cookie_key,))
+        await db.commit()
+
+
+async def cookie_mark_alerted(cookie_key: str) -> None:
+    """Record that we sent the owner a cookie-expiry alert (so we don't spam)."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE scraper_cookies SET alerted_at = ? WHERE cookie_key = ?",
+            (now, cookie_key),
+        )
+        await db.commit()
+
+
+async def cookie_clear_alerted(cookie_key: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE scraper_cookies SET alerted_at = NULL WHERE cookie_key = ?",
+            (cookie_key,),
+        )
+        await db.commit()
+
+
+# ── Sticker maker helpers ────────────────────────────────────────────────────
+
+STICKER_DRAFT_TTL_HOURS = 6
+
+
+async def sticker_draft_insert(
+    user_id: int, telegram_file_id: str, file_path: str,
+    mime_type: str | None, duration_s: float | None,
+    width: int | None, height: int | None,
+) -> int:
+    """Insert a new sticker draft. Returns the new row id."""
+    now_dt = datetime.now(timezone.utc)
+    expires = now_dt + _timedelta(hours=STICKER_DRAFT_TTL_HOURS)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("""
+            INSERT INTO sticker_drafts
+                (user_id, telegram_file_id, file_path, mime_type, duration_s,
+                 width, height, uploaded_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (int(user_id), telegram_file_id, file_path, mime_type, duration_s,
+              width, height, now_dt.isoformat(), expires.isoformat()))
+        await db.commit()
+        return cur.lastrowid or 0
+
+
+async def sticker_draft_get(draft_id: int, user_id: int) -> dict | None:
+    """Fetch a draft by id, scoped to its owner. Returns None if not found
+    or owned by someone else (the security boundary)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM sticker_drafts WHERE id = ? AND user_id = ?",
+            (int(draft_id), int(user_id)),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def sticker_draft_list(user_id: int) -> list[dict]:
+    """List all live drafts for a user (newest first)."""
+    out: list[dict] = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM sticker_drafts WHERE user_id = ? "
+            "ORDER BY uploaded_at DESC",
+            (int(user_id),),
+        ) as cur:
+            async for row in cur:
+                out.append(dict(row))
+    return out
+
+
+async def sticker_draft_set_status(draft_id: int, status: str,
+                                    error: str | None = None) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE sticker_drafts SET status = ?, error = ? WHERE id = ?",
+            (status, error, int(draft_id)),
+        )
+        await db.commit()
+
+
+async def sticker_draft_delete(draft_id: int, user_id: int) -> str | None:
+    """Delete one draft. Returns the file_path so the caller can unlink the
+    file. Returns None if no row matched."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT file_path FROM sticker_drafts WHERE id = ? AND user_id = ?",
+            (int(draft_id), int(user_id)),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        await db.execute(
+            "DELETE FROM sticker_drafts WHERE id = ? AND user_id = ?",
+            (int(draft_id), int(user_id)),
+        )
+        await db.commit()
+        return row["file_path"]
+
+
+async def sticker_drafts_delete_all(user_id: int) -> list[str]:
+    """Wipe every draft for a user. Returns the file paths so the caller
+    can unlink them."""
+    paths: list[str] = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT file_path FROM sticker_drafts WHERE user_id = ?",
+            (int(user_id),),
+        ) as cur:
+            async for row in cur:
+                paths.append(row["file_path"])
+        await db.execute(
+            "DELETE FROM sticker_drafts WHERE user_id = ?",
+            (int(user_id),),
+        )
+        await db.commit()
+    return paths
+
+
+async def sticker_drafts_expired() -> list[dict]:
+    """Return all drafts whose expires_at has passed (status != 'done')."""
+    now = datetime.now(timezone.utc).isoformat()
+    out: list[dict] = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM sticker_drafts WHERE expires_at < ? AND status != 'done'",
+            (now,),
+        ) as cur:
+            async for row in cur:
+                out.append(dict(row))
+    return out
+
+
+async def sticker_drafts_purge(draft_ids: list[int]) -> None:
+    if not draft_ids:
+        return
+    placeholders = ",".join("?" * len(draft_ids))
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            f"DELETE FROM sticker_drafts WHERE id IN ({placeholders})",
+            tuple(int(i) for i in draft_ids),
+        )
+        await db.commit()
+
+
+# ── Sticker packs ────────────────────────────────────────────────────────────
+
+
+async def sticker_pack_get(user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM sticker_packs WHERE user_id = ?",
+            (int(user_id),),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def sticker_pack_create(user_id: int, pack_name: str,
+                               pack_title: str, telegram_url: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO sticker_packs
+                (user_id, pack_name, pack_title, telegram_url, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                pack_name    = excluded.pack_name,
+                pack_title   = excluded.pack_title,
+                telegram_url = excluded.telegram_url
+        """, (int(user_id), pack_name, pack_title, telegram_url, now))
+        await db.commit()
+
+
+async def sticker_record(user_id: int, pack_name: str, source_draft_id: int | None,
+                          emoji: str, telegram_file_id: str | None,
+                          webm_path: str | None) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("""
+            INSERT INTO stickers
+                (user_id, pack_name, source_draft_id, emoji, telegram_file_id,
+                 webm_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (int(user_id), pack_name, source_draft_id, emoji,
+              telegram_file_id, webm_path, now))
+        await db.commit()
+        return cur.lastrowid or 0
+
+
+async def sticker_list_for_user(user_id: int) -> list[dict]:
+    out: list[dict] = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM stickers WHERE user_id = ? ORDER BY created_at DESC",
+            (int(user_id),),
+        ) as cur:
+            async for row in cur:
+                out.append(dict(row))
+    return out

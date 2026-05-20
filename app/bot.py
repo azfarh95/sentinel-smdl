@@ -523,6 +523,108 @@ async def build() -> Application:
             lines.append(f"{badge} {label}{tail}\n   {url}")
         await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
 
+    # ── Profile scraper commands (owner-only) ───────────────────────────────
+    async def handle_scrape_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not _is_owner(chat_id):
+            return
+        if not ctx.args:
+            await update.message.reply_text(
+                "Usage: /scrape_add <profile-url> [label]\n"
+                "Example: /scrape_add https://www.instagram.com/someuser"
+            )
+            return
+        from . import profile_monitor as _pm
+        url = ctx.args[0]
+        label = " ".join(ctx.args[1:]) if len(ctx.args) > 1 else None
+        ok, msg = await _pm.add_profile(url, added_by=chat_id, label=label)
+        await update.message.reply_text(("✅ " if ok else "ℹ ") + msg)
+
+    async def handle_scrape_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not _is_owner(chat_id):
+            return
+        if not ctx.args:
+            await update.message.reply_text("Usage: /scrape_remove <profile-url>")
+            return
+        from . import profile_monitor as _pm
+        ok, msg = await _pm.remove_profile(ctx.args[0])
+        await update.message.reply_text(("✅ " if ok else "ℹ ") + msg)
+
+    async def handle_scrape_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not _is_owner(chat_id):
+            return
+        from . import profile_monitor as _pm
+        rows = await _pm.list_profiles()
+        if not rows:
+            await update.message.reply_text("📥 Scrape list is empty. Add one with /scrape_add <url>")
+            return
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        lines = [f"📥 Scrape list ({len(rows)} profile{'s' if len(rows) != 1 else ''})"]
+        last_platform = None
+        for r in rows:
+            plat = (r.get("platform") or "?").lower()
+            if plat != last_platform:
+                lines.append(f"\n— {plat.capitalize()} —")
+                last_platform = plat
+            badge = "⏸" if not r.get("enabled") else "✅"
+            uname = r.get("username") or r.get("label") or r.get("url")
+            fc = int(r.get("failure_count") or 0)
+            dl = int(r.get("downloaded_count") or 0)
+            tail = ""
+            if r.get("next_probe_at"):
+                try:
+                    npa = _dt.fromisoformat(r["next_probe_at"])
+                    delta = npa - now
+                    mins = int(delta.total_seconds() // 60)
+                    if mins < 0:        tail = " · due now"
+                    elif mins < 60:     tail = f" · next ~{mins}m"
+                    elif mins < 60*24:  tail = f" · next ~{mins // 60}h"
+                    else:               tail = f" · next ~{mins // 1440}d"
+                except Exception:
+                    pass
+            fail_tag = f" · ⚠{fc} fails" if fc else ""
+            lines.append(f"{badge} @{uname}  · {dl} pulled{tail}{fail_tag}")
+            if r.get("last_error") and fc:
+                lines.append(f"   ↳ {(r.get('last_error') or '')[:120]}")
+        await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
+
+    async def handle_scrape_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not _is_owner(chat_id):
+            return
+        if not ctx.args:
+            await update.message.reply_text("Usage: /scrape_pause <profile-url>")
+            return
+        from . import profile_monitor as _pm
+        ok, msg = await _pm.pause_profile(ctx.args[0])
+        await update.message.reply_text(("✅ " if ok else "ℹ ") + msg)
+
+    async def handle_scrape_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not _is_owner(chat_id):
+            return
+        if not ctx.args:
+            await update.message.reply_text("Usage: /scrape_resume <profile-url>")
+            return
+        from . import profile_monitor as _pm
+        ok, msg = await _pm.resume_profile(ctx.args[0])
+        await update.message.reply_text(("✅ " if ok else "ℹ ") + msg)
+
+    async def handle_scrape_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not _is_owner(chat_id):
+            return
+        if not ctx.args:
+            await update.message.reply_text("Usage: /scrape_now <profile-url>")
+            return
+        from . import profile_monitor as _pm
+        await update.message.reply_text("⏳ Probing now…")
+        ok, msg = await _pm.probe_now(_app, ctx.args[0])
+        await update.message.reply_text(("✅ " if ok else "⚠ ") + msg)
+
     async def handle_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         if not await _auth.is_authorized(chat_id):
@@ -938,6 +1040,31 @@ async def build() -> Application:
             InlineKeyboardButton("📱 Open dashboard", web_app=WebAppInfo(url=url))
         ]])
 
+    async def _schedule_code_expiry_edit(bot, chat_id: int, message_id: int, lang: str):
+        """Wait one TTL window. If the user is still 'pending' (i.e. didn't
+        get approved during that minute), edit the original message in place
+        so the visible '991-115-289' code is replaced with an 'expired' notice.
+        Approved-during-wait users get nothing edited — the original message
+        with their (now-stale) code stays as benign chat history; no security
+        implication, it's a one-time code that's no longer valid in the DB."""
+        try:
+            from .database import PENDING_CODE_TTL
+            await asyncio.sleep(int(PENDING_CODE_TTL.total_seconds()))
+            user = await _db_users.get_user(chat_id)
+            if not user or (user.get("status") or "").lower() != "pending":
+                return  # approved, banned, or row vanished — don't touch
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=t("access_code_expired", lang),
+                parse_mode="Markdown",
+            )
+        except Exception as _e:
+            # Common cases: message deleted, bot lost access, parse_mode quirks.
+            # All benign — log and move on.
+            logger.debug("pending-code expiry edit failed for %s/%s: %s",
+                         chat_id, message_id, _e)
+
     def _pending_welcome_text(name: str, row: dict) -> str:
         """Welcome shown to pending users. Deliberately does NOT identify
         the bot owner — legitimate users know who to forward the code to."""
@@ -953,16 +1080,42 @@ async def build() -> Application:
         )
 
     async def handle_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """First-touch handler. Records the user, branches on status:
-          - pending → show approval code + instructions
-          - active  → welcome + dashboard button
-          - banned  → polite revoke notice
-          - admin-only mode → "try again later"
+        """First-touch handler. Branches on chat type:
+          - Group, approved   → welcome (no code, shared usage)
+          - Group, unapproved → show chat_id so owner can authorize
+          - DM, pending  → approval code + instructions (60s TTL)
+          - DM, active   → welcome + dashboard button
+          - DM, banned   → polite revoke notice
+          - Admin-only mode → "try again later"
         """
+        chat = update.effective_chat
+        chat_id = chat.id
+        u = update.effective_user
+        name = (u.first_name if u else None) or "there"
+
+        # ── Group / supergroup branch ─────────────────────────────────────
+        if chat and chat.type != "private":
+            mode = await _auth.get_admin_only_mode()
+            if mode["enabled"]:
+                await update.message.reply_text("🔒 Service is in admin-only mode.")
+                return
+            if await _db_users.is_group_approved(chat_id):
+                await update.message.reply_text(
+                    "👋 SMDL is active in this group. "
+                    "Paste any video URL and I'll fetch it here."
+                )
+                return
+            # Unapproved group — tell the owner how to authorize this group.
+            await update.message.reply_markdown(
+                f"🔒 *Group not authorized.*\n\n"
+                f"Ask the bot owner to add this group to the approved list.\n"
+                f"Group chat ID:  `{chat_id}`"
+            )
+            return
+
+        # ── DM branch (existing logic) ────────────────────────────────────
         row = None
         try:
-            u = update.effective_user
-            chat_id = update.effective_chat.id
             row = await _db_users.record_interaction(
                 chat_id,
                 username=(u.username if u else None),
@@ -972,10 +1125,7 @@ async def build() -> Application:
         except Exception as _e:
             logger.warning("record_interaction failed in /start: %s", _e)
 
-        chat_id = update.effective_chat.id
         decision = await _auth.classify(chat_id)
-        u = update.effective_user
-        name = (u.first_name if u else None) or "there"
 
         if decision == "deny_admin_only":
             await update.message.reply_text("🔒 Service is in admin-only mode. Try again later.")
@@ -985,7 +1135,13 @@ async def build() -> Application:
             return
         if decision == "deny_pending":
             text = _pending_welcome_text(name, row or {})
-            await update.message.reply_markdown(text)
+            sent = await update.message.reply_markdown(text)
+            # Schedule the expired-text edit. Owner approval cancels naturally
+            # via the status-check inside the scheduler.
+            if sent and getattr(sent, "message_id", None):
+                asyncio.create_task(_schedule_code_expiry_edit(
+                    ctx.bot, chat_id, sent.message_id, get_lang(chat_id),
+                ))
             return
 
         # decision == "allow" — owner or already-approved user.
@@ -1026,7 +1182,11 @@ async def build() -> Application:
                 # Unknown user (never /started). Suggest the right entrypoint.
                 await update.message.reply_text("Send /start first.")
             return
-        await update.message.reply_markdown(_pending_welcome_text(name, row))
+        sent = await update.message.reply_markdown(_pending_welcome_text(name, row))
+        if sent and getattr(sent, "message_id", None):
+            asyncio.create_task(_schedule_code_expiry_edit(
+                ctx.bot, chat_id, sent.message_id, get_lang(chat_id),
+            ))
 
     async def handle_dashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Open the Mini App dashboard. Requires WEBAPP_URL env var (or
@@ -1048,6 +1208,210 @@ async def build() -> Application:
             reply_markup=kb,
         )
 
+    # ── Sticker maker ──────────────────────────────────────────────────────
+    def _stickers_url() -> str | None:
+        """Derive the /stickers MiniApp URL from WEBAPP_URL. WEBAPP_URL is
+        the dashboard route (usually .../app); /stickers lives at the same
+        host. Returns None if WEBAPP_URL isn't configured."""
+        base = os.environ.get("WEBAPP_URL", "").strip().rstrip("/")
+        if not base:
+            return None
+        if base.endswith("/app"):
+            base = base[:-4]
+        return f"{base}/stickers"
+
+    def _sticker_keyboard() -> InlineKeyboardMarkup | None:
+        url = _stickers_url()
+        if not url:
+            return None
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("🎬 Open sticker editor", web_app=WebAppInfo(url=url))
+        ]])
+
+    async def handle_video_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Catch video / animation / video-document messages — they're the
+        raw material for the sticker maker. Stores a draft (6h TTL) and
+        replies with a MiniApp deeplink."""
+        import uuid as _uuid
+        from pathlib import Path as _Path
+        from . import database as _stickers_db
+        from . import sticker_processor as _sp
+
+        msg = update.effective_message
+        chat = update.effective_chat
+        if not msg or not chat:
+            return
+        # Sticker drafts are user-personal — keep groups out of this.
+        if chat.type != "private":
+            return
+        user = update.effective_user
+        if not user:
+            return
+        chat_id = chat.id
+
+        # Record contact info + auth gate (same gate as text downloads).
+        try:
+            await _db_users.record_interaction(
+                chat_id,
+                username=user.username, first_name=user.first_name,
+                last_name=user.last_name,
+            )
+        except Exception: pass
+        if not await _auth.is_authorized(chat_id):
+            return
+
+        # Identify the payload object + mime
+        obj = None
+        mime = "video/mp4"
+        if msg.video:
+            obj = msg.video; mime = obj.mime_type or "video/mp4"
+        elif msg.animation:
+            obj = msg.animation; mime = obj.mime_type or "video/mp4"
+        elif msg.document and (msg.document.mime_type or "").startswith("video/"):
+            obj = msg.document; mime = msg.document.mime_type or "video/mp4"
+        else:
+            return  # not a video — silently ignore (text handler covers URLs)
+
+        # Bot API caps inbound downloads at 20 MB. Reject loudly so the user
+        # isn't left wondering why nothing happened.
+        if obj.file_size and obj.file_size > 20 * 1024 * 1024:
+            await msg.reply_text(
+                "⚠ That clip is over 20 MB — Telegram won't let bots fetch "
+                "files that large. Trim it down and resend."
+            )
+            return
+
+        ext_guess = {
+            "video/mp4":   ".mp4",
+            "video/webm":  ".webm",
+            "image/gif":   ".gif",
+            "video/quicktime": ".mov",
+        }.get(mime, ".mp4")
+
+        from .sticker_routes import DRAFTS_DIR
+        udir = DRAFTS_DIR / str(user.id)
+        udir.mkdir(parents=True, exist_ok=True)
+        tmp_path = udir / f"tmp_{_uuid.uuid4().hex}{ext_guess}"
+
+        try:
+            tg_file = await ctx.bot.get_file(obj.file_id)
+            await tg_file.download_to_drive(custom_path=str(tmp_path))
+        except Exception as e:
+            logger.warning("sticker draft download failed: %s", e)
+            await msg.reply_text(f"⚠ Couldn't fetch that file: {e}")
+            return
+
+        # Probe for duration + dims (best-effort).
+        meta = await _sp.probe(_Path(tmp_path))
+        dur = meta.get("duration_s") or getattr(obj, "duration", None)
+        try: dur = float(dur) if dur is not None else None
+        except Exception: dur = None
+        width  = meta.get("width")  or getattr(obj, "width", None)
+        height = meta.get("height") or getattr(obj, "height", None)
+
+        # Reject pathologically short clips — ffmpeg can't produce a useful sticker.
+        if dur is not None and dur < 0.3:
+            try: _Path(tmp_path).unlink(missing_ok=True)
+            except Exception: pass
+            await msg.reply_text("⚠ Clip is too short (< 0.3 s).")
+            return
+
+        try:
+            draft_id = await _stickers_db.sticker_draft_insert(
+                user_id=user.id,
+                telegram_file_id=obj.file_id,
+                file_path=str(tmp_path),
+                mime_type=mime,
+                duration_s=dur,
+                width=int(width) if width else None,
+                height=int(height) if height else None,
+            )
+        except Exception as e:
+            logger.exception("sticker draft insert failed")
+            try: _Path(tmp_path).unlink(missing_ok=True)
+            except Exception: pass
+            await msg.reply_text(f"⚠ Storage error: {e}")
+            return
+
+        kb = _sticker_keyboard()
+        body = (
+            f"🎬 Got it ({dur:.1f}s)" if dur else "🎬 Got it"
+        ) + " — open the MiniApp to crop, trim, pick an emoji, and add it to your pack.\n\nDrafts auto-delete after 6 hours."
+        await msg.reply_text(body, reply_markup=kb)
+
+    async def handle_stickers_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Open the sticker MiniApp."""
+        chat_id = update.effective_chat.id
+        if not await _auth.is_authorized(chat_id):
+            return
+        kb = _sticker_keyboard()
+        if kb is None:
+            await update.message.reply_text(
+                "Sticker MiniApp URL not configured (set WEBAPP_URL)."
+            )
+            return
+        await update.message.reply_text(
+            "Send me a video or GIF to start, then tap below:",
+            reply_markup=kb,
+        )
+
+    async def handle_pack_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Show the user's existing pack URL (or tell them they don't have one)."""
+        from . import database as _stickers_db
+        user = update.effective_user
+        chat_id = update.effective_chat.id
+        if not user or not await _auth.is_authorized(chat_id):
+            return
+        pack = await _stickers_db.sticker_pack_get(user.id)
+        if not pack:
+            await update.message.reply_text(
+                "You don't have a sticker pack yet. Send me a video or GIF and "
+                "make one with /stickers."
+            )
+            return
+        await update.message.reply_text(
+            f"📦 {pack['pack_title']}\n{pack['telegram_url']}",
+            disable_web_page_preview=False,
+        )
+
+    async def handle_delete_data_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Wipe all sticker drafts + intermediate files for this user.
+        Doesn't touch published stickers — those live in Telegram's CDN."""
+        from . import database as _stickers_db
+        from pathlib import Path as _Path
+        from .sticker_routes import DRAFTS_DIR, OUTPUT_DIR
+        user = update.effective_user
+        chat_id = update.effective_chat.id
+        if not user or not await _auth.is_authorized(chat_id):
+            return
+
+        paths = await _stickers_db.sticker_drafts_delete_all(user.id)
+        removed = 0
+        for p in paths:
+            try:
+                _Path(p).unlink(missing_ok=True); removed += 1
+            except Exception: pass
+        # Also wipe any encoded outputs for this user.
+        odir = OUTPUT_DIR / str(user.id)
+        if odir.exists():
+            for f in odir.iterdir():
+                try: f.unlink(missing_ok=True)
+                except Exception: pass
+        await update.message.reply_text(
+            f"🗑 Deleted {removed} draft{'s' if removed != 1 else ''}. "
+            "Already-published stickers in your Telegram pack are unaffected."
+        )
+
+    _app.add_handler(CommandHandler("stickers",    handle_stickers_cmd))
+    _app.add_handler(CommandHandler("pack",        handle_pack_cmd))
+    _app.add_handler(CommandHandler("delete_data", handle_delete_data_cmd))
+    _app.add_handler(MessageHandler(
+        (filters.VIDEO | filters.ANIMATION
+         | filters.Document.VIDEO | filters.Document.MimeType("image/gif"))
+        & filters.ChatType.PRIVATE,
+        handle_video_message,
+    ))
+
     _app.add_handler(CommandHandler("start", handle_start))
     _app.add_handler(CommandHandler("regenerate_token", handle_regenerate_token))
     _app.add_handler(CommandHandler("dashboard", handle_dashboard))
@@ -1058,6 +1422,12 @@ async def build() -> Application:
     _app.add_handler(CommandHandler("watch", handle_watch))
     _app.add_handler(CommandHandler("unwatch", handle_unwatch))
     _app.add_handler(CommandHandler("watchlist", handle_watchlist))
+    _app.add_handler(CommandHandler("scrape_add", handle_scrape_add))
+    _app.add_handler(CommandHandler("scrape_remove", handle_scrape_remove))
+    _app.add_handler(CommandHandler("scrape_list", handle_scrape_list))
+    _app.add_handler(CommandHandler("scrape_pause", handle_scrape_pause))
+    _app.add_handler(CommandHandler("scrape_resume", handle_scrape_resume))
+    _app.add_handler(CommandHandler("scrape_now", handle_scrape_now))
     _app.add_handler(CommandHandler("language", handle_language))
     _app.add_handler(CommandHandler("timezone", handle_timezone))
     _app.add_handler(CommandHandler("transcode", handle_transcode))

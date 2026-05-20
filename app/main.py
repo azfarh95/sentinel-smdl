@@ -10,9 +10,12 @@ from . import database as db
 from . import file_serve
 from . import interceptor  # noqa: F401 — triggers plugin auto-load at startup
 from . import miniapp
+from . import profile_monitor
+from . import sticker_routes
 from . import stream_monitor
 from .bot import build
 from .downloader import start_cleanup_loop
+from .sticker_routes import start_cleanup_loop as start_sticker_cleanup_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,6 +62,7 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         logger.warning("user-row self-heal failed: %s", _e)
     asyncio.create_task(start_cleanup_loop())
+    asyncio.create_task(start_sticker_cleanup_loop())
 
     # Bot initialization is best-effort. A bad/missing token must NOT crash
     # the FastAPI lifespan — keep the /health endpoint up so the operator
@@ -68,6 +72,7 @@ async def lifespan(app: FastAPI):
     tg_app = None
     polling_task = None
     monitor_task = None
+    scraper_task = None
     try:
         tg_app = await build()
         await tg_app.initialize()
@@ -76,6 +81,7 @@ async def lifespan(app: FastAPI):
             tg_app.updater.start_polling(drop_pending_updates=True)
         )
         monitor_task = asyncio.create_task(stream_monitor.monitor_loop(tg_app))
+        scraper_task = asyncio.create_task(profile_monitor.scraper_loop(tg_app))
 
         def _on_task_done(t: asyncio.Task):
             if not t.cancelled() and t.exception():
@@ -83,7 +89,8 @@ async def lifespan(app: FastAPI):
 
         polling_task.add_done_callback(_on_task_done)
         monitor_task.add_done_callback(_on_task_done)
-        logger.info("SM-DL bot polling started + stream monitor running")
+        scraper_task.add_done_callback(_on_task_done)
+        logger.info("SM-DL bot polling started + stream monitor + profile scraper running")
     except Exception as e:
         logger.error(
             "Bot startup failed (%s: %s). FastAPI continues running for "
@@ -98,6 +105,8 @@ async def lifespan(app: FastAPI):
         polling_task.cancel()
     if monitor_task and not monitor_task.done():
         monitor_task.cancel()
+    if scraper_task and not scraper_task.done():
+        scraper_task.cancel()
     if tg_app is not None:
         try:
             await tg_app.updater.stop()
@@ -111,6 +120,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="SM-DL — Social Media Downloader", lifespan=lifespan)
 app.include_router(file_serve.router)
 app.include_router(miniapp.router)
+app.include_router(sticker_routes.router)
 
 
 @app.get("/health")

@@ -19,6 +19,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -26,7 +27,7 @@ from urllib.parse import parse_qsl
 
 import aiosqlite
 from fastapi import APIRouter, HTTPException, Request, Header
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from . import config as _cfg
@@ -170,9 +171,64 @@ def _require_owner(payload: dict) -> int:
     return int(user_id)
 
 
+# ── APK cookie auth (shared across all *.az-sentinel.xyz subdomains) ─────────
+# Same scheme is implemented in sentinel-vpn-dashboard/app.py and
+# sentinel-miniapp-v2/bridge.py. With the cookie set on .az-sentinel.xyz,
+# the Mini App can be opened directly from the Suite APK (no Telegram wrapper).
+OWNER_AUTH_TOKEN = os.environ.get("OWNER_AUTH_TOKEN", "")
+COOKIE_NAME      = "sentinel_apk_session"
+COOKIE_DOMAIN    = ".az-sentinel.xyz"
+COOKIE_TTL_SEC   = 90 * 24 * 3600
+
+
+def _issue_apk_cookie() -> str:
+    ts    = str(int(time.time()))
+    nonce = secrets.token_urlsafe(16)
+    body  = f"{ts}.{nonce}"
+    sig   = hmac.new(OWNER_AUTH_TOKEN.encode(), body.encode(), hashlib.sha256).hexdigest()
+    return f"{body}.{sig}"
+
+
+def _verify_apk_cookie(val: str) -> bool:
+    if not val or not OWNER_AUTH_TOKEN:
+        return False
+    try:
+        body, sig = val.rsplit(".", 1)
+        ts_s, _   = body.split(".", 1)
+        expected  = hmac.new(OWNER_AUTH_TOKEN.encode(), body.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return False
+        return (time.time() - int(ts_s)) < COOKIE_TTL_SEC
+    except Exception:
+        return False
+
+
+def _owner_payload_from_cookie() -> dict:
+    """Synthesise the payload that downstream guards expect, treating the
+    cookie-bearer as the owner. Mirrors the shape of a real initData payload."""
+    owner = _cfg_get("owner_chat_id")
+    if owner is None:
+        # Fall back to env (OWNER_CHAT_ID) if config file hasn't loaded yet.
+        owner = os.environ.get("OWNER_CHAT_ID", "")
+    return {"user": {"id": int(owner)} if owner else {}}
+
+
 async def _verify(request: Request) -> dict:
     """Common request guard: HMAC validation + allowed-user check. Owner-only
-    routes must call _require_owner(payload) themselves on top of this."""
+    routes must call _require_owner(payload) themselves on top of this.
+
+    Auth precedence:
+      1. Cookie `sentinel_apk_session` (signed with OWNER_AUTH_TOKEN) — APK path
+      2. `X-Init-Data` header (Telegram WebApp) — Mini App path
+    """
+    # Path 1 — APK cookie (covers Suite APK opening this domain directly).
+    if _verify_apk_cookie(request.cookies.get(COOKIE_NAME, "")):
+        payload = _owner_payload_from_cookie()
+        if payload["user"].get("id"):
+            return payload
+        # If owner_chat_id isn't configured we can't synthesise — fall through.
+
+    # Path 2 — Telegram initData (Mini App opened from inside Telegram).
     # bot.py reads SMDL_BOT_TOKEN — keep this in sync. Fall back to the
     # generic names for cross-deployment portability.
     bot_token = (
@@ -937,6 +993,52 @@ async def admin_approve_by_code(request: Request, body: ApproveByCodeBody):
     }
 
 
+# ── Admin: approved groups ───────────────────────────────────────────────────
+
+
+class GroupApproveBody(BaseModel):
+    chat_id: int
+    label:   Optional[str] = None
+
+
+class GroupUnapproveBody(BaseModel):
+    chat_id: int
+
+
+@router.get("/api/miniapp/admin/groups")
+async def admin_list_groups(request: Request):
+    p = await _verify(request)
+    _require_owner(p)
+    rows = await _db.list_approved_groups()
+    return {"items": rows, "count": len(rows)}
+
+
+@router.post("/api/miniapp/admin/groups/approve")
+async def admin_approve_group(request: Request, body: GroupApproveBody):
+    p = await _verify(request)
+    uid = _require_owner(p)
+    if body.chat_id >= 0:
+        return JSONResponse({"ok": False,
+                             "error": "Group chat_ids are negative. Did you mean to approve a user?"},
+                            status_code=400)
+    ok = await _db.approve_group(body.chat_id, body.label, uid)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "Invalid chat_id."},
+                            status_code=400)
+    return {"ok": True}
+
+
+@router.post("/api/miniapp/admin/groups/unapprove")
+async def admin_unapprove_group(request: Request, body: GroupUnapproveBody):
+    p = await _verify(request)
+    _require_owner(p)
+    ok = await _db.unapprove_group(body.chat_id)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "Group not found."},
+                            status_code=404)
+    return {"ok": True}
+
+
 # ── Admin: bot-token rotation drill ──────────────────────────────────────────
 
 
@@ -1002,6 +1104,186 @@ async def admin_set_sites(request: Request, body: SiteBlocklistBody):
     return {"ok": True, "blocked": persisted}
 
 
+# ── Profile scraper admin endpoints (owner-only) ────────────────────────────
+
+
+class ScraperProfileBody(BaseModel):
+    url:    str
+    label:  Optional[str] = None
+
+
+class ScraperToggleBody(BaseModel):
+    paused: bool
+
+
+@router.get("/api/miniapp/admin/scraper")
+async def admin_scraper_get(request: Request):
+    """Snapshot for the Admin tab card: profile list (per-platform), cookie
+    health, and the global pause flag."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import profile_monitor as _pm
+    profiles = await _db.scraper_list_profiles()
+    # Per-platform cookie health (file presence + age + cooldown).
+    import os as _os
+    from datetime import datetime as _dt, timezone as _tz
+    cookies = []
+    for key in ("instagram", "tiktok"):
+        cookie_file = f"{_pm.COOKIES_DIR}/{key}.txt"
+        file_exists = _os.path.exists(cookie_file)
+        file_age_days = None
+        if file_exists:
+            try:
+                file_age_days = (
+                    (_dt.now(_tz.utc) -
+                     _dt.fromtimestamp(_os.path.getmtime(cookie_file), _tz.utc))
+                    .days
+                )
+            except Exception:
+                pass
+        state = await _db.cookie_get(key)
+        cooldown_seconds = None
+        if state and state.get("cooldown_until"):
+            try:
+                cd = _dt.fromisoformat(state["cooldown_until"])
+                remaining = (cd - _dt.now(_tz.utc)).total_seconds()
+                if remaining > 0:
+                    cooldown_seconds = int(remaining)
+            except Exception:
+                pass
+        cookies.append({
+            "key":              key,
+            "file_exists":      file_exists,
+            "file_age_days":    file_age_days,
+            "first_seen_at":    state.get("first_seen_at") if state else None,
+            "probes_today":     int(state.get("probes_today") or 0) if state else 0,
+            "consecutive_blocks": int(state.get("consecutive_blocks") or 0) if state else 0,
+            "cooldown_seconds": cooldown_seconds,
+            "alerted_at":       state.get("alerted_at") if state else None,
+        })
+    return {
+        "config_enabled":   bool(_pm.SCRAPER_ENABLED),
+        "runtime_paused":   await _pm.is_runtime_paused(),
+        "profiles":         profiles,
+        "cookies":          cookies,
+        "active_hours":     f"{_pm.SCRAPER_HUMAN_HOURS_START}-{_pm.SCRAPER_HUMAN_HOURS_END}",
+        "timezone":         _pm.SCRAPER_TIMEZONE,
+        "daily_sessions":   _pm.SCRAPER_DAILY_SESSIONS,
+    }
+
+
+@router.post("/api/miniapp/admin/scraper/toggle")
+async def admin_scraper_toggle(request: Request, body: ScraperToggleBody):
+    """Pause or resume the scraper globally. Survives restart via settings table."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import profile_monitor as _pm
+    await _pm.set_runtime_paused(bool(body.paused))
+    return {"ok": True, "runtime_paused": await _pm.is_runtime_paused()}
+
+
+@router.post("/api/miniapp/admin/scraper/add")
+async def admin_scraper_add(request: Request, body: ScraperProfileBody):
+    p = await _verify(request)
+    owner = _require_owner(p)
+    from . import profile_monitor as _pm
+    ok, msg = await _pm.add_profile(body.url, added_by=owner, label=body.label)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"ok": True, "msg": msg}
+
+
+@router.post("/api/miniapp/admin/scraper/remove")
+async def admin_scraper_remove(request: Request, body: ScraperProfileBody):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import profile_monitor as _pm
+    ok, msg = await _pm.remove_profile(body.url)
+    if not ok:
+        raise HTTPException(status_code=404, detail=msg)
+    return {"ok": True}
+
+
+@router.post("/api/miniapp/admin/scraper/pause")
+async def admin_scraper_pause(request: Request, body: ScraperProfileBody):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import profile_monitor as _pm
+    ok, msg = await _pm.pause_profile(body.url)
+    if not ok:
+        raise HTTPException(status_code=404, detail=msg)
+    return {"ok": True}
+
+
+@router.post("/api/miniapp/admin/scraper/resume")
+async def admin_scraper_resume(request: Request, body: ScraperProfileBody):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import profile_monitor as _pm
+    ok, msg = await _pm.resume_profile(body.url)
+    if not ok:
+        raise HTTPException(status_code=404, detail=msg)
+    return {"ok": True}
+
+
+@router.post("/api/miniapp/admin/scraper/probe")
+async def admin_scraper_probe(request: Request, body: ScraperProfileBody):
+    """Run a single probe right now (outside the burst-session schedule).
+    Equivalent to /scrape_now in the bot."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import bot as _bot
+    from . import profile_monitor as _pm
+    app = _bot.get_application()
+    if app is None:
+        raise HTTPException(status_code=503, detail="bot not running")
+    ok, msg = await _pm.probe_now(app, body.url)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"ok": True, "msg": msg}
+
+
+# ── Live-recording repair (owner-only) ──────────────────────────────────────
+
+
+@router.get("/api/miniapp/admin/recordings/pending")
+async def admin_recordings_pending(request: Request):
+    """How many .mp4.part files are sitting in /downloads/live/Chaturbate/NA
+    waiting to be remuxed. Drives the Admin tab badge."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import repair_live_parts as _r
+    return _r.scan_pending()
+
+
+@router.post("/api/miniapp/admin/recordings/repair")
+async def admin_recordings_repair(request: Request):
+    """Fire-and-forget the ffmpeg remux pass. Returns immediately with the
+    count of files queued; the actual work runs in a background task and
+    can take 10+ minutes per GB. Refresh the Admin tab afterwards to see
+    the pending count shrink to 0."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import repair_live_parts as _r
+    pending = _r.scan_pending()
+    if pending["count"] == 0:
+        return {"started": False, "queued": 0,
+                "msg": "Nothing to repair — no .mp4.part files."}
+
+    async def _run():
+        # repair_all is sync (uses subprocess.run for ffmpeg) — push to a
+        # thread so we don't block the event loop.
+        try:
+            await asyncio.to_thread(_r.repair_all, _r.DEFAULT_DIR, False, logger)
+        except Exception as e:
+            logger.exception("repair_all background task crashed: %s", e)
+
+    asyncio.create_task(_run())
+    return {"started": True, "queued": pending["count"],
+            "total_bytes": pending["total_bytes"],
+            "msg": f"Queued {pending['count']} file(s) for repair."}
+
+
 @router.post("/api/miniapp/restart")
 async def restart_service(request: Request):
     """Graceful container restart (owner-only). The container's restart_policy
@@ -1053,6 +1335,16 @@ body { margin: 0; padding: 0; font: 15px/1.4 -apple-system, system-ui, "Segoe UI
 .tab .icon { font-size: 20px; line-height: 1; }
 .page { display: none; padding: 12px; }
 .page.active { display: block; }
+.subtabs { display: flex; gap: 6px; margin: 0 0 14px; overflow-x: auto;
+           -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.subtabs::-webkit-scrollbar { display: none; }
+.subtab { padding: 7px 13px; border: 1px solid var(--separator); border-radius: 16px;
+          background: var(--card); color: var(--fg); font-size: 12px; cursor: pointer;
+          white-space: nowrap; transition: background 0.15s; }
+.subtab:hover { background: rgba(255,255,255,0.04); }
+.subtab.active { background: var(--button); color: var(--button-text); border-color: var(--button); }
+.subtab-pane { display: none; }
+.subtab-pane.active { display: block; }
 h1 { font-size: 1.3em; margin: 6px 0 14px; }
 .card { background: var(--section); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
 .row { display: flex; align-items: center; gap: 10px; }
@@ -1153,7 +1445,7 @@ button.warn { background: #ff9500; color: #fff; }
     <div id=downloads-list><div class=empty><span class=spin></span> Loading…</div></div>
   </div>
 
-  <div class=page id=page-watchlist>
+  <div class="page active" id=page-watchlist>
     <h1>Stream Watchlist</h1>
     <div class=card>
       <div class=field>Streamer / channel URL</div>
@@ -1171,14 +1463,9 @@ button.warn { background: #ff9500; color: #fff; }
     <div id=watchlist-list><div class=empty><span class=spin></span> Loading…</div></div>
   </div>
 
-  <div class=page id=page-live>
-    <h1>Live Streams</h1>
-    <div class=card>
-      <div class=field>Start a new recording</div>
-      <input id=stream-url placeholder="https://twitch.tv/... (live URL)">
-      <div style="margin-top:8px"><button onclick=startStream()>▶ Start recording</button></div>
-    </div>
-    <div id=live-list><div class=empty><span class=spin></span> Loading…</div></div>
+  <div class=page id=page-scraper>
+    <h1>Profile Scraper</h1>
+    <div id=scraper-content><div class=empty><span class=spin></span> Loading…</div></div>
   </div>
 
   <div class=page id=page-settings>
@@ -1193,9 +1480,9 @@ button.warn { background: #ff9500; color: #fff; }
 </div>
 
 <div class=tabbar>
-  <div class="tab active" onclick="goto('downloads')"><div class=icon>📥</div><div>Downloads</div></div>
-  <div class=tab onclick="goto('watchlist')"><div class=icon>👁</div><div>Watchlist</div></div>
-  <div class=tab onclick="goto('live')"><div class=icon>🔴</div><div>Live</div></div>
+  <div class=tab onclick="goto('downloads')"><div class=icon>📥</div><div>Downloads</div></div>
+  <div class="tab active" onclick="goto('watchlist')"><div class=icon>👁</div><div>Watchlist</div></div>
+  <div class="tab admin-only" id=tab-scraper onclick="goto('scraper')"><div class=icon>🤖</div><div>Scraper</div></div>
   <div class=tab onclick="goto('settings')"><div class=icon>⚙️</div><div>Settings</div></div>
   <div class="tab admin-only" id=tab-admin onclick="goto('admin')"><div class=icon>🛡</div><div>Admin</div></div>
 </div>
@@ -1204,8 +1491,7 @@ button.warn { background: #ff9500; color: #fff; }
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 const initData = tg?.initData || '';
-let current = 'downloads';
-let liveTimer = null;
+let current = 'watchlist';
 let watchlistTimer = null;
 
 function api(path, opts = {}) {
@@ -1238,17 +1524,13 @@ function duration(s) { if (s<60) return s+'s'; const m = Math.floor(s/60); const
 function goto(page) {
   current = page;
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-'+page));
-  const order = ['downloads','watchlist','live','settings','admin'];
+  const order = ['downloads','watchlist','scraper','settings','admin'];
   document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', order[i] === page));
   if (page === 'downloads') loadDownloads();
   else if (page === 'watchlist') loadWatchlist();
-  else if (page === 'live') loadLive();
+  else if (page === 'scraper') loadScraper();
   else if (page === 'settings') loadSettings();
   else if (page === 'admin') loadAdmin();
-
-  // start/stop the live refresh timer
-  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
-  if (page === 'live') liveTimer = setInterval(loadLive, 5000);
 
   // Watchlist auto-refresh so an in-progress recording's size + duration
   // tick up and a streamer going LIVE flips colour without manual reload.
@@ -1461,7 +1743,14 @@ function openExternal(encodedUrl) {
   // Open the URL in the user's external browser. Inside Telegram, prefer
   // tg.openLink (gives the user the "Open in Chrome / Safari" prompt with
   // their default browser); fall back to window.open elsewhere.
-  const url = decodeURIComponent(encodedUrl);
+  let url = decodeURIComponent(encodedUrl);
+  // Defensive: if the stored URL has no scheme (e.g. "www.twitch.tv/foo"),
+  // tg.openLink treats it as a relative path → resolves against the Mini
+  // App's own origin → 404. Add https:// when scheme is missing.
+  const lc = url.toLowerCase();
+  if (!(lc.startsWith('http://') || lc.startsWith('https://'))) {
+    url = 'https://' + url.replace(/^\/+/, '');
+  }
   try {
     if (tg && tg.openLink) tg.openLink(url);
     else window.open(url, '_blank', 'noopener,noreferrer');
@@ -1544,44 +1833,10 @@ async function _doRemoveWatch(url) {
   } catch(e) { showErr(e); }
 }
 
-async function loadLive() {
-  try {
-    const j = await api('/api/miniapp/active');
-    const root = document.getElementById('live-list');
-    if (!j.items.length) { root.innerHTML = '<div class=empty>No active recordings.</div>'; return; }
-    root.innerHTML = j.items.map(s => `
-      <div class=card>
-        <div class=row>
-          <div class=grow>
-            <div class=name><span class="dot live"></span>${esc(s.platform || 'recording')} · @${esc(s.uploader || '?')}</div>
-            <div class=meta>${duration(s.elapsed_sec)} · ${bytes(s.bytes)} ${s.stop_requested_at ? '· stopping…' : ''}</div>
-            <div class="meta url">${esc(s.url)}</div>
-          </div>
-          <button class="small danger" onclick="stopStream(${s.chat_id})">⏹ Stop</button>
-        </div>
-      </div>
-    `).join('');
-  } catch(e) { showErr('Load failed: '+e); }
-}
-
-async function startStream() {
-  const url = document.getElementById('stream-url').value.trim();
-  if (!url) { showErr('URL required'); return; }
-  try {
-    const j = await api('/api/miniapp/stream/start', { method: 'POST', body: JSON.stringify({url}) });
-    showOk('Recording queued · @' + (j.url||''));
-    document.getElementById('stream-url').value = '';
-    setTimeout(loadLive, 1500);
-  } catch(e) { showErr(e); }
-}
-
-async function stopStream(chat_id) {
-  try {
-    const j = await api('/api/miniapp/stream/stop', { method: 'POST', body: JSON.stringify({chat_id}) });
-    showOk('Stop sent · ' + duration(j.status.elapsed_seconds));
-    setTimeout(loadLive, 1000);
-  } catch(e) { showErr(e); }
-}
+// The Live tab was removed — recording is now triggered from the Watchlist
+// row (and from bot inline prompts when a stream goes live). The
+// /api/miniapp/stream/* + /api/miniapp/active endpoints stay live for those
+// flows; they just aren't surfaced in a dedicated tab anymore.
 
 // The old loadSites/testSiteUrl functions were removed when the Sites tab
 // was consolidated into the Watchlist add card. testWatchUrl() replaces
@@ -1618,6 +1873,61 @@ async function loadSettings() {
     const diskHtml = disk.free_gb != null
       ? `<div class=meta>${disk.free_gb} GB free of ${disk.total_gb} GB · ${disk.used_gb} GB used</div>`
       : `<div class=meta>(disk usage unavailable)</div>`;
+
+    // OneDrive — moved here from Admin tab (it's an integration setting,
+    // not an admin-only operational tool). Only the owner gets the full
+    // connect/disconnect controls; non-owner sees a read-only status.
+    let odHtml = '';
+    try {
+      const od = await api('/api/miniapp/onedrive/status');
+      let odBody;
+      if (od.device_flow) {
+        odBody = `
+          <div class=name>⏳ Awaiting authorization</div>
+          <div style="margin-top:10px;padding:10px;background:var(--bg);border-radius:8px">
+            <div class=meta>Open this URL on any device:</div>
+            <div style="margin:6px 0;font-size:14px;word-break:break-all">
+              <a href="${esc(od.device_flow.verification_uri)}" target=_blank>${esc(od.device_flow.verification_uri)}</a>
+            </div>
+            <div class=meta>Enter this code:</div>
+            <div style="font-family:ui-monospace;font-size:22px;letter-spacing:3px;font-weight:700;margin-top:4px">
+              ${esc(od.device_flow.user_code)}
+            </div>
+            <div class=meta style="margin-top:6px">Expires in <span id=od-expires>${od.device_flow.expires_in}</span>s.</div>
+          </div>`;
+        if (!window._odPoll) {
+          window._odPoll = setInterval(_pollOneDriveDuringConnect, 3000);
+          setTimeout(() => { if (window._odPoll) { clearInterval(window._odPoll); window._odPoll = null; } }, 12*60*1000);
+        }
+      } else if (od.configured) {
+        if (window._odPoll) { clearInterval(window._odPoll); window._odPoll = null; }
+        const q = od.quota;
+        odBody = `
+          <div class=name>✅ Connected · ${esc(od.account || od.display_name || '?')}</div>
+          ${q ? `<div class=meta style="margin-top:4px">${q.free_gb} GB free of ${q.total_gb} GB · ${q.used_gb} GB used ${q.state ? '· ' + esc(q.state) : ''}</div>` : ''}
+          <div class=meta>app …${esc(od.client_id_tail)} ${od.token_valid ? '· token healthy' : '· ⚠ refresh failed'}</div>
+          ${isOwner ? `
+            <div class=btn-row style="margin-top:8px">
+              <button class=sec onclick=testOneDrive()>🧪 Test upload</button>
+              <button class="small danger" onclick=disconnectOneDrive()>Disconnect</button>
+            </div>` : ''}`;
+      } else {
+        if (window._odPoll) { clearInterval(window._odPoll); window._odPoll = null; }
+        odBody = `
+          <div class=name>⚪ Not connected</div>
+          <div class=meta style="margin-top:4px">Azure app …${esc(od.client_id_tail)} · Files.ReadWrite scope</div>
+          ${od.last_error ? `<div class=meta style="color:var(--destructive);margin-top:4px">Last error: ${esc(od.last_error)}</div>` : ''}
+          ${isOwner ? `
+            <div style="margin-top:8px"><button onclick=connectOneDrive()>🔗 Connect OneDrive</button></div>
+            <div class=meta style="margin-top:6px">You'll get a 6-character code to type at microsoft.com/devicelogin.</div>` : ''}`;
+      }
+      odHtml = `
+        <div class=card>
+          <div class=field>📁 OneDrive integration</div>
+          ${odBody}
+        </div>`;
+    } catch(_e) { /* status fetch best-effort — non-owners get 403 */ }
+
     root.innerHTML = `
       ${fields}
       <div class=restart-banner id=restart-banner>
@@ -1626,6 +1936,8 @@ async function loadSettings() {
       <div class=btn-row>
         <button onclick="saveSettings('set-')">💾 Save changes</button>
       </div>
+
+      ${odHtml}
 
       <div class=card>
         <div class=field>Downloads folder (env var, container)</div>
@@ -1691,6 +2003,8 @@ async function bootstrapWhoami() {
     isOwner = !!j.is_owner;
     const tabA = document.getElementById('tab-admin');
     if (tabA) tabA.classList.toggle('show', isOwner);
+    const tabS = document.getElementById('tab-scraper');
+    if (tabS) tabS.classList.toggle('show', isOwner);
   } catch(e) { /* owner-flag is best-effort; tab stays hidden on failure */ }
 }
 
@@ -1703,9 +2017,10 @@ async function loadAdmin() {
   const root = document.getElementById('admin-content');
   root.innerHTML = '<div class=empty><span class=spin></span> Loading…</div>';
   try {
-    const [mode, users, sites, od, cfg] = await Promise.all([
+    const [mode, users, groups, sites, od, cfg] = await Promise.all([
       api('/api/miniapp/admin/mode'),
       api('/api/miniapp/admin/users'),
+      api('/api/miniapp/admin/groups'),
       api('/api/miniapp/admin/sites'),
       api('/api/miniapp/onedrive/status'),
       api('/api/miniapp/config'),
@@ -1786,6 +2101,30 @@ async function loadAdmin() {
                   : `<button class="small danger" onclick="banUser(${u.chat_id})">Ban</button>`)}
               </div>`;
             }).join('')}
+      </div>`;
+
+    // 2c. Approved groups — Telegram groups the owner trusts. Members can
+    //     use the bot without per-user codes; bot replies are visible to
+    //     the whole group.
+    const groupsHtml = `
+      <div class=card>
+        <div class=field>👥 Approved groups (${groups.count})</div>
+        <div class=meta style="margin-bottom:8px">Add a group by chat ID (negative number). Send /start in the target group to see its ID.</div>
+        <div class=row style="gap:6px">
+          <input id=group-chat-id placeholder="-1001234567890" style="flex:1;font-family:ui-monospace">
+          <input id=group-label placeholder="Label (e.g. Friends)" style="flex:1">
+        </div>
+        <div style="margin-top:8px"><button onclick=approveGroup()>+ Approve group</button></div>
+        ${groups.items.length === 0
+          ? '<div class=meta style="margin-top:10px">No approved groups yet.</div>'
+          : groups.items.map(g => `
+              <div class="user-row" style="padding:10px 0;border-top:1px solid var(--separator)">
+                <div class=grow>
+                  <div class=name>${esc(g.label || '(no label)')}</div>
+                  <div class=meta>chat_id ${g.chat_id} · added ${timeago(g.approved_at)}</div>
+                </div>
+                <button class="small danger" onclick="unapproveGroup(${g.chat_id})">Remove</button>
+              </div>`).join('')}
       </div>`;
 
     // 3. Site management — toggles grouped by category for clarity.
@@ -1923,10 +2262,304 @@ async function loadAdmin() {
       </div>`;
     } catch(_e) { /* security card best-effort */ }
 
+    // 7. Live-recording repair — count of *.mp4.part files + one-click button.
+    //    Repair runs in a background task on the server; the page doesn't
+    //    block. User re-opens the Admin tab to see the count shrink.
+    let repairHtml = '';
+    try {
+      const rep = await api('/api/miniapp/admin/recordings/pending');
+      const cnt = rep.count || 0;
+      const bytesGb = (rep.total_bytes || 0) / 1024 / 1024 / 1024;
+      const badgeColor = cnt === 0 ? 'rgba(52,199,89,0.18);color:var(--success)'
+                       : cnt >= 5  ? 'rgba(255,69,58,0.18);color:var(--destructive)'
+                       :             'rgba(255,204,0,0.18);color:#ffcc00';
+      const subline = cnt === 0
+        ? 'No interrupted recordings.'
+        : `${bytesGb.toFixed(2)} GB total · ffmpeg remux ~30-60s per GB`;
+      repairHtml = `
+      <div class=card>
+        <div class=row>
+          <div class=grow>
+            <div class=name>🎞 Live-recording repair
+              <span style="margin-left:6px;padding:1px 6px;border-radius:8px;font-size:11px;font-weight:600;background:${badgeColor}">${cnt} pending</span>
+            </div>
+            <div class=meta>${esc(subline)}</div>
+          </div>
+          ${cnt > 0
+            ? '<button onclick=repairRecordings()>🔧 Repair</button>'
+            : '<button class=sec disabled style="opacity:0.5">✓ Done</button>'}
+        </div>
+        <details style="margin-top:10px;font-size:12px;color:var(--muted)">
+          <summary style="cursor:pointer">What this does</summary>
+          <div style="margin-top:6px;line-height:1.5">
+            Container restarts during a live recording leave behind <code>.mp4.part</code>
+            files that players refuse to open. This re-muxes them with ffmpeg
+            stream-copy (no quality loss, no re-encode) and writes a proper
+            moov atom. Originals are moved to
+            <code>_repaired_originals/</code> in the same folder.
+          </div>
+        </details>
+      </div>`;
+      // Color the badge — reuse the .ok/.warn/.due pattern from elsewhere.
+      // Inline styles since the Admin tab CSS lives in home._layout.
+    } catch(_e) {
+      console.warn('repair card failed:', _e);
+    }
+
+    // Sub-tab layout. Each pill swaps which pane is visible without
+    // re-fetching the data. State (current pill) is preserved across
+    // loadAdmin() refreshes via the `_adminActiveSubtab` module global.
+    const lockdownBanner = mode.enabled
+      ? `<div class=lockdown-banner>🔒 Admin-only session is ACTIVE${mode.reason ? `<div class=reason>${esc(mode.reason)}</div>` : ''}</div>`
+      : '';
+    const subtabsNav = `
+      <div class=subtabs>
+        <button class=subtab data-pane="approval"    onclick="adminGoto('approval')">📋 Approval list</button>
+        <button class=subtab data-pane="permissions" onclick="adminGoto('permissions')">🌐 Permissions</button>
+        <button class=subtab data-pane="tools"       onclick="adminGoto('tools')">🛠 Admin tools</button>
+        <button class=subtab data-pane="server"      onclick="adminGoto('server')">⚙ Server</button>
+      </div>`;
+
     root.innerHTML =
-      (mode.enabled ? `<div class=lockdown-banner>🔒 Admin-only session is ACTIVE${mode.reason ? `<div class=reason>${esc(mode.reason)}</div>` : ''}</div>` : '')
-      + modeHtml + pendingHtml + usersHtml + sitesHtml + securityHtml + settingsHtml + odHtml;
+      lockdownBanner
+      + subtabsNav
+      + `<div class=subtab-pane id=subpane-approval>${pendingHtml + usersHtml + groupsHtml}</div>`
+      + `<div class=subtab-pane id=subpane-permissions>${sitesHtml}</div>`
+      + `<div class=subtab-pane id=subpane-tools>${modeHtml + repairHtml}</div>`
+      + `<div class=subtab-pane id=subpane-server>${securityHtml + settingsHtml}</div>`;
+
+    // Restore the active sub-tab (default: approval).
+    adminGoto(_adminActiveSubtab || 'approval');
   } catch(e) { showErr('Load failed: ' + e); }
+}
+
+let _adminActiveSubtab = 'approval';
+function adminGoto(pane) {
+  _adminActiveSubtab = pane;
+  document.querySelectorAll('.subtab').forEach(b =>
+    b.classList.toggle('active', b.dataset.pane === pane));
+  document.querySelectorAll('.subtab-pane').forEach(p =>
+    p.classList.toggle('active', p.id === 'subpane-' + pane));
+}
+
+async function repairRecordings() {
+  const proceed = await new Promise(res => {
+    if (tg?.showConfirm) tg.showConfirm('Start ffmpeg remux on all pending .mp4.part files? Big files (1+ GB) can take 10+ minutes — runs in the background, refresh to check progress.', ok => res(!!ok));
+    else res(confirm('Start repair?'));
+  });
+  if (!proceed) return;
+  try {
+    const r = await api('/api/miniapp/admin/recordings/repair', { method: 'POST', body: '{}' });
+    if (r.started) {
+      showOk(r.msg || `Queued ${r.queued} file(s).`);
+    } else {
+      showOk(r.msg || 'Nothing pending.');
+    }
+    // Refresh the count after a short delay (it'll still be N until the
+    // first file finishes, but visually confirms the click registered).
+    setTimeout(loadAdmin, 800);
+  } catch(e) { showErr(e); }
+}
+
+// ── Profile scraper page (own tab, owner-only) ─────────────────────────────
+
+async function loadScraper() {
+  if (!isOwner) {
+    document.getElementById('scraper-content').innerHTML =
+      '<div class=empty>Scraper is owner-only.</div>';
+    return;
+  }
+  const root = document.getElementById('scraper-content');
+  root.innerHTML = '<div class=empty><span class=spin></span> Loading…</div>';
+  try {
+    const sc = await api('/api/miniapp/admin/scraper');
+    const pausedBadge = sc.runtime_paused
+      ? '<span style="color:#ff9500">⏸ paused</span>'
+      : '<span style="color:var(--success)">▶ running</span>';
+    const profByPlat = {instagram: [], tiktok: []};
+    for (const p of (sc.profiles || [])) {
+      const plat = (p.platform || 'other').toLowerCase();
+      (profByPlat[plat] || (profByPlat[plat] = [])).push(p);
+    }
+    const renderProfile = (p) => {
+      const enabled = !!p.enabled;
+      const dotColor = enabled ? (p.failure_count > 0 ? '#ff9500' : 'var(--success)') : 'var(--muted)';
+      const uname = p.username || p.label || p.url;
+      let next = '';
+      if (p.next_probe_at) {
+        const npa = new Date(p.next_probe_at).getTime();
+        const mins = Math.floor((npa - Date.now()) / 60000);
+        if (mins < 0)        next = '· due now';
+        else if (mins < 60)  next = `· next ~${mins}m`;
+        else if (mins < 1440) next = `· next ~${Math.floor(mins/60)}h`;
+        else                  next = `· next ~${Math.floor(mins/1440)}d`;
+      }
+      const failTag = p.failure_count > 0 ? `· ⚠${p.failure_count}` : '';
+      const lastErr = (p.failure_count > 0 && p.last_error)
+        ? `<div class=meta style="color:var(--destructive);margin-top:2px">${esc(String(p.last_error).slice(0,140))}</div>`
+        : '';
+      return `
+      <div class="user-row" style="padding:10px 0;border-top:1px solid var(--separator)">
+        <div class=grow>
+          <div class=name>
+            <span class=dot style="background:${dotColor}"></span>
+            @${esc(uname)}
+          </div>
+          <div class=meta>${p.downloaded_count || 0} pulled ${next} ${failTag}</div>
+          <div class="meta url">${esc(p.url)}</div>
+          ${lastErr}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+          <button class="small sec" onclick='scraperProbeNow(${JSON.stringify(p.url)})'>🔄 Probe</button>
+          ${enabled
+            ? `<button class="small sec" onclick='scraperPause(${JSON.stringify(p.url)})'>⏸ Pause</button>`
+            : `<button class="small" onclick='scraperResume(${JSON.stringify(p.url)})'>▶ Resume</button>`}
+          <button class="small danger" onclick='scraperRemove(${JSON.stringify(p.url)})'>🗑</button>
+        </div>
+      </div>`;
+    };
+    const igRows  = (profByPlat.instagram || []).map(renderProfile).join('');
+    const ttRows  = (profByPlat.tiktok    || []).map(renderProfile).join('');
+    const totalProfiles = (sc.profiles || []).length;
+    const cookieHtml = (sc.cookies || []).map(c => {
+      const label = c.key.charAt(0).toUpperCase() + c.key.slice(1);
+      let status, cls;
+      if (!c.file_exists) {
+        status = `⚠ missing /cookies/${c.key}.txt`; cls = 'var(--destructive)';
+      } else if (c.cooldown_seconds && c.cooldown_seconds > 0) {
+        const h = Math.ceil(c.cooldown_seconds / 3600);
+        status = `⏸ cooldown ${h}h (${c.consecutive_blocks} block${c.consecutive_blocks===1?'':'s'})`;
+        cls = 'var(--destructive)';
+      } else {
+        let warmup = '';
+        if (c.first_seen_at) {
+          const days = Math.floor((Date.now() - new Date(c.first_seen_at).getTime()) / 86400000);
+          warmup = days < 7 ? ` · warmup day ${days+1}/7` : '';
+        }
+        status = `✓ ${c.probes_today} probes today${warmup}`;
+        cls = 'var(--success)';
+      }
+      return `
+      <div class=row style="padding:6px 0;border-top:1px solid var(--separator)">
+        <div class=grow>
+          <div class=name>${label}</div>
+          <div class=meta style="color:${cls}">${status}</div>
+        </div>
+        <div class=meta>${c.file_age_days != null ? c.file_age_days + 'd old' : ''}</div>
+      </div>`;
+    }).join('');
+    root.innerHTML = `
+      <div class=card>
+        <div class=row>
+          <div class=grow>
+            <div class=name>Status</div>
+            <div class=meta>${pausedBadge} · ${totalProfiles} profile${totalProfiles===1?'':'s'} · ${sc.daily_sessions} sessions/day · ${esc(sc.active_hours)} ${esc(sc.timezone)}</div>
+          </div>
+          <label class=switch>
+            <input type=checkbox id=scraper-pause-toggle ${sc.runtime_paused?'':'checked'} onchange="setScraperPaused(!this.checked)">
+            <span class=slider></span>
+          </label>
+        </div>
+      </div>
+
+      <div class=card>
+        <div class=field>Add Instagram or TikTok profile</div>
+        <input id=scraper-add-url placeholder="https://www.instagram.com/someuser  or  https://www.tiktok.com/@someuser">
+        <input id=scraper-add-label placeholder="Label (optional)" style="margin-top:6px">
+        <div style="margin-top:8px"><button onclick=scraperAdd()>+ Add to scraper</button></div>
+      </div>
+
+      ${totalProfiles === 0
+        ? '<div class=card><div class=meta>No profiles yet. First probe records a baseline; subsequent probes auto-download new posts.</div></div>'
+        : ''}
+      ${igRows ? `<div class=card><div class=wl-group-head>📸 Instagram (${(profByPlat.instagram||[]).length})</div>${igRows}</div>` : ''}
+      ${ttRows ? `<div class=card><div class=wl-group-head>🎵 TikTok (${(profByPlat.tiktok||[]).length})</div>${ttRows}</div>` : ''}
+
+      <div class=card>
+        <div class=field>Cookies</div>
+        ${cookieHtml || '<div class=meta>No cookies seen yet.</div>'}
+        <div class=meta style="margin-top:8px">Drop fresh files in <code>/cookies/&lt;platform&gt;.txt</code> (host: <code>G:\\YT-DLP\\cookies\\</code>). Re-export every 1-2 weeks for IG, 30+ days for TikTok.</div>
+      </div>`;
+  } catch(e) {
+    if (String(e).includes('owner')) {
+      root.innerHTML = '<div class=empty>Scraper is owner-only.</div>';
+    } else {
+      showErr('Load failed: ' + e);
+    }
+  }
+}
+
+// ── Profile scraper actions ────────────────────────────────────────────────
+
+async function setScraperPaused(paused) {
+  try {
+    await api('/api/miniapp/admin/scraper/toggle', {
+      method: 'POST', body: JSON.stringify({paused}),
+    });
+    showOk(paused ? '⏸ Scraper paused' : '▶ Scraper running');
+    loadScraper();
+  } catch(e) { showErr(e); loadScraper(); }
+}
+
+async function scraperAdd() {
+  const url = (document.getElementById('scraper-add-url')?.value || '').trim();
+  const label = (document.getElementById('scraper-add-label')?.value || '').trim() || null;
+  if (!url) { showErr('URL required'); return; }
+  try {
+    const r = await api('/api/miniapp/admin/scraper/add', {
+      method: 'POST', body: JSON.stringify({url, label}),
+    });
+    showOk(r.msg || 'Added');
+    document.getElementById('scraper-add-url').value = '';
+    document.getElementById('scraper-add-label').value = '';
+    loadScraper();
+  } catch(e) { showErr(e); }
+}
+
+async function scraperRemove(url) {
+  const proceed = await new Promise(res => {
+    if (tg?.showConfirm) tg.showConfirm('Stop scraping this profile? Past downloads stay.', ok => res(!!ok));
+    else res(confirm('Stop scraping this profile?'));
+  });
+  if (!proceed) return;
+  try {
+    await api('/api/miniapp/admin/scraper/remove', {
+      method: 'POST', body: JSON.stringify({url}),
+    });
+    showOk('Removed');
+    loadScraper();
+  } catch(e) { showErr(e); }
+}
+
+async function scraperPause(url) {
+  try {
+    await api('/api/miniapp/admin/scraper/pause', {
+      method: 'POST', body: JSON.stringify({url}),
+    });
+    showOk('Paused');
+    loadScraper();
+  } catch(e) { showErr(e); }
+}
+
+async function scraperResume(url) {
+  try {
+    await api('/api/miniapp/admin/scraper/resume', {
+      method: 'POST', body: JSON.stringify({url}),
+    });
+    showOk('Resumed (failure count reset)');
+    loadScraper();
+  } catch(e) { showErr(e); }
+}
+
+async function scraperProbeNow(url) {
+  try {
+    showOk('⏳ Probing…');
+    const r = await api('/api/miniapp/admin/scraper/probe', {
+      method: 'POST', body: JSON.stringify({url}),
+    });
+    showOk(r.msg || 'Probed');
+    loadScraper();
+  } catch(e) { showErr(e); }
 }
 
 async function approveUser(chat_id) {
@@ -1954,36 +2587,71 @@ async function approveByCode() {
   } catch(e) { showErr(e); }
 }
 
+async function approveGroup() {
+  const idEl = document.getElementById('group-chat-id');
+  const labelEl = document.getElementById('group-label');
+  const chat_id = parseInt((idEl?.value || '').trim(), 10);
+  const label = (labelEl?.value || '').trim() || null;
+  if (!chat_id || chat_id >= 0) {
+    showErr('Group chat IDs are negative numbers (e.g. -1001234567890)');
+    return;
+  }
+  try {
+    await api('/api/miniapp/admin/groups/approve', {
+      method: 'POST', body: JSON.stringify({chat_id, label}),
+    });
+    showOk('Group approved');
+    if (idEl) idEl.value = '';
+    if (labelEl) labelEl.value = '';
+    loadAdmin();
+  } catch(e) { showErr(e); }
+}
+
+async function unapproveGroup(chat_id) {
+  const proceed = await new Promise(res => {
+    if (tg?.showConfirm) tg.showConfirm('Revoke this group’s access?', ok => res(!!ok));
+    else res(confirm('Revoke this group’s access?'));
+  });
+  if (!proceed) return;
+  try {
+    await api('/api/miniapp/admin/groups/unapprove', {
+      method: 'POST', body: JSON.stringify({chat_id}),
+    });
+    showOk('Group revoked');
+    loadAdmin();
+  } catch(e) { showErr(e); }
+}
+
+// OneDrive lives in the Settings tab now (moved from Admin). All callbacks
+// refresh loadSettings() instead of loadAdmin().
 async function connectOneDrive() {
   try {
     const r = await api('/api/miniapp/onedrive/connect', { method: 'POST', body: '{}' });
     showOk('Code issued: ' + r.user_code);
-    loadAdmin();  // re-render to surface the code in the OneDrive card
+    loadSettings();  // surface the code in the OneDrive card
   } catch(e) { showErr(e); }
 }
 
 // Lightweight poll during the device-flow window. Hits only /onedrive/status
-// (one endpoint vs loadAdmin's six), tweaks the countdown in place, and
-// triggers a full loadAdmin() only when the state actually transitions
-// (configured / error) — so the page stops feeling like it's reloading.
+// (no full loadSettings sweep), tweaks the countdown in place, and triggers
+// a full re-render only when the state actually transitions (configured /
+// error) — so the page stops feeling like it's reloading.
 async function _pollOneDriveDuringConnect() {
   try {
     const s = await api('/api/miniapp/onedrive/status');
     if (s.configured || s.last_error) {
-      // Transition — do a full re-render so the success / error UI appears.
+      // Transition — re-render so success / error UI appears.
       if (window._odPoll) { clearInterval(window._odPoll); window._odPoll = null; }
-      loadAdmin();
+      loadSettings();
       if (s.configured) showOk('OneDrive connected');
       else if (s.last_error) showErr('OneDrive: ' + s.last_error);
       return;
     }
-    // Still pending: just refresh the countdown in place; don't redraw.
     const exp = document.getElementById('od-expires');
     if (exp && s.device_flow && s.device_flow.expires_in != null) {
       exp.textContent = s.device_flow.expires_in;
     }
   } catch(e) {
-    // Don't spam the toast on transient polling errors; just log.
     console.warn('OneDrive poll:', e);
   }
 }
@@ -1997,7 +2665,7 @@ async function disconnectOneDrive() {
   try {
     await api('/api/miniapp/onedrive/disconnect', { method: 'POST', body: '{}' });
     showOk('Disconnected');
-    loadAdmin();
+    loadSettings();
   } catch(e) { showErr(e); }
 }
 
@@ -2093,7 +2761,7 @@ async function restartService() {
 
 // Surface the Admin tab if we're owner. Best-effort — failures stay silent.
 bootstrapWhoami();
-goto('downloads');
+goto('watchlist');
 </script>
 </body></html>"""
 
@@ -2106,3 +2774,56 @@ async def miniapp_index():
 @router.get("/app/", response_class=HTMLResponse)
 async def miniapp_index_slash():
     return HTMLResponse(HTML)
+
+
+def _set_apk_cookie(resp, request: Request):
+    host = (request.url.hostname or "").lower()
+    domain = COOKIE_DOMAIN if host.endswith("az-sentinel.xyz") else None
+    resp.set_cookie(
+        key=COOKIE_NAME,
+        value=_issue_apk_cookie(),
+        max_age=COOKIE_TTL_SEC,
+        domain=domain,
+        path="/",
+        secure=domain is not None,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _safe_token_eq(a: str, b: str) -> bool:
+    """Constant-time token comparison tolerant of pasted unicode (mobile
+    keyboards). See sentinel-vpn-dashboard/app.py for the rationale."""
+    if not a or not b:
+        return False
+    try:
+        a_clean = "".join(ch for ch in a if 32 <= ord(ch) < 127)
+        return hmac.compare_digest(a_clean.encode("utf-8"), b.encode("utf-8"))
+    except Exception:
+        return False
+
+
+@router.post("/auth/setup")
+async def auth_setup(request: Request):
+    """Validate owner token → set domain-wide session cookie → 303 to next.
+    Twin of the same endpoint on the Suite launcher and Sentinel AI; with a
+    domain-wide cookie, one setup hop authorises all four tiles."""
+    try:
+        form = await request.form()
+    except Exception:
+        return JSONResponse({"error": "bad_request"}, status_code=400)
+    token = (form.get("token") or "").strip()
+    nxt   = (form.get("next") or "/app").strip()
+    if not nxt.startswith("/"):
+        nxt = "/app"
+    if not _safe_token_eq(token, OWNER_AUTH_TOKEN):
+        return JSONResponse({"error": "invalid_token"}, status_code=401)
+    resp = RedirectResponse(url=nxt, status_code=303)
+    _set_apk_cookie(resp, request)
+    return resp
+
+
+@router.get("/auth/check")
+async def auth_check(request: Request):
+    """Lightweight cookie probe — returns whether the APK session is recognised."""
+    return {"authenticated": _verify_apk_cookie(request.cookies.get(COOKIE_NAME, ""))}

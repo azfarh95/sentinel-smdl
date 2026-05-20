@@ -52,16 +52,21 @@ def is_owner(chat_id: int | None) -> bool:
 async def classify(chat_id: int) -> AuthResult:
     """Return the gate decision. Use for fine-grained 403/503 wording.
 
-    Owner > admin-only-mode > banned > pending > unknown > allow.
-    The bot's record_interaction() runs BEFORE classify() for messages, so
-    a 'deny_unknown' from /classify in the bot context means we have a real
-    race (record failed silently). In the Mini App context it means the
-    user has never DM'd the bot."""
+    Owner > admin-only-mode > approved-group > banned > pending > unknown > allow.
+
+    Group chats (negative chat_ids) go through approved_groups instead of the
+    per-user users table. Owner-DM bypasses both. Admin-only mode blocks
+    everything except owner."""
     if is_owner(chat_id):
         return "allow"
     mode = await get_admin_only_mode()
     if mode["enabled"]:
         return "deny_admin_only"
+    if int(chat_id) < 0:
+        # Group / supergroup. Approved → allow whole group; else deny.
+        if await _db.is_group_approved(int(chat_id)):
+            return "allow"
+        return "deny_unknown"
     user = await _db.get_user(int(chat_id))
     if user is None:
         return "deny_unknown"

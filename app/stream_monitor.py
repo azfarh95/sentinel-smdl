@@ -152,8 +152,19 @@ def extract_username(url: str) -> str:
         return url
 
 
+def _normalize_url(url: str) -> str:
+    """Defensive scheme injection — bare 'twitch.tv/foo' becomes
+    'https://twitch.tv/foo' so Mini App tap-to-open doesn't resolve it
+    against media.az-sentinel.xyz and 404."""
+    u = (url or "").strip()
+    if u and not re.match(r"^https?://", u, re.IGNORECASE):
+        u = "https://" + u.lstrip("/")
+    return u
+
+
 def add_to_watchlist(url: str, label: str | None = None, added_by: int | None = None) -> tuple[bool, str]:
     """Returns (added, message). Idempotent — duplicate URL returns (False, ...)."""
+    url = _normalize_url(url)
     entries = _load_watchlist()
     if any(e.get("url") == url for e in entries):
         return False, f"Already watching {url}"
@@ -211,6 +222,8 @@ def update_watchlist_entry(old_url: str, new_url: str | None = None,
     if target is None:
         return False, f"Not in watchlist: {old_url}"
     # Reject duplicate URL collisions
+    if new_url:
+        new_url = _normalize_url(new_url)
     if new_url and new_url != old_url:
         if any(e.get("url") == new_url for e in entries):
             return False, f"Already watching {new_url}"

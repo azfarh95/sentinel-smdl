@@ -116,6 +116,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_snooze_8h":        "😴 8h",
         "monitor_snoozed":      "{uploader} — 💤 Snoozed for {duration} (until {until})",
 
+        # /start handshake — pending-code expiry edit
+        "access_code_expired": "⏱ One-time access code expired.\nSend /regenerate\\_token for a fresh one.",
+
         # /timezone
         "tz_current":           "Current timezone: {tz}\n\nChange with: /timezone <offset>",
         "tz_set":               "Timezone set to {tz}.",
@@ -227,6 +230,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_snooze_1h":        "💤 1ч",
         "btn_snooze_8h":        "😴 8ч",
         "monitor_snoozed":      "{uploader} — 💤 Тишина на {duration} (до {until})",
+
+        # /start handshake — pending-code expiry edit
+        "access_code_expired": "⏱ Одноразовый код доступа истёк.\nОтправьте /regenerate\\_token для нового.",
 
         # /timezone
         "tz_current":           "Текущий часовой пояс: {tz}\n\nИзменить: /timezone <смещение>",

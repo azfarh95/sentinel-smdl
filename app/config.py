@@ -49,6 +49,51 @@ _DEFAULTS: dict = {
     "monitor_enabled":              True,
     "monitor_poll_interval_seconds": 300,   # 5 min — respects rate-limits, low overhead
     "monitor_probe_timeout_seconds": 30,    # max wait per yt-dlp probe before treating as offline
+    # OneDrive (Phase 2, wired). Admin tab toggles these without code edits.
+    "onedrive_mode":                "on_demand",  # 'on_demand' | 'auto_after_send' | 'disabled'
+    "onedrive_folder":              "/SMDL",
+    "onedrive_delete_after_upload": False,
+    # i18n + tz — read elsewhere via JSON; declared here to suppress the
+    # 'Unknown config keys (ignored)' warning at startup.
+    "language":                     "en",
+    "timezone":                     "Asia/Singapore",
+    # Profile scraper (V1) — owner-only IG/TikTok profile auto-monitor with
+    # behavioural mimicry. The defaults below assume one IG + one TikTok
+    # cookie. Knobs are documented in smdl_scraper_design.md §3 + addendum.
+    "scraper_enabled":              True,
+    # Active hours — probes outside this window are deferred. Hours are in
+    # the timezone given by `scraper_timezone` (defaults to Asia/Singapore;
+    # falls back to UTC if zoneinfo lookup fails).
+    "scraper_timezone":             "Asia/Singapore",
+    "scraper_human_hours_start":    "08:00",
+    "scraper_human_hours_end":      "23:00",
+    # Burst-session model — 2-4 wake-ups per day, each pulling 2-5 profiles.
+    "scraper_daily_sessions":       3,
+    # Per-platform default cadence in HOURS. Each profile uses this if its
+    # own interval isn't overridden. Minimum-clamped to avoid IG/TT alarm.
+    "scraper_default_interval_hours_instagram": 6,
+    "scraper_default_interval_hours_tiktok":    4,
+    "scraper_min_interval_hours":   2,
+    "scraper_max_interval_hours":   48,
+    # Within a session — sequential probes with random gap (seconds).
+    "scraper_inter_probe_gap_min": 30,
+    "scraper_inter_probe_gap_max": 180,
+    # Per-probe playlist depth (how many recent posts yt-dlp pulls).
+    "scraper_playlist_end": 5,
+    # Detection mitigation knobs.
+    "scraper_warmup_days":           7,
+    "scraper_ceiling_ig_per_day":   30,
+    "scraper_ceiling_tt_per_day":   50,
+    "scraper_cooldown_hours_after_block": 24,
+    # Cold-session FYP browse (tactic 11) — adds ~60s of innocuous HTTP at
+    # the start of each session to look like "user opened the app first."
+    "scraper_cold_browse_enabled":  True,
+    # After this many consecutive failures on a profile, auto-disable.
+    "scraper_disable_after_failures": 5,
+    # Storage paths (under DOWNLOADS_DIR).
+    "scraper_subdir":               "scraper",
+    # Notification verbosity.
+    "scraper_notify_per_post":      True,
 }
 
 logger = logging.getLogger(__name__)
@@ -103,3 +148,27 @@ ONEDRIVE_DELETE_AFTER_UPLOAD:  bool = bool(_cfg.get("onedrive_delete_after_uploa
 MONITOR_ENABLED:                bool = bool(_cfg["monitor_enabled"])
 MONITOR_POLL_INTERVAL_SECONDS:  int  = int(_cfg["monitor_poll_interval_seconds"])
 MONITOR_PROBE_TIMEOUT_SECONDS:  int  = int(_cfg["monitor_probe_timeout_seconds"])
+
+# Profile scraper (V1)
+SCRAPER_ENABLED:                bool = bool(_cfg["scraper_enabled"])
+SCRAPER_TIMEZONE:               str  = str(_cfg["scraper_timezone"])
+SCRAPER_HUMAN_HOURS_START:      str  = str(_cfg["scraper_human_hours_start"])
+SCRAPER_HUMAN_HOURS_END:        str  = str(_cfg["scraper_human_hours_end"])
+SCRAPER_DAILY_SESSIONS:         int  = int(_cfg["scraper_daily_sessions"])
+SCRAPER_DEFAULT_INTERVAL_HOURS: dict = {
+    "instagram": int(_cfg["scraper_default_interval_hours_instagram"]),
+    "tiktok":    int(_cfg["scraper_default_interval_hours_tiktok"]),
+}
+SCRAPER_MIN_INTERVAL_HOURS:     int  = int(_cfg["scraper_min_interval_hours"])
+SCRAPER_MAX_INTERVAL_HOURS:     int  = int(_cfg["scraper_max_interval_hours"])
+SCRAPER_INTER_PROBE_GAP_MIN:    int  = int(_cfg["scraper_inter_probe_gap_min"])
+SCRAPER_INTER_PROBE_GAP_MAX:    int  = int(_cfg["scraper_inter_probe_gap_max"])
+SCRAPER_PLAYLIST_END:           int  = int(_cfg["scraper_playlist_end"])
+SCRAPER_WARMUP_DAYS:            int  = int(_cfg["scraper_warmup_days"])
+SCRAPER_CEILING_IG_PER_DAY:     int  = int(_cfg["scraper_ceiling_ig_per_day"])
+SCRAPER_CEILING_TT_PER_DAY:     int  = int(_cfg["scraper_ceiling_tt_per_day"])
+SCRAPER_COOLDOWN_HOURS_AFTER_BLOCK: int = int(_cfg["scraper_cooldown_hours_after_block"])
+SCRAPER_COLD_BROWSE_ENABLED:    bool = bool(_cfg["scraper_cold_browse_enabled"])
+SCRAPER_DISABLE_AFTER_FAILURES: int  = int(_cfg["scraper_disable_after_failures"])
+SCRAPER_SUBDIR:                 str  = str(_cfg["scraper_subdir"])
+SCRAPER_NOTIFY_PER_POST:        bool = bool(_cfg["scraper_notify_per_post"])

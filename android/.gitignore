@@ -1,0 +1,22 @@
+# Host-mounted volumes for the Docker-based gradle build — never commit.
+.gradle/
+.gradle-cache/
+.gradle-bin/
+
+# Android Gradle Plugin build output (includes the .apk; rebuild on demand).
+app/build/
+build/
+*.apk
+*.aab
+*.aar
+
+# IDE noise.
+.idea/
+*.iml
+.cxx/
+captures/
+
+# MSYS path-mangling residue from earlier docker runs on Git Bash.
+*\;C/
+*\;C
+local.properties

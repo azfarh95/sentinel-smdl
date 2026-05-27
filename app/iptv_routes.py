@@ -343,15 +343,18 @@ _BROWSE_HTML = r"""<!doctype html>
     :root { color-scheme: dark light; --drawer-w: 280px; }
     * { box-sizing: border-box; }
     html, body { margin:0; padding:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-           background:var(--tg-theme-bg-color,#0f1115); color:var(--tg-theme-text-color,#e8eaed);
-           min-height:100vh; }
+           background:var(--tg-theme-bg-color,#0f1115); color:var(--tg-theme-text-color,#e8eaed); }
+    /* Independent scroll containers so position:sticky on the topbar has
+       a real viewport to pin to. Without this, scrolling the body past
+       the topbar's natural position caused it to disappear. */
+    html, body { height:100%; overflow:hidden; }
     body { display:flex; }
 
     /* ── Drawer / left nav ──────────────────────────────────────── */
     .drawer {
       width:var(--drawer-w); flex-shrink:0; background:#0c0e13;
       border-right:1px solid #1d2129; overflow-y:auto; overflow-x:hidden;
-      padding-bottom:24px;
+      padding-bottom:24px; height:100vh;
     }
     .drawer .drawer-h {
       display:flex; align-items:center; justify-content:space-between;
@@ -391,7 +394,10 @@ _BROWSE_HTML = r"""<!doctype html>
     .chip.active { background:#3390ec; border-color:#3390ec; color:#fff; }
 
     /* ── Main column ────────────────────────────────────────────── */
-    .main { flex:1; min-width:0; }
+    .main {
+      flex:1; min-width:0;
+      height:100vh; overflow-y:auto; overflow-x:hidden;
+    }
     .topbar {
       position:sticky; top:0; z-index:10;
       display:flex; gap:8px; align-items:center;
@@ -424,10 +430,10 @@ _BROWSE_HTML = r"""<!doctype html>
 
     /* ── Mobile (<768px) — drawer becomes slide-in overlay ──────── */
     @media (max-width: 767px) {
-      body { display:block; }
+      body { display:block; height:100vh; overflow:hidden; }
       .drawer {
         position:fixed; top:0; bottom:0; left:calc(-1 * var(--drawer-w));
-        transition: left .22s ease; z-index:60;
+        transition: left .22s ease; z-index:60; height:100vh;
       }
       .drawer.open { left:0; box-shadow:0 0 36px rgba(0,0,0,.55); }
       .drawer .close-btn { display:block; }
@@ -437,7 +443,7 @@ _BROWSE_HTML = r"""<!doctype html>
       }
       .drawer-backdrop.show { display:block; }
       .topbar .hamburger { display:block; }
-      .main { width:100%; }
+      .main { width:100%; height:100vh; overflow-y:auto; }
     }
     .card {
       background:#181b22; border:1px solid #232831; border-radius:12px;
@@ -1225,13 +1231,29 @@ async function maybeShowExitWarning() {
   el.classList.add('show');
 }
 
-document.getElementById('play-vlc').addEventListener('click', () => {
+// Are we running inside the SMDL-IPTV APK shell (custom UA suffix) vs
+// real Telegram / a system browser? The APK's WebView has a custom
+// shouldOverrideUrlLoading that handles HLS/DASH/TS with MIME-typed
+// intents preferring VLC; navigating the WebView triggers it. In other
+// runtimes, tg.openLink is the right path.
+function isApk() {
+  return /SMDL-IPTV\//.test(navigator.userAgent || '');
+}
+
+document.getElementById('play-vlc')?.addEventListener('click', () => {
   if (!CHANNEL?.url) return toast('No URL');
-  // tg.openLink takes the stream out of Telegram's WebView to the system
-  // browser/handler. If VLC has registered itself for .m3u8 / application/
-  // vnd.apple.mpegurl, the OS will offer / open it directly.
-  if (tg?.openLink) tg.openLink(CHANNEL.url, { try_instant_view: false });
-  else window.open(CHANNEL.url, '_blank');
+  if (isApk()) {
+    // The APK's webViewClient.shouldOverrideUrlLoading sees the .m3u8 /
+    // .mpd / .ts URL and fires an Intent.ACTION_VIEW with the right
+    // MIME, preferring VLC > MX Player > chooser. Without this APK
+    // path, tg.openLink would route through the system browser which
+    // tries to render .mpd and falls back to downloading.
+    window.location.href = CHANNEL.url;
+  } else if (tg?.openLink) {
+    tg.openLink(CHANNEL.url, { try_instant_view: false });
+  } else {
+    window.open(CHANNEL.url, '_blank');
+  }
 });
 
 // Stream-type detection from URL extension. Content-Type probe would be

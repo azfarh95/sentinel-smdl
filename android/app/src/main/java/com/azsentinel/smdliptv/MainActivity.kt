@@ -61,22 +61,54 @@ class MainActivity : AppCompatActivity() {
                     val url = req.url
                     val urlStr = url.toString()
                     val host = url.host ?: ""
-                    val isStreamUrl = urlStr.endsWith(".m3u8") ||
-                                      urlStr.endsWith(".m3u")  ||
-                                      urlStr.endsWith(".mpd")  ||
-                                      urlStr.endsWith(".ts")
+                    val mime = mimeForStreamUrl(urlStr)
+                    val isStreamUrl = mime != null
                     val isOurHost = host.endsWith("az-sentinel.xyz") ||
                                     host == "localhost"
-                    if (isStreamUrl || !isOurHost) {
-                        // External link or HLS stream — hand off to OS chooser
-                        // so VLC / browser / etc. can claim it.
+                    if (isStreamUrl) {
+                        // Stream URL — try to launch VLC directly with the
+                        // right MIME (so DASH / HLS / TS get treated as a
+                        // video stream, not as an unknown file to download).
+                        // Falls back to the system chooser if VLC isn't
+                        // installed.
+                        val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(url, mime)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        for (pkg in listOf(
+                            "org.videolan.vlc",       // VLC for Android
+                            "com.mxtech.videoplayer.ad",  // MX Player Free
+                            "com.mxtech.videoplayer.pro", // MX Player Pro
+                        )) {
+                            try {
+                                val direct = Intent(viewIntent).apply {
+                                    setPackage(pkg)
+                                }
+                                startActivity(direct)
+                                return true
+                            } catch (_: Exception) {
+                                // package not installed, try next
+                            }
+                        }
+                        // No known player installed — show chooser. Excludes
+                        // ourselves so the WebView doesn't appear as an option.
+                        try {
+                            val chooser = Intent.createChooser(viewIntent, "Open stream with…")
+                                .apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+                            startActivity(chooser)
+                        } catch (_: Exception) {
+                            return false
+                        }
+                        return true
+                    }
+                    if (!isOurHost) {
+                        // Non-stream external link — system chooser.
                         try {
                             val intent = Intent(Intent.ACTION_VIEW, url).apply {
                                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             }
                             startActivity(intent)
                         } catch (_: Exception) {
-                            // No handler — let the WebView try.
                             return false
                         }
                         return true
@@ -136,5 +168,22 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         CookieManager.getInstance().flush()
+    }
+
+    /** Map a stream URL to the standard MIME type Android players use to
+     *  advertise themselves for ACTION_VIEW. Without an explicit MIME the
+     *  system tries to guess from the path extension, which often misses
+     *  for query-stringed URLs and falls through to the browser (which
+     *  then downloads the manifest instead of streaming it). */
+    private fun mimeForStreamUrl(url: String): String? {
+        // strip query / fragment before the extension check
+        val clean = url.substringBefore("?").substringBefore("#").lowercase()
+        return when {
+            clean.endsWith(".m3u8") -> "application/vnd.apple.mpegurl"
+            clean.endsWith(".m3u")  -> "audio/x-mpegurl"
+            clean.endsWith(".mpd")  -> "application/dash+xml"
+            clean.endsWith(".ts")   -> "video/mp2t"
+            else -> null
+        }
     }
 }

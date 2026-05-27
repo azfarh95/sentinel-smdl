@@ -54,7 +54,7 @@ if [[ ! -f "$APK" ]]; then
 fi
 ls -lh "$APK"
 
-CAPTION=$'📺 SMDL IPTV v0.1.0 (debug-signed)\n\nSideload: enable "Install unknown apps" for your file manager, tap the APK.\n\nFirst launch: paste your OWNER_AUTH_TOKEN into the overlay → cookie persists 90d → channels load.\n\nVLC handoff: tapping a stream URL inside a channel hands `.m3u8` to the OS; install VLC for Android so the chooser offers it.'
+CAPTION=$'📺 SMDL IPTV v0.2.0 (debug-signed)\n\nWhat\'s new:\n• Stream URLs (HLS/DASH/TS) now intent-dispatch with proper MIME and prefer VLC > MX Player > chooser → no more browser-download for .mpd files.\n• Left drawer / sidebar with alphabetical Country list.\n• Filters persist across launches.\n• Sticky search bar no longer disappears after scroll.\n\nSideload over v0.1.0 — cookie + filters survive.'
 
 echo "==> sending to Telegram chat $CHAT_ID"
 curl -fsS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \

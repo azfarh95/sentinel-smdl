@@ -340,41 +340,104 @@ _BROWSE_HTML = r"""<!doctype html>
   <title>SMDL · Live TV</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
-    :root { color-scheme: dark light; }
+    :root { color-scheme: dark light; --drawer-w: 280px; }
     * { box-sizing: border-box; }
-    body { margin:0; padding:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-           background:var(--tg-theme-bg-color,#0f1115); color:var(--tg-theme-text-color,#e8eaed); }
-    .hero { padding:14px 14px 4px; }
-    .hero h1 { font-size:20px; margin:0 0 2px; }
-    .hero .sub { font-size:12px; color:var(--tg-theme-hint-color,#8a8f99); }
-    .actions-row { display:flex; gap:8px; margin-top:10px; }
+    html, body { margin:0; padding:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+           background:var(--tg-theme-bg-color,#0f1115); color:var(--tg-theme-text-color,#e8eaed);
+           min-height:100vh; }
+    body { display:flex; }
+
+    /* ── Drawer / left nav ──────────────────────────────────────── */
+    .drawer {
+      width:var(--drawer-w); flex-shrink:0; background:#0c0e13;
+      border-right:1px solid #1d2129; overflow-y:auto; overflow-x:hidden;
+      padding-bottom:24px;
+    }
+    .drawer .drawer-h {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:14px; border-bottom:1px solid #1d2129; position:sticky; top:0;
+      background:#0c0e13; z-index:2;
+    }
+    .drawer .drawer-h h1 { margin:0; font-size:17px; }
+    .drawer .drawer-h .sub { font-size:10px; color:var(--tg-theme-hint-color,#8a8f99); margin-top:1px; }
+    .drawer .close-btn {
+      display:none; background:transparent; border:0; color:#8a8f99;
+      font-size:22px; cursor:pointer; padding:4px 10px;
+    }
+    .drawer .section-h {
+      padding:14px 14px 6px; font-size:10px; letter-spacing:.1em;
+      color:var(--tg-theme-hint-color,#8a8f99); text-transform:uppercase;
+    }
+    .actions-row { display:flex; gap:6px; padding:8px 14px; flex-wrap:wrap; }
     .actions-row button {
-      flex:1; font:inherit; border:0; padding:8px 10px; border-radius:8px;
-      background:var(--tg-theme-button-color,#3390ec); color:#fff; cursor:pointer; font-size:13px;
+      flex:1 1 auto; min-width:0; font:inherit; border:0; padding:9px 8px;
+      border-radius:8px; background:var(--tg-theme-button-color,#3390ec);
+      color:#fff; cursor:pointer; font-size:12px;
     }
     .actions-row button.ghost {
       background:transparent; color:var(--tg-theme-link-color,#5ac8fa);
       border:1px solid currentColor;
     }
-    .search { padding:8px 14px 4px; }
-    .search input {
+    .chip-row {
+      display:flex; flex-direction:column; gap:4px; padding:0 14px 4px;
+    }
+    .chip {
+      display:block; width:100%; text-align:left; font-size:12px;
+      padding:8px 11px; border-radius:8px;
+      background:#15181f; border:1px solid #232831; cursor:pointer;
+      user-select:none; color:#cfd2d8; transition: background .08s ease, border-color .08s ease;
+    }
+    .chip:hover { background:#1a1d24; }
+    .chip.active { background:#3390ec; border-color:#3390ec; color:#fff; }
+
+    /* ── Main column ────────────────────────────────────────────── */
+    .main { flex:1; min-width:0; }
+    .topbar {
+      position:sticky; top:0; z-index:10;
+      display:flex; gap:8px; align-items:center;
+      padding:10px 14px; background:rgba(15,17,21,.92);
+      backdrop-filter:saturate(180%) blur(8px);
+      border-bottom:1px solid #1d2129;
+    }
+    .topbar .hamburger {
+      display:none; background:transparent; border:0; color:#cfd2d8;
+      font-size:22px; cursor:pointer; padding:0 4px;
+    }
+    .topbar .search-wrap { flex:1; }
+    .topbar input[type=search] {
       width:100%; padding:9px 12px; border-radius:10px; border:1px solid #2a2f3a;
       background:#181b22; color:#fff; font-size:14px;
     }
-    .chip-row { display:flex; gap:6px; padding:8px 14px; overflow-x:auto;
-                white-space:nowrap; -webkit-overflow-scrolling:touch; scrollbar-width:none; }
-    .chip-row::-webkit-scrollbar { display:none; }
-    .chip {
-      flex:0 0 auto; font-size:12px; padding:6px 10px; border-radius:14px;
-      background:#1a1d24; border:1px solid #2a2f3a; cursor:pointer; user-select:none;
-      color:#cfd2d8;
+    .topbar .icon-btn {
+      background:transparent; border:0; color:#5ac8fa; font-size:18px;
+      padding:6px 10px; cursor:pointer; border-radius:8px;
     }
-    .chip.active { background:#3390ec; border-color:#3390ec; color:#fff; }
-    .section-h { padding:14px 14px 4px; font-size:11px; letter-spacing:.08em;
-                 color:var(--tg-theme-hint-color,#8a8f99); text-transform:uppercase; }
+    .topbar .icon-btn:hover { background:#1a1d24; }
+    .section-h.result-h {
+      padding:12px 14px 6px; font-size:11px; letter-spacing:.08em;
+      color:var(--tg-theme-hint-color,#8a8f99); text-transform:uppercase;
+    }
     .grid {
       display:grid; gap:10px; padding:6px 14px 90px;
       grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    }
+
+    /* ── Mobile (<768px) — drawer becomes slide-in overlay ──────── */
+    @media (max-width: 767px) {
+      body { display:block; }
+      .drawer {
+        position:fixed; top:0; bottom:0; left:calc(-1 * var(--drawer-w));
+        transition: left .22s ease; z-index:60;
+      }
+      .drawer.open { left:0; box-shadow:0 0 36px rgba(0,0,0,.55); }
+      .drawer .close-btn { display:block; }
+      .drawer-backdrop {
+        position:fixed; inset:0; background:rgba(0,0,0,.5);
+        z-index:55; display:none;
+      }
+      .drawer-backdrop.show { display:block; }
+      .topbar .hamburger { display:block; }
+      .main { width:100%; }
     }
     .card {
       background:#181b22; border:1px solid #232831; border-radius:12px;
@@ -451,35 +514,53 @@ _BROWSE_HTML = r"""<!doctype html>
   </div>
 </div>
 
-<div class="back" onclick="if(window.history.length>1)history.back();else location.href='/app'">← Back to SMDL</div>
+<div class="drawer-backdrop" id="drawer-backdrop"></div>
 
-<div class="hero">
-  <h1>📺 Live TV</h1>
-  <div class="sub" id="sub">Powered by iptv-org · click a channel to watch in VLC</div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-h">
+    <div>
+      <h1>📺 Live TV</h1>
+      <div class="sub">click a channel to watch in VLC</div>
+    </div>
+    <button class="close-btn" id="drawer-close" aria-label="close">×</button>
+  </div>
+
   <div class="actions-row">
-    <button id="refresh-btn">↻ Refresh all sources</button>
-    <button class="ghost" id="probe-all-btn">🩺 Probe all (alive check)</button>
+    <button id="refresh-btn">↻ Refresh all</button>
+    <button class="ghost" id="probe-all-btn">🩺 Probe</button>
+  </div>
+  <div class="actions-row">
     <button class="ghost" id="alive-only-btn">✓ Alive only: off</button>
   </div>
-  <div class="actions-row" id="country-quick-row" style="margin-top:6px"></div>
-  <div id="probe-status" style="display:none; font-size:11px; color:var(--tg-theme-hint-color,#8a8f99); margin-top:6px;"></div>
-</div>
+  <div class="actions-row" id="country-quick-row"></div>
+  <div id="probe-status" style="display:none; padding:0 14px; font-size:11px; color:var(--tg-theme-hint-color,#8a8f99);"></div>
 
-<div class="search">
-  <input id="search" type="search" placeholder="Search channels (CNN, BBC, news…)">
-</div>
+  <div class="section-h">Country</div>
+  <div class="chip-row" id="country-chips"></div>
 
-<div class="section-h">Source</div>
-<div class="chip-row" id="source-chips"></div>
+  <div class="section-h">Source</div>
+  <div class="chip-row" id="source-chips"></div>
 
-<div class="section-h">Country</div>
-<div class="chip-row" id="country-chips"></div>
+  <div class="section-h">Category</div>
+  <div class="chip-row" id="category-chips"></div>
 
-<div class="section-h">Category</div>
-<div class="chip-row" id="category-chips"></div>
+  <div class="section-h" style="margin-top:12px">
+    <a href="/app" style="color:#5ac8fa; text-decoration:none;">← Back to SMDL</a>
+  </div>
+</aside>
 
-<div class="section-h" id="result-h">Channels</div>
-<div class="grid" id="grid"><div class="loading">Loading…</div></div>
+<main class="main">
+  <div class="topbar">
+    <button class="hamburger" id="hamburger-btn" aria-label="filters">☰</button>
+    <div class="search-wrap">
+      <input id="search" type="search" placeholder="Search channels (CNN, BBC, news…)">
+    </div>
+    <button class="icon-btn" id="refresh-top-btn" title="Refresh all sources" aria-label="refresh">↻</button>
+  </div>
+
+  <div class="section-h result-h" id="result-h">Channels</div>
+  <div class="grid" id="grid"><div class="loading">Loading…</div></div>
+</main>
 
 <div class="toast" id="toast"></div>
 
@@ -554,7 +635,7 @@ function showLogin() {
   document.getElementById('login-token').focus();
 }
 
-document.getElementById('login-submit').addEventListener('click', async () => {
+document.getElementById('login-submit')?.addEventListener('click', async () => {
   const btn = document.getElementById('login-submit');
   const errEl = document.getElementById('login-err');
   const tokenEl = document.getElementById('login-token');
@@ -674,6 +755,7 @@ function makeChip(label, value, active, kind) {
     loadChannels();
     document.querySelectorAll(`#${kind}-chips .chip`).forEach(c => c.classList.remove('active'));
     el.classList.add('active');
+    _autoCloseDrawerIfMobile();
   });
   return el;
 }
@@ -730,13 +812,13 @@ async function loadChannels() {
   }
 }
 
-document.getElementById('search').addEventListener('input', (e) => {
+document.getElementById('search')?.addEventListener('input', (e) => {
   state.q = e.target.value;
   clearTimeout(window.__qt);
   window.__qt = setTimeout(loadChannels, 200);
 });
 
-document.getElementById('refresh-btn').addEventListener('click', async () => {
+document.getElementById('refresh-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('refresh-btn');
   btn.disabled = true; btn.textContent = '↻ Refreshing…';
   try {
@@ -756,12 +838,27 @@ document.getElementById('refresh-btn').addEventListener('click', async () => {
   }
 });
 
-// (filter-sg-btn was removed in the probe-all / alive-only refactor —
-// the SG country chip + 🇸🇬 Refresh SG button below cover the same UX.)
+// ── Drawer toggle (mobile only — sidebar is persistent on tablet+) ─
+const _drawer    = document.getElementById('drawer');
+const _backdrop  = document.getElementById('drawer-backdrop');
+function openDrawer()  { _drawer.classList.add('open');     _backdrop.classList.add('show'); }
+function closeDrawer() { _drawer.classList.remove('open');  _backdrop.classList.remove('show'); }
+document.getElementById('hamburger-btn')?.addEventListener('click', openDrawer);
+document.getElementById('drawer-close')?.addEventListener('click', closeDrawer);
+_backdrop?.addEventListener('click', closeDrawer);
+// Auto-close drawer after picking a filter on mobile (one less tap to see results).
+function _autoCloseDrawerIfMobile() {
+  if (window.innerWidth < 768) closeDrawer();
+}
+
+// Top-bar refresh icon mirrors the drawer's Refresh button — same click.
+document.getElementById('refresh-top-btn')?.addEventListener('click', () => {
+  document.getElementById('refresh-btn')?.click();
+});
 
 // "Alive only" filter — toggles state.status between null and 'alive'.
 // Only meaningful after a probe-all sweep has populated `status`.
-document.getElementById('alive-only-btn').addEventListener('click', (e) => {
+document.getElementById('alive-only-btn')?.addEventListener('click', (e) => {
   state.status = state.status === 'alive' ? null : 'alive';
   e.currentTarget.textContent = `✓ Alive only: ${state.status === 'alive' ? 'on' : 'off'}`;
   loadChannels();
@@ -770,7 +867,7 @@ document.getElementById('alive-only-btn').addEventListener('click', (e) => {
 // Probe-all sweep — fires the background job in scope of the current
 // source/country filters, then polls /status until finished.
 let _probeTimer = null;
-document.getElementById('probe-all-btn').addEventListener('click', async () => {
+document.getElementById('probe-all-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('probe-all-btn');
   const statusEl = document.getElementById('probe-status');
   btn.disabled = true; const orig = btn.textContent; btn.textContent = '🩺 Starting…';

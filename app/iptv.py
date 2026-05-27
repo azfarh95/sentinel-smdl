@@ -897,6 +897,39 @@ async def get_now_next(tvg_id: str, lookahead_count: int = 3) -> list[dict]:
     return []
 
 
+# ── Scheduled auto-probe ──────────────────────────────────────────
+#
+# Long-running background task started from app.main:lifespan that
+# re-runs start_probe_all() on a fixed cadence. Uses force_recheck=False
+# so the smart skip window does its work — first auto-sweep does a real
+# scan, subsequent ones in the same day are mostly no-ops.
+
+PROBE_AUTO_INTERVAL_HOURS = 12   # tick every N hours
+PROBE_AUTO_FRESH_WINDOW   = 10   # but skip channels checked within 10h
+
+
+async def auto_probe_loop() -> None:
+    """Background task — fires probe_all every PROBE_AUTO_INTERVAL_HOURS.
+    Idempotent against the existing running-sweep gate (start_probe_all
+    refuses if one's already in flight). Logs each tick + result."""
+    # Initial delay so we don't slam the network the moment the
+    # container starts up — let other services settle first.
+    await asyncio.sleep(120)
+    while True:
+        try:
+            res = start_probe_all(
+                concurrency=32, timeout_s=6.0,
+                force_recheck=False,
+                fresh_window_hours=PROBE_AUTO_FRESH_WINDOW,
+            )
+            logger.info("auto-probe tick fired: %s", res)
+        except Exception:
+            logger.exception("auto-probe tick crashed (will retry next interval)")
+        # Sleep until next tick. asyncio.sleep is cancellation-aware so
+        # container shutdown unblocks promptly.
+        await asyncio.sleep(PROBE_AUTO_INTERVAL_HOURS * 3600)
+
+
 async def refresh_iptv_org_country(
     cc: str,
     timeout_s: float = 20.0,

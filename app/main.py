@@ -66,6 +66,13 @@ async def lifespan(app: FastAPI):
         logger.warning("user-row self-heal failed: %s", _e)
     asyncio.create_task(start_cleanup_loop())
     asyncio.create_task(start_sticker_cleanup_loop())
+    # IPTV auto-probe — ticks every 12h with a 10h fresh-skip window so
+    # we get one real sweep per day + cheap "skip" calls in between.
+    iptv_auto_task = asyncio.create_task(iptv.auto_probe_loop())
+    iptv_auto_task.add_done_callback(
+        lambda t: t.cancelled() or t.exception() and
+        logger.error("IPTV auto-probe loop crashed: %s", t.exception(), exc_info=t.exception())
+    )
 
     # Bot initialization is best-effort. A bad/missing token must NOT crash
     # the FastAPI lifespan — keep the /health endpoint up so the operator

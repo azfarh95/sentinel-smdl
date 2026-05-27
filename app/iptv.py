@@ -157,19 +157,28 @@ async def init_iptv_schema() -> None:
             """)
         except Exception as exc:
             logger.warning("iptv id-prefix migration skipped: %s", exc)
-        # mjh-all is now a FETCH source only — rows fan out to
-        # mjh-radio / mjh-sky-fast / mjh-au / mjh-nz / mjh-other.
-        # Clear ALL prior mjh-* rows so the next refresh repopulates
-        # with the canonical 5-bucket split (an earlier iteration
-        # over-split into 108 buckets, this purges those too).
+        # mjh-all is now a FETCH source only — rows fan out to one of
+        # five canonical sub-source buckets. Two legacy shapes need
+        # purging on first run: (a) source='mjh-all' from before the
+        # split, (b) over-split single-channel buckets from an
+        # intermediate iteration. Purging is idempotent — once the
+        # legacy rows are gone, this DELETE is a no-op.
+        _MJH_VALID = (
+            "mjh-radio", "mjh-sky-fast", "mjh-au", "mjh-nz", "mjh-other",
+        )
         try:
+            placeholders = ",".join("?" for _ in _MJH_VALID)
             cur = await conn.execute(
-                "DELETE FROM iptv_channels WHERE source LIKE 'mjh-%'",
+                f"""DELETE FROM iptv_channels
+                     WHERE source = 'mjh-all'
+                        OR (source LIKE 'mjh-%'
+                            AND source NOT IN ({placeholders}))""",
+                _MJH_VALID,
             )
             if cur.rowcount:
                 logger.info(
                     "iptv migration: cleared %d legacy mjh-* rows "
-                    "— will repopulate on next refresh",
+                    "(out-of-spec source ids) — will repopulate on next refresh",
                     cur.rowcount,
                 )
         except Exception as exc:

@@ -79,32 +79,52 @@ async def iptv_refresh(body: RefreshBody, request: Request):
     return {"ok": True, "summaries": summaries}
 
 
+def _dynamic_source_name(sid: str) -> str:
+    """Friendly label for a populated source that isn't in the static
+    SOURCES dict. Currently covers `iptv-org-{cc}` country slices and
+    `mjh-{bucket}` sub-sources created by the mjh-all fan-out."""
+    if sid.startswith("iptv-org-"):
+        cc = sid.split("-", 2)[-1]
+        return f"iptv-org · {cc.upper()} curated"
+    if sid == "mjh-radio":     return "i.mjh.nz · Radio"
+    if sid == "mjh-sky-fast":  return "i.mjh.nz · Sky NZ FAST"
+    if sid == "mjh-au":        return "i.mjh.nz · Australia"
+    if sid == "mjh-nz":        return "i.mjh.nz · New Zealand"
+    if sid == "mjh-other":     return "i.mjh.nz · other"
+    return sid
+
+
 @router.get("/api/iptv/sources")
 async def iptv_sources(request: Request):
-    """List registered sources + per-source channel counts. Drives the
-    Sources panel in the browse page. Also includes any populated
-    iptv-org country slices (source ids starting with `iptv-org-`)."""
+    """List sources with at least one row. Static SOURCES entries with
+    count=0 are skipped (e.g. mjh-all, which is fetch-only — its rows
+    fan out to mjh-radio/au/nz/sky-fast/other). Anything not in static
+    SOURCES gets a synthesised friendly name."""
     await _mini._verify(request)
     counts = await _iptv.source_counts()
     out = []
+    seen: set[str] = set()
     for sid, meta in _iptv.SOURCES.items():
+        n = counts.get(sid, 0)
+        if n == 0:
+            continue   # fetch-only sources (mjh-all) — hide from filter chips
         out.append({
             "id":    sid,
             "name":  meta["name"],
             "kind":  meta["kind"],
-            "count": counts.get(sid, 0),
+            "count": n,
         })
-    # Surface any per-country slices that have actually been populated —
-    # they're created on-demand by /refresh_country, not pre-declared.
+        seen.add(sid)
     for sid, n in counts.items():
-        if sid.startswith("iptv-org-") and not any(s["id"] == sid for s in out):
-            cc = sid.split("-", 2)[-1]
-            out.append({
-                "id":    sid,
-                "name":  f"iptv-org · {cc.upper()} curated",
-                "kind":  "m3u",
-                "count": n,
-            })
+        if sid in seen:
+            continue
+        out.append({
+            "id":    sid,
+            "name":  _dynamic_source_name(sid),
+            "kind":  "m3u",
+            "count": n,
+        })
+    out.sort(key=lambda s: -s["count"])
     return {"sources": out, "total": sum(counts.values()),
             "country_quick": _iptv.IPTV_ORG_COUNTRY_QUICK}
 
@@ -573,6 +593,36 @@ function flag(code) {
   const A = 0x1F1E6;
   return String.fromCodePoint(A + code.charCodeAt(0) - 65)
        + String.fromCodePoint(A + code.charCodeAt(1) - 65);
+}
+
+// Stream-type + origin helpers — duplicated in the play page's JS
+// (separate <script> scope; one .py file but two HTML strings).
+function streamTypeOf(url) {
+  if (!url) return 'other';
+  const u = url.toLowerCase().split('?')[0].split('#')[0];
+  if (u.endsWith('.m3u8') || u.endsWith('.m3u')) return 'hls';
+  if (u.endsWith('.mpd')) return 'dash';
+  if (u.endsWith('.ts'))  return 'ts';
+  return 'other';
+}
+const _OFFICIAL_HOSTS = [
+  'cloudfront.net','akamaized.net','akamai.net','akamaihd.net','fastly.net','fastly.com',
+  'amagi.tv','amg01082','amg18481','amg02159','playouts.now','playoutshq','amagi-cdn',
+  'streamized.net','mediacorp','mncdn.com',
+  'bbc.co.uk','rai.it','iheart.com','tvnz.co.nz','sbs.com.au',
+  'abc.net.au','rainz.akamaized.net','live-video.net','wzm.live',
+];
+const _RESTREAM_HOSTS = [
+  'viloud.tv','indihuy','lordstreams','stitcher.com.br','xtreamer','spaghett',
+  'streamtape','dropbox','githubusercontent.com','ahmsville',
+];
+function originOf(url) {
+  if (!url) return { kind: 'unknown', host: '' };
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return { kind:'unknown', host:'' }; }
+  for (const m of _OFFICIAL_HOSTS) if (host.includes(m)) return { kind: 'official', host };
+  for (const m of _RESTREAM_HOSTS) if (host.includes(m)) return { kind: 'restream', host };
+  return { kind: 'unknown', host };
 }
 
 async function loadFilters() {

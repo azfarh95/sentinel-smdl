@@ -426,6 +426,42 @@ _BROWSE_HTML = r"""<!doctype html>
     .chip:hover { background:#1a1d24; }
     .chip.active { background:#3390ec; border-color:#3390ec; color:#fff; }
 
+    /* ── Filter tiles (collapsed dropdown UX, one per facet) ───── */
+    .filter-tile {
+      margin:8px 14px 0; background:#15181f; border:1px solid #232831;
+      border-radius:10px; overflow:hidden;
+    }
+    .filter-tile summary {
+      list-style:none; cursor:pointer; padding:11px 13px;
+      display:flex; align-items:center; gap:10px;
+      font-size:13px; user-select:none;
+    }
+    .filter-tile summary::-webkit-details-marker { display:none; }
+    .filter-tile summary::after {
+      content: '▾'; margin-left:auto; color:#5ac8fa; font-size:11px;
+      transition: transform .15s ease;
+    }
+    .filter-tile[open] summary::after { transform: rotate(180deg); }
+    .filter-tile .ft-label {
+      font-size:10px; letter-spacing:.1em; text-transform:uppercase;
+      color:var(--tg-theme-hint-color,#8a8f99); margin-right:6px;
+    }
+    .filter-tile .ft-value {
+      flex:1; color:#cfd2d8; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    .filter-tile[open] .ft-value { opacity:.6; }
+    .filter-tile .ft-search {
+      padding:6px 10px 6px; border-top:1px solid #232831;
+    }
+    .filter-tile .ft-search input {
+      width:100%; padding:7px 10px; border-radius:6px; border:1px solid #2a2f3a;
+      background:#0d0f14; color:#fff; font-size:12px;
+    }
+    .filter-tile .ft-options {
+      max-height:50vh; overflow-y:auto; padding:6px 10px 10px;
+      display:flex; flex-direction:column; gap:4px;
+    }
+
     /* ── Main column ────────────────────────────────────────────── */
     .main {
       flex:1; min-width:0;
@@ -585,15 +621,6 @@ _BROWSE_HTML = r"""<!doctype html>
   </div>
   <div class="actions-row" id="country-quick-row"></div>
 
-  <!-- Drawer-search: filters the chip lists below (countries, sources,
-       categories). Distinct from the top-bar search which filters the
-       channel grid. -->
-  <div style="padding:8px 14px 0;">
-    <input id="drawer-filter" type="search" placeholder="Filter lists (country, source, …)"
-      style="width:100%; padding:8px 10px; border-radius:8px; border:1px solid #2a2f3a;
-             background:#15181f; color:#fff; font-size:12px;">
-  </div>
-
   <!-- Probe knobs (collapsible) — defaults work; only open if tuning. -->
   <details class="probe-tune" style="margin:8px 14px 0; font-size:11px; color:var(--tg-theme-hint-color,#8a8f99);">
     <summary style="cursor:pointer; padding:4px 0;">Probe tuning</summary>
@@ -626,16 +653,40 @@ _BROWSE_HTML = r"""<!doctype html>
 
   <div id="probe-status" style="display:none; padding:0 14px; font-size:11px; color:var(--tg-theme-hint-color,#8a8f99);"></div>
 
-  <div class="section-h">Country</div>
-  <div class="chip-row" id="country-chips"></div>
+  <details class="filter-tile" data-facet="source">
+    <summary>
+      <span class="ft-label">Source</span>
+      <span class="ft-value" id="ft-value-source">All</span>
+    </summary>
+    <div class="ft-search">
+      <input type="search" placeholder="Search sources…" data-target="source-chips">
+    </div>
+    <div class="ft-options chip-row" id="source-chips"></div>
+  </details>
 
-  <div class="section-h">Source</div>
-  <div class="chip-row" id="source-chips"></div>
+  <details class="filter-tile" data-facet="country">
+    <summary>
+      <span class="ft-label">Country</span>
+      <span class="ft-value" id="ft-value-country">All</span>
+    </summary>
+    <div class="ft-search">
+      <input type="search" placeholder="Search countries…" data-target="country-chips">
+    </div>
+    <div class="ft-options chip-row" id="country-chips"></div>
+  </details>
 
-  <div class="section-h">Category</div>
-  <div class="chip-row" id="category-chips"></div>
+  <details class="filter-tile" data-facet="category">
+    <summary>
+      <span class="ft-label">Category</span>
+      <span class="ft-value" id="ft-value-category">All</span>
+    </summary>
+    <div class="ft-search">
+      <input type="search" placeholder="Search categories…" data-target="category-chips">
+    </div>
+    <div class="ft-options chip-row" id="category-chips"></div>
+  </details>
 
-  <div class="section-h" style="margin-top:12px">
+  <div class="section-h" style="margin-top:18px">
     <a href="/app" style="color:#5ac8fa; text-decoration:none;">← Back to SMDL</a>
   </div>
 </aside>
@@ -860,10 +911,14 @@ async function loadFilters() {
   const sc = document.getElementById('source-chips');
   sc.innerHTML = '';
   sc.appendChild(makeChip('All', null, state.source === null, 'source'));
+  let sourceLabelText = 'All';
   for (const s of sources) {
     const label = sourceLabel(s.id) + ` (${s.count})`;
     sc.appendChild(makeChip(label, s.id, state.source === s.id, 'source'));
+    if (state.source === s.id) sourceLabelText = label;
   }
+  const ftSource = document.getElementById('ft-value-source');
+  if (ftSource) ftSource.textContent = sourceLabelText;
   const cc = document.getElementById('country-chips');
   cc.innerHTML = '';
   cc.appendChild(makeChip('All', null, state.country === null, 'country'));
@@ -873,18 +928,27 @@ async function loadFilters() {
   // you actually want 🇸🇬 SG. Counts stay on the chip for context.
   const sortedCountries = countries.slice().sort((a, b) =>
     countryName(a.code).localeCompare(countryName(b.code)));
+  let countryLabelText = 'All';
   for (const c of sortedCountries) {
     const name = countryName(c.code);
     const label = `${flag(c.code)} ${name === c.code ? c.code : name + ' · ' + c.code} (${c.count})`;
     cc.appendChild(makeChip(label, c.code, state.country === c.code, 'country'));
+    if (state.country === c.code) countryLabelText = label;
   }
+  const ftCountry = document.getElementById('ft-value-country');
+  if (ftCountry) ftCountry.textContent = countryLabelText;
+
   const catc = document.getElementById('category-chips');
   catc.innerHTML = '';
   catc.appendChild(makeChip('All', null, state.category === null, 'category'));
-  for (const cat of categories.slice(0, 30)) {
-    catc.appendChild(makeChip(`${cat.name} (${cat.count})`,
-                                cat.name, state.category === cat.name, 'category'));
+  let categoryLabelText = 'All';
+  for (const cat of categories.slice(0, 50)) {
+    const label = `${cat.name} (${cat.count})`;
+    catc.appendChild(makeChip(label, cat.name, state.category === cat.name, 'category'));
+    if (state.category === cat.name) categoryLabelText = label;
   }
+  const ftCategory = document.getElementById('ft-value-category');
+  if (ftCategory) ftCategory.textContent = categoryLabelText;
 }
 
 function makeChip(label, value, active, kind) {
@@ -897,6 +961,11 @@ function makeChip(label, value, active, kind) {
     loadChannels();
     document.querySelectorAll(`#${kind}-chips .chip`).forEach(c => c.classList.remove('active'));
     el.classList.add('active');
+    // Update the dropdown tile's value label + collapse the tile.
+    const ftValue = document.getElementById(`ft-value-${kind}`);
+    if (ftValue) ftValue.textContent = label;
+    const tile = document.querySelector(`.filter-tile[data-facet="${kind}"]`);
+    if (tile) tile.open = false;
     _autoCloseDrawerIfMobile();
   });
   return el;
@@ -1038,20 +1107,18 @@ document.getElementById('favorites-only-btn')?.addEventListener('click', (e) => 
   loadChannels();
 });
 
-// Drawer-search — filters the chip lists (country, source, category)
-// by substring match. Non-matching chips hidden with display:none.
-// Empty search = show everything.
-document.getElementById('drawer-filter')?.addEventListener('input', (e) => {
-  const q = (e.target.value || '').toLowerCase().trim();
-  for (const sel of ['#country-chips', '#source-chips', '#category-chips']) {
-    document.querySelectorAll(`${sel} .chip`).forEach(c => {
-      if (!q || c.textContent.toLowerCase().includes(q)) {
-        c.style.display = '';
-      } else {
-        c.style.display = 'none';
-      }
+// Per-tile dropdown search — each filter tile has its own search input
+// (data-target=<chip-list-id>). Substring-matches against each chip's
+// textContent in that tile's list; non-matching get display:none.
+document.querySelectorAll('.filter-tile input[type=search]').forEach(inp => {
+  inp.addEventListener('input', () => {
+    const q = (inp.value || '').toLowerCase().trim();
+    const targetId = inp.dataset.target;
+    if (!targetId) return;
+    document.querySelectorAll(`#${targetId} .chip`).forEach(c => {
+      c.style.display = (!q || c.textContent.toLowerCase().includes(q)) ? '' : 'none';
     });
-  }
+  });
 });
 
 // Live-update probe-tune slider labels as user drags.

@@ -543,6 +543,37 @@ _BROWSE_HTML = r"""<!doctype html>
     <button class="ghost" id="alive-only-btn">✓ Alive only: off</button>
   </div>
   <div class="actions-row" id="country-quick-row"></div>
+
+  <!-- Probe knobs (collapsible) — defaults work; only open if tuning. -->
+  <details class="probe-tune" style="margin:8px 14px 0; font-size:11px; color:var(--tg-theme-hint-color,#8a8f99);">
+    <summary style="cursor:pointer; padding:4px 0;">Probe tuning</summary>
+    <div style="padding:8px 0 4px;">
+      <label style="display:flex; align-items:center; gap:8px; padding:4px 0;">
+        <span style="flex:1">Concurrency</span>
+        <input type="range" id="probe-conc" min="4" max="128" step="4" value="32" style="width:120px">
+        <span id="probe-conc-v" style="font-variant-numeric:tabular-nums; width:32px; text-align:right">32</span>
+      </label>
+      <label style="display:flex; align-items:center; gap:8px; padding:4px 0;">
+        <span style="flex:1">Timeout (s)</span>
+        <input type="range" id="probe-to" min="2" max="15" step="1" value="6" style="width:120px">
+        <span id="probe-to-v" style="font-variant-numeric:tabular-nums; width:32px; text-align:right">6</span>
+      </label>
+      <label style="display:flex; align-items:center; gap:8px; padding:4px 0;">
+        <span style="flex:1">Fresh-skip (h)</span>
+        <input type="range" id="probe-fresh" min="0" max="48" step="1" value="6" style="width:120px">
+        <span id="probe-fresh-v" style="font-variant-numeric:tabular-nums; width:32px; text-align:right">6</span>
+      </label>
+      <label style="display:flex; align-items:center; gap:8px; padding:6px 0;">
+        <input type="checkbox" id="probe-force" style="margin:0">
+        <span>Force re-probe even fresh channels</span>
+      </label>
+      <div style="font-size:10px; opacity:.7; line-height:1.5; margin-top:2px;">
+        Higher concurrency = faster sweep (residential SG fibre handles ~64 easily).<br>
+        Fresh-skip hides channels alive within the window. Set to 0 + ✓ force = full re-probe.
+      </div>
+    </div>
+  </details>
+
   <div id="probe-status" style="display:none; padding:0 14px; font-size:11px; color:var(--tg-theme-hint-color,#8a8f99);"></div>
 
   <div class="section-h">Country</div>
@@ -905,6 +936,13 @@ document.getElementById('alive-only-btn')?.addEventListener('click', (e) => {
   loadChannels();
 });
 
+// Live-update probe-tune slider labels as user drags.
+for (const id of ['conc', 'to', 'fresh']) {
+  const inp = document.getElementById('probe-' + id);
+  const lbl = document.getElementById('probe-' + id + '-v');
+  if (inp && lbl) inp.addEventListener('input', () => { lbl.textContent = inp.value; });
+}
+
 // Probe-all sweep — fires the background job in scope of the current
 // source/country filters, then polls /status until finished.
 let _probeTimer = null;
@@ -912,14 +950,21 @@ document.getElementById('probe-all-btn')?.addEventListener('click', async () => 
   const btn = document.getElementById('probe-all-btn');
   const statusEl = document.getElementById('probe-status');
   btn.disabled = true; const orig = btn.textContent; btn.textContent = '🩺 Starting…';
+  // Read user-tuned knobs (defaults if the user never opens the panel).
+  const conc  = parseInt(document.getElementById('probe-conc')?.value ?? '32', 10) || 32;
+  const tout  = parseInt(document.getElementById('probe-to')?.value ?? '6', 10) || 6;
+  const fresh = parseInt(document.getElementById('probe-fresh')?.value ?? '6', 10) || 6;
+  const force = !!document.getElementById('probe-force')?.checked;
   try {
     await api('/api/iptv/probe_all', {
       method: 'POST',
       body: JSON.stringify({
         source:  state.source,
         country: state.country,
-        concurrency: 16,
-        timeout_s: 5,
+        concurrency: conc,
+        timeout_s: tout,
+        force_recheck: force,
+        fresh_window_hours: fresh,
       }),
     });
     statusEl.style.display = 'block';

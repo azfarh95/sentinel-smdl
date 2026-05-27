@@ -83,6 +83,7 @@ class MakeStickerBody(BaseModel):
 @router.get("/api/sticker_drafts")
 async def list_drafts(request: Request):
     payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
     drafts = await _db.sticker_draft_list(user_id)
     # Strip server-only fields
@@ -110,6 +111,7 @@ async def list_drafts(request: Request):
 @router.get("/api/sticker_drafts/{draft_id}/preview")
 async def preview_draft(draft_id: int, request: Request):
     payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
     d = await _db.sticker_draft_get(draft_id, user_id)
     if not d:
@@ -124,6 +126,7 @@ async def preview_draft(draft_id: int, request: Request):
 @router.post("/api/sticker_drafts/{draft_id}/make")
 async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
     payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
     first_name = (payload.get("user") or {}).get("first_name")
 
@@ -224,6 +227,7 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
 @router.post("/api/sticker_drafts/{draft_id}/delete")
 async def delete_one(draft_id: int, request: Request):
     payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
     path_str = await _db.sticker_draft_delete(draft_id, user_id)
     if path_str is None:
@@ -238,6 +242,7 @@ async def delete_one(draft_id: int, request: Request):
 @router.post("/api/sticker_drafts/delete_all")
 async def delete_all(request: Request):
     payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
     paths = await _db.sticker_drafts_delete_all(user_id)
     for p in paths:

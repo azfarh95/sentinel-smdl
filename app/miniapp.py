@@ -423,6 +423,7 @@ async def downloads(request: Request, limit: int = 50):
     Large downloads + live recordings get a signed share URL attached so the
     Mini App can render a tappable link that streams over the public tunnel."""
     p = await _verify(request)
+    require_scope(p, "smdl.downloader")
     uid = int(p["user"]["id"])
     rows = await _db.list_download_history(uid, limit=max(1, min(limit, 200)))
     if not rows and _is_owner(uid):
@@ -473,6 +474,7 @@ def _active_by_url_for_user(uid: int, is_owner: bool) -> dict[str, dict]:
 @router.get("/api/miniapp/watchlist")
 async def watchlist(request: Request):
     p = await _verify(request)
+    require_scope(p, "smdl.streamtracker")
     uid = int(p["user"]["id"])
     is_own = _is_owner(uid)
     # Owner sees the global list; everyone else sees only their own entries.
@@ -495,6 +497,7 @@ async def watchlist(request: Request):
 @router.post("/api/miniapp/watchlist/add")
 async def watchlist_add(request: Request, body: WatchAddBody):
     p = await _verify(request)
+    require_scope(p, "smdl.streamtracker")
     uid = int(p["user"]["id"])
     if not _is_owner(uid) and await _auth.is_platform_blocked(body.url):
         return JSONResponse({"ok": False,
@@ -510,6 +513,7 @@ async def watchlist_add(request: Request, body: WatchAddBody):
 @router.post("/api/miniapp/watchlist/remove")
 async def watchlist_remove(request: Request, body: WatchAddBody):
     p = await _verify(request)
+    require_scope(p, "smdl.streamtracker")
     uid = int(p["user"]["id"])
     # Owner can remove anything; non-owner can only remove their own entries.
     ok, msg = stream_monitor.remove_from_watchlist(body.url,
@@ -536,6 +540,7 @@ async def watchlist_edit(request: Request, body: WatchEditBody):
     """Edit the URL or label of an existing entry. Used by the Mini App's
     inline edit dropdown — lets the user fix a typo without removing + re-adding."""
     p = await _verify(request)
+    require_scope(p, "smdl.streamtracker")
     uid = int(p["user"]["id"])
     ok, msg = stream_monitor.update_watchlist_entry(
         body.url,
@@ -554,6 +559,7 @@ async def watchlist_mute(request: Request, body: WatchMuteBody):
     """Toggle the mute flag. Muted streamers are still polled (so the status
     dot stays current) but won't trigger Telegram LIVE prompts."""
     p = await _verify(request)
+    require_scope(p, "smdl.streamtracker")
     uid = int(p["user"]["id"])
     ok, msg = stream_monitor.set_muted(
         body.url, body.muted,
@@ -568,6 +574,7 @@ async def watchlist_mute(request: Request, body: WatchMuteBody):
 @router.get("/api/miniapp/active")
 async def active_streams(request: Request):
     p = await _verify(request)
+    require_scope(p, "smdl.streamtracker")
     uid = int(p["user"]["id"])
     jobs = bridge.list_active()
     # Non-owner sees only their own recording. Owner sees all.
@@ -579,6 +586,7 @@ async def active_streams(request: Request):
 @router.post("/api/miniapp/stream/stop")
 async def stream_stop(request: Request, body: StreamStopBody):
     p = await _verify(request)
+    require_scope(p, "smdl.streamtracker")
     uid = int(p["user"]["id"])
     target = int(body.chat_id) if body.chat_id else uid
     # Non-owner can only stop their own.
@@ -598,6 +606,7 @@ async def stream_stop(request: Request, body: StreamStopBody):
 @router.post("/api/miniapp/stream/start")
 async def stream_start(request: Request, body: StreamStartBody):
     p = await _verify(request)
+    require_scope(p, "smdl.streamtracker")
     uid = int(p["user"]["id"])
     url = body.url.strip()
     if not url:
@@ -655,6 +664,7 @@ async def test_url(request: Request, body: TestUrlBody):
     whether it's available to the caller. Deliberately silent about adult-
     category platforms — they're treated as 'not available' without naming."""
     p = await _verify(request)
+    require_scope(p, "smdl.downloader")
     uid = int(p["user"]["id"])
     url = (body.url or "").strip()
     if not url:
@@ -857,6 +867,7 @@ async def update_config(request: Request, body: ConfigUpdateBody):
 @router.get("/api/miniapp/onedrive/status")
 async def onedrive_status(request: Request):
     p = await _verify(request)
+    require_scope(p, "smdl.downloader")
     _require_owner(p)
     from . import onedrive as _od
     return await _od.get_status()
@@ -868,6 +879,7 @@ async def onedrive_connect(request: Request):
     and verification URL — the UI shows them and polls /status until
     `configured` flips true."""
     p = await _verify(request)
+    require_scope(p, "smdl.downloader")
     _require_owner(p)
     from . import onedrive as _od
     try:
@@ -879,6 +891,7 @@ async def onedrive_connect(request: Request):
 @router.post("/api/miniapp/onedrive/disconnect")
 async def onedrive_disconnect(request: Request):
     p = await _verify(request)
+    require_scope(p, "smdl.downloader")
     _require_owner(p)
     from . import onedrive as _od
     removed = _od.disconnect()
@@ -888,6 +901,7 @@ async def onedrive_disconnect(request: Request):
 @router.post("/api/miniapp/onedrive/test_upload")
 async def onedrive_test(request: Request):
     p = await _verify(request)
+    require_scope(p, "smdl.downloader")
     _require_owner(p)
     from . import onedrive as _od
     try:
@@ -912,6 +926,7 @@ async def onedrive_upload(request: Request, body: OneDriveUploadBody):
     happened. For huge multi-file batches that'd block, the bg auto-mirror
     path (auto_after_send) is the right tool."""
     p = await _verify(request)
+    require_scope(p, "smdl.downloader")
     uid = int(p["user"]["id"])
     is_own = _is_owner(uid)
 
@@ -969,6 +984,7 @@ class SiteBlocklistBody(BaseModel):
 @router.get("/api/miniapp/admin/users")
 async def admin_list_users(request: Request):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     rows = await _db.list_users()
     owner_id = _cfg_get("owner_chat_id")
@@ -980,6 +996,7 @@ async def admin_list_users(request: Request):
 @router.post("/api/miniapp/admin/users/ban")
 async def admin_ban_user(request: Request, body: UserStatusBody):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     if _auth.is_owner(body.chat_id):
         return JSONResponse({"ok": False, "error": "Cannot ban the owner."}, status_code=400)
@@ -992,6 +1009,7 @@ async def admin_ban_user(request: Request, body: UserStatusBody):
 @router.post("/api/miniapp/admin/users/unban")
 async def admin_unban_user(request: Request, body: UserStatusBody):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     ok = await _db.set_user_status(body.chat_id, "active")
     if not ok:
@@ -1006,6 +1024,7 @@ class ApproveByCodeBody(BaseModel):
 @router.post("/api/miniapp/admin/users/approve")
 async def admin_approve_user(request: Request, body: UserStatusBody):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     ok = await _db.approve_user(body.chat_id)
     if not ok:
@@ -1022,6 +1041,7 @@ async def admin_approve_by_code(request: Request, body: ApproveByCodeBody):
     Fail-closed: bad/expired/already-used codes return 404 with a generic
     error message — no oracle for code-guessing attackers."""
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     row = await _db.find_user_by_pending_code(body.code or "")
     if row is None:
@@ -1052,6 +1072,7 @@ class GroupUnapproveBody(BaseModel):
 @router.get("/api/miniapp/admin/groups")
 async def admin_list_groups(request: Request):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     rows = await _db.list_approved_groups()
     return {"items": rows, "count": len(rows)}
@@ -1060,6 +1081,7 @@ async def admin_list_groups(request: Request):
 @router.post("/api/miniapp/admin/groups/approve")
 async def admin_approve_group(request: Request, body: GroupApproveBody):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     uid = _require_owner(p)
     if body.chat_id >= 0:
         return JSONResponse({"ok": False,
@@ -1075,6 +1097,7 @@ async def admin_approve_group(request: Request, body: GroupApproveBody):
 @router.post("/api/miniapp/admin/groups/unapprove")
 async def admin_unapprove_group(request: Request, body: GroupUnapproveBody):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     ok = await _db.unapprove_group(body.chat_id)
     if not ok:
@@ -1089,6 +1112,7 @@ async def admin_unapprove_group(request: Request, body: GroupUnapproveBody):
 @router.get("/api/miniapp/admin/security")
 async def admin_security(request: Request):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     return await _auth.get_token_health()
 
@@ -1096,6 +1120,7 @@ async def admin_security(request: Request):
 @router.post("/api/miniapp/admin/security/pin")
 async def admin_pin_token(request: Request):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     return {"ok": True, **(await _auth.pin_current_token())}
 
@@ -1103,6 +1128,7 @@ async def admin_pin_token(request: Request):
 @router.get("/api/miniapp/admin/mode")
 async def admin_get_mode(request: Request):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     return await _auth.get_admin_only_mode()
 
@@ -1110,6 +1136,7 @@ async def admin_get_mode(request: Request):
 @router.post("/api/miniapp/admin/mode")
 async def admin_set_mode(request: Request, body: AdminModeBody):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     await _auth.set_admin_only_mode(body.enabled, body.reason)
     return {"ok": True, **(await _auth.get_admin_only_mode())}
@@ -1123,6 +1150,7 @@ async def admin_get_sites(request: Request):
     Source of truth for "all platforms" is stream_monitor's hostname map
     (the same lookup used for grouping the watchlist UI)."""
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     known = sorted({label for _, label in stream_monitor._PLATFORM_MAP})
     blocked = set(await _auth.get_site_blocklist())
@@ -1143,6 +1171,7 @@ async def admin_get_sites(request: Request):
 @router.post("/api/miniapp/admin/sites")
 async def admin_set_sites(request: Request, body: SiteBlocklistBody):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     persisted = await _auth.set_site_blocklist(body.blocked or [])
     return {"ok": True, "blocked": persisted}
@@ -1165,6 +1194,7 @@ async def admin_scraper_get(request: Request):
     """Snapshot for the Admin tab card: profile list (per-platform), cookie
     health, and the global pause flag."""
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     from . import profile_monitor as _pm
     profiles = await _db.scraper_list_profiles()
@@ -1220,6 +1250,7 @@ async def admin_scraper_get(request: Request):
 async def admin_scraper_toggle(request: Request, body: ScraperToggleBody):
     """Pause or resume the scraper globally. Survives restart via settings table."""
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     from . import profile_monitor as _pm
     await _pm.set_runtime_paused(bool(body.paused))
@@ -1229,6 +1260,7 @@ async def admin_scraper_toggle(request: Request, body: ScraperToggleBody):
 @router.post("/api/miniapp/admin/scraper/add")
 async def admin_scraper_add(request: Request, body: ScraperProfileBody):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     owner = _require_owner(p)
     from . import profile_monitor as _pm
     ok, msg = await _pm.add_profile(body.url, added_by=owner, label=body.label)
@@ -1240,6 +1272,7 @@ async def admin_scraper_add(request: Request, body: ScraperProfileBody):
 @router.post("/api/miniapp/admin/scraper/remove")
 async def admin_scraper_remove(request: Request, body: ScraperProfileBody):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     from . import profile_monitor as _pm
     ok, msg = await _pm.remove_profile(body.url)
@@ -1251,6 +1284,7 @@ async def admin_scraper_remove(request: Request, body: ScraperProfileBody):
 @router.post("/api/miniapp/admin/scraper/pause")
 async def admin_scraper_pause(request: Request, body: ScraperProfileBody):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     from . import profile_monitor as _pm
     ok, msg = await _pm.pause_profile(body.url)
@@ -1262,6 +1296,7 @@ async def admin_scraper_pause(request: Request, body: ScraperProfileBody):
 @router.post("/api/miniapp/admin/scraper/resume")
 async def admin_scraper_resume(request: Request, body: ScraperProfileBody):
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     from . import profile_monitor as _pm
     ok, msg = await _pm.resume_profile(body.url)
@@ -1275,6 +1310,7 @@ async def admin_scraper_probe(request: Request, body: ScraperProfileBody):
     """Run a single probe right now (outside the burst-session schedule).
     Equivalent to /scrape_now in the bot."""
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     from . import bot as _bot
     from . import profile_monitor as _pm
@@ -1295,6 +1331,7 @@ async def admin_recordings_pending(request: Request):
     """How many .mp4.part files are sitting in /downloads/live/Chaturbate/NA
     waiting to be remuxed. Drives the Admin tab badge."""
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     from . import repair_live_parts as _r
     return _r.scan_pending()
@@ -1307,6 +1344,7 @@ async def admin_recordings_repair(request: Request):
     can take 10+ minutes per GB. Refresh the Admin tab afterwards to see
     the pending count shrink to 0."""
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     from . import repair_live_parts as _r
     pending = _r.scan_pending()
@@ -1335,6 +1373,7 @@ async def restart_service(request: Request):
     is required for settings whose Python module reads them at import time
     (anything with needs_restart=True)."""
     p = await _verify(request)
+    require_scope(p, "smdl.admin")
     _require_owner(p)
     logger.info("restart_service: SIGTERM scheduled by owner")
 

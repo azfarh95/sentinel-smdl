@@ -1248,12 +1248,23 @@ loadChannel();
 """
 
 
+# WebView aggressively caches HTML — without these headers, the user
+# is stuck on whatever version was first loaded into the cache (we hit
+# this in the wild: phone showed pre-country-quick-row layout days after
+# the feature shipped). `no-store` prevents both disk + memory caching.
+_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 @router.get("/iptv", response_class=HTMLResponse)
 async def iptv_browse_page():
     """Top-level browse page. Owner-only check is enforced by the JSON
     APIs the page calls (not by this static HTML responder) — same
     pattern miniapp.py / sticker_routes.py use for their HTML routes."""
-    return HTMLResponse(_BROWSE_HTML)
+    return HTMLResponse(_BROWSE_HTML, headers=_NO_CACHE_HEADERS)
 
 
 @router.get("/iptv/play/{channel_id}", response_class=HTMLResponse)
@@ -1261,4 +1272,4 @@ async def iptv_play_page(channel_id: str):
     import json
     safe = json.dumps(channel_id)  # JSON-string-encoded, safe for inline JS
     html = _PLAY_HTML.replace("{{CHANNEL_ID_JSON}}", safe)
-    return HTMLResponse(html)
+    return HTMLResponse(html, headers=_NO_CACHE_HEADERS)

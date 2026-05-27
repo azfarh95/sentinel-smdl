@@ -44,7 +44,13 @@ class MainActivity : AppCompatActivity() {
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
             settings.mediaPlaybackRequiresUserGesture = false
-            settings.cacheMode = WebSettings.LOAD_DEFAULT
+            // IPTV pages have their own data-freshness contract (refresh
+            // sources / probe / record) — caching HTML would defeat that
+            // and we hit a real "stuck on pre-feature layout for hours"
+            // bug. LOAD_NO_CACHE forces re-fetch of HTML on every load
+            // while still honouring per-resource Cache-Control for assets
+            // like channel logos (so we don't re-download them every time).
+            settings.cacheMode = WebSettings.LOAD_NO_CACHE
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             settings.userAgentString = settings.userAgentString + " SMDL-IPTV/0.1"
             isVerticalScrollBarEnabled = true

@@ -2,6 +2,10 @@
 .gradle/
 .gradle-cache/
 .gradle-bin/
+.android-home/
+# NOTE: debug.keystore is intentionally tracked (see app/build.gradle.kts).
+# Debug-keystore credentials are public (Android Studio convention) and
+# pinning the cert lets sideloaded rebuilds install in place.
 
 # Android Gradle Plugin build output (includes the .apk; rebuild on demand).
 app/build/

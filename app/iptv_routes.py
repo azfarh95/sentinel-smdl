@@ -1083,8 +1083,8 @@ _PLAY_HTML = r"""<!doctype html>
   </div>
 
   <div class="actions">
-    <button id="play-vlc">▶ Open in VLC / system player</button>
-    <button class="ghost" id="play-inline">▶ Play inline (HLS-native browsers)</button>
+    <button id="play-inline">▶ Play</button>
+    <button class="ghost" id="play-vlc">📤 Open in VLC / external player</button>
     <button class="ghost" id="copy-url">📋 Copy stream URL</button>
     <button class="ghost" id="probe-btn">🩺 Probe stream health</button>
     <button class="warn" id="record-btn">⏺ Record 5 min</button>
@@ -1095,11 +1095,14 @@ _PLAY_HTML = r"""<!doctype html>
   <video id="inline-video" controls playsinline></video>
 
   <div class="hint">
-    <strong>HLS</strong> (<code>.m3u8</code>) plays inline in any browser via hls.js;
-    Safari plays natively. <strong>DASH</strong> (<code>.mpd</code>) plays inline via
-    dash.js — browsers can't play it without help, which is why the OS treats it as a
-    download. <strong>Open in VLC</strong> hands the URL to your OS chooser; install
-    VLC for Android / VLC desktop and it'll be offered for both formats.
+    <strong>▶ Play</strong> uses the in-app player (hls.js for HLS, dash.js for DASH) —
+    works without any external app installed. First load fetches ~100 KB of JS from a
+    CDN; cached after.<br>
+    <strong>📤 Open in VLC</strong> hands the URL to your OS chooser with the right
+    MIME type. Install <strong>VLC for Android</strong> (or VLC desktop) and it'll be
+    offered directly — typically a smoother experience for long sessions or sharing to
+    a TV. Without VLC installed, the chooser may fall to your browser which can't
+    render <code>.mpd</code> and offers it as a download instead.
   </div>
 </div>
 

@@ -25,6 +25,9 @@ echo "==> building APK (first run downloads gradle ~120MB + AGP deps; cached aft
 # into a host-mounted dir so the second run is instant.
 # MSYS_NO_PATHCONV stops Git-Bash from rewriting the in-container linux
 # paths (-w /project, etc.) into Windows paths.
+# Signing: app/build.gradle.kts pins to debug.keystore in the project root
+# (committed to the repo) — every build produces APKs with the same cert,
+# so sideloaded rebuilds install in place. No /root/.android mount needed.
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "$PROJECT_DIR":/project \
   -v "$PROJECT_DIR/.gradle-cache":/root/.gradle \

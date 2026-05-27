@@ -8,15 +8,18 @@
 #
 # Spec: docs/iptv-aggregator-v2.md §5.3
 #
-# Empty file is fine — auto-dedup handles the bulk via tvg-id family
-# + (name slug + country) bucketing. Curated entries are for:
-#   • High-traffic channels where auto-dedup misses
-#   • Cases where you want a specific source priority order
-#   • Splits of false-positively-merged channels (in v3)
+# Source IDs verified against live catalogue at curation time. When
+# adding new entries, run a query first (see iptv_dedup.py docs) —
+# guessing IDs leads to silently-dropped entries (the dedup cleanup
+# step 5 deletes logical_channels with zero attached sources).
 #
-# Start with the most-watched news channels.
+# Last expanded: 2026-05-27 (Phase 3 — top-50 hand-curation)
 
 channels:
+
+  # ═══════════════════════════════════════════════════════════════
+  # SINGAPORE — Mediacorp linear + CNA family
+  # ═══════════════════════════════════════════════════════════════
 
   cna:
     name:    "Channel News Asia"
@@ -28,22 +31,307 @@ channels:
       - "iptv-org-sg:CNA.sg"
       - "youtube-live:cna"
     priority_overrides:
-      "youtube-live:cna":    10   # geo-block-free, signed URLs
-      "iptv-org:CNA.sg":      8   # cloudfront, occasionally throttled
-      "iptv-org-sg:CNA.sg":   9   # curated SG list — usually best
+      "youtube-live:cna":    10
+      "iptv-org-sg:CNA.sg":   9
+      "iptv-org:CNA.sg":      8
+
+  cna-international:
+    name:    "CNA International"
+    country: SG
+    aliases: ["CNA International", "Channel News Asia International"]
+    categories: [news]
+    sources:
+      - "iptv-org:CNAInternational.sg"
+      - "free-tv:CNAInternational.sg"
+
+  channel-5-sg:
+    name:    "Channel 5 (Mediacorp)"
+    country: SG
+    aliases: ["Channel 5", "MediaCorp Channel 5", "Ch5 SG"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:Channel5.sg"
+      - "iptv-org-sg:Channel5.sg"
+
+  channel-8-sg:
+    name:    "Channel 8 (Mediacorp)"
+    country: SG
+    aliases: ["Channel 8", "MediaCorp Channel 8", "Ch8 SG", "频道8"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:Channel8.sg"
+      - "iptv-org-sg:Channel8.sg"
+
+  channel-u-sg:
+    name:    "Channel U (Mediacorp)"
+    country: SG
+    aliases: ["Channel U", "MediaCorp Channel U", "U", "U电视"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:ChannelU.sg"
+      - "iptv-org-sg:ChannelU.sg"
+
+  suria-sg:
+    name:    "Suria (Mediacorp)"
+    country: SG
+    aliases: ["Suria", "MediaCorp Suria"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:Suria.sg"
+      - "iptv-org-sg:Suria.sg"
+
+  vasantham-sg:
+    name:    "Vasantham (Mediacorp)"
+    country: SG
+    aliases: ["Vasantham", "MediaCorp Vasantham"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:Vasantham.sg"
+      - "iptv-org-sg:Vasantham.sg"
+
+  # ═══════════════════════════════════════════════════════════════
+  # MALAYSIA — RTM state broadcasters + commercial
+  # ═══════════════════════════════════════════════════════════════
+
+  rtm-tv1:
+    name:    "TV1 (RTM)"
+    country: MY
+    aliases: ["TV1", "RTM TV1", "TV1 (1080p)"]
+    categories: [general]
+    sources:
+      - "iptv-org:TV1.my"
+      - "iptv-org-my:TV1.my"
+
+  rtm-tv2:
+    name:    "TV2 (RTM)"
+    country: MY
+    aliases: ["TV2", "RTM TV2", "TV2 (1080p)", "Berita RTM (TV2)"]
+    categories: [general, news]
+    sources:
+      - "iptv-org:TV2.my"
+      - "iptv-org-my:TV2.my"
+      - "youtube-live:rtm-news"
+
+  rtm-tv9:
+    name:    "TV9 (Berita Nasional)"
+    country: MY
+    aliases: ["TV9"]
+    categories: [news]
+    sources:
+      - "iptv-org:TV9.my"
+      - "iptv-org-my:TV9.my"
+
+  berita-rtm:
+    name:    "Berita RTM"
+    country: MY
+    aliases: ["Berita RTM"]
+    categories: [news]
+    sources:
+      - "iptv-org:BeritaRTM.my"
+
+  tv3-malaysia:
+    name:    "TV3 Malaysia"
+    country: MY
+    aliases: ["TV3", "TV3 Malaysia", "Buletin TV3"]
+    categories: [news, general]
+    sources:
+      - "youtube-live:tv3-malaysia"
+
+  astro-awani:
+    name:    "Astro Awani"
+    country: MY
+    aliases: ["Astro Awani", "Awani"]
+    categories: [news]
+    sources:
+      - "youtube-live:astro-awani"
+
+  bernama-tv:
+    name:    "BERNAMA TV"
+    country: MY
+    aliases: ["BERNAMA TV", "Bernama News Channel"]
+    categories: [news]
+    sources:
+      - "youtube-live:bernama-tv"
+
+  # ═══════════════════════════════════════════════════════════════
+  # INDONESIA — state broadcaster + major commercial networks
+  # ═══════════════════════════════════════════════════════════════
+
+  tvri:
+    name:    "TVRI"
+    country: ID
+    aliases: ["TVRI", "Televisi Republik Indonesia"]
+    categories: [general]
+    sources:
+      - "iptv-org:TVRI.id"
+
+  tvri-world:
+    name:    "TVRI World"
+    country: ID
+    aliases: ["TVRI World"]
+    categories: [news, general]
+    sources:
+      - "iptv-org:TVRIWorld.id"
+
+  metro-tv-id:
+    name:    "Metro TV"
+    country: ID
+    aliases: ["Metro TV"]
+    categories: [news]
+    sources:
+      - "iptv-org:MetroTV.id"
+      - "iptv-org-id:MetroTV.id"
+      - "youtube-live:metro-tv"
+
+  kompastv:
+    name:    "Kompas TV"
+    country: ID
+    aliases: ["KompasTV", "Kompas TV", "Kompas TV [Geo-blocked]"]
+    categories: [news]
+    sources:
+      - "iptv-org:KompasTV.id"
+      - "iptv-org-id:KompasTV.id"
+      - "youtube-live:kompastv"
+
+  tvone-id:
+    name:    "tvOne"
+    country: ID
+    aliases: ["tvOne", "tvOne News", "tvOne (576i)"]
+    categories: [news]
+    sources:
+      - "iptv-org:tvOne.id"
+      - "iptv-org-id:tvOne.id"
+      - "youtube-live:tvone-news"
+
+  beritasatu:
+    name:    "BeritaSatu"
+    country: ID
+    aliases: ["BeritaSatu", "Berita Satu", "BeritaSatu (1080p)"]
+    categories: [news]
+    sources:
+      - "iptv-org:BeritaSatu.id"
+      - "iptv-org-id:BeritaSatu.id"
+      - "youtube-live:beritasatu"
+
+  cnn-indonesia:
+    name:    "CNN Indonesia"
+    country: ID
+    aliases: ["CNN Indonesia"]
+    categories: [news]
+    sources:
+      - "youtube-live:cnn-indonesia"
+
+  sctv:
+    name:    "SCTV"
+    country: ID
+    aliases: ["SCTV", "Surya Citra Televisi"]
+    categories: [entertainment, general]
+    sources:
+      - "iptv-org:SCTV.id"
+      - "iptv-org-id:SCTV.id"
+
+  antv:
+    name:    "ANTV"
+    country: ID
+    aliases: ["ANTV", "Andalas Televisi"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:ANTV.id"
+
+  rcti:
+    name:    "RCTI"
+    country: ID
+    aliases: ["RCTI", "RCTI HD"]
+    categories: [entertainment, general]
+    sources:
+      - "iptv-org:RCTI.id"
+      - "iptv-org-id:RCTI.id"
+
+  mnctv:
+    name:    "MNCTV"
+    country: ID
+    aliases: ["MNCTV", "MNC TV"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:MNCTV.id"
+      - "iptv-org-id:MNCTV.id"
+
+  inews-id:
+    name:    "iNews"
+    country: ID
+    aliases: ["iNews", "iNews TV"]
+    categories: [news]
+    sources:
+      - "iptv-org:iNews.id"
+      - "iptv-org-id:iNews.id"
+
+  trans-7:
+    name:    "Trans7"
+    country: ID
+    aliases: ["Trans7", "Trans 7"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:Trans7.id"
+      - "iptv-org-id:Trans7.id"
+
+  trans-tv:
+    name:    "Trans TV"
+    country: ID
+    aliases: ["Trans TV", "TransTV"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:TransTV.id"
+      - "iptv-org-id:TransTV.id"
+
+  # ═══════════════════════════════════════════════════════════════
+  # UNITED KINGDOM — BBC family + Sky News
+  # ═══════════════════════════════════════════════════════════════
 
   bbc-news:
     name:    "BBC News"
     country: GB
-    aliases: ["BBC News", "BBC News HD"]
+    aliases: ["BBC News", "BBC News HD", "BBC News Channel"]
     categories: [news]
     sources:
+      - "iptv-org:BBCNews.uk"
+      - "free-tv:BBCNews.uk"
       - "youtube-live:bbc-news"
+
+  bbc-one:
+    name:    "BBC One"
+    country: GB
+    aliases: ["BBC One", "BBC 1"]
+    categories: [general]
+    sources:
+      - "iptv-org:BBCOne.uk"
+      - "free-tv:BBCOne.uk"
+
+  bbc-two:
+    name:    "BBC Two"
+    country: GB
+    aliases: ["BBC Two", "BBC 2"]
+    categories: [general]
+    sources:
+      - "iptv-org:BBCTwo.uk"
+      - "free-tv:BBCTwo.uk"
+
+  sky-news:
+    name:    "Sky News"
+    country: GB
+    aliases: ["Sky News"]
+    categories: [news]
+    sources:
+      - "free-tv:SkyNews.uk"
+      - "youtube-live:sky-news"
+
+  # ═══════════════════════════════════════════════════════════════
+  # INTERNATIONAL ENGLISH NEWS
+  # ═══════════════════════════════════════════════════════════════
 
   al-jazeera:
     name:    "Al Jazeera English"
     country: QA
-    aliases: ["Al Jazeera English", "Al Jazeera"]
+    aliases: ["Al Jazeera English", "Al Jazeera", "AJ English"]
     categories: [news]
     sources:
       - "youtube-live:al-jazeera-en"
@@ -51,17 +339,19 @@ channels:
   france24-en:
     name:    "France 24 English"
     country: FR
-    aliases: ["France 24 English", "France 24"]
+    aliases: ["France 24 English", "France 24", "France24"]
     categories: [news]
     sources:
+      - "free-tv:France24English.fr"
       - "youtube-live:france-24-en"
 
   dw-news:
     name:    "DW News"
     country: DE
-    aliases: ["DW News", "Deutsche Welle", "DW (English)"]
+    aliases: ["DW News", "DW English", "Deutsche Welle"]
     categories: [news]
     sources:
+      - "free-tv:DWEnglish.de"
       - "youtube-live:dw-news"
 
   nhk-world:
@@ -73,107 +363,21 @@ channels:
       - "youtube-live:nhk-world"
       - "youtube-live:nhk-bs1"
 
-  astro-awani:
-    name:    "Astro Awani"
-    country: MY
-    aliases: ["Astro Awani", "Awani"]
-    categories: [news]
-    sources:
-      - "youtube-live:astro-awani"
-
-  kompastv:
-    name:    "Kompas TV"
-    country: ID
-    aliases: ["KompasTV", "Kompas TV"]
-    categories: [news]
-    sources:
-      - "youtube-live:kompastv"
-
-  bloomberg:
-    name:    "Bloomberg Television"
-    country: US
-    aliases: ["Bloomberg Television", "Bloomberg TV"]
-    categories: [news, business]
-    sources:
-      - "youtube-live:bloomberg-tv"
-
-  # ── Phase 3 expansion ───────────────────────────────────────────
-  # Curated channels covering the top news / business / public-
-  # broadcaster slots per region the owner actually watches. Adding
-  # an entry here gives the channel: a stable id, a dedup-immune
-  # grouping (curated wins over auto-merge), and explicit source
-  # priority overrides.
-  #
-  # Channels listed below reference YouTube source IDs from
-  # data/youtube_live.yaml — those are the most reliable across geo.
-  # iptv-org tvg-id sources are added where they exist in the
-  # current catalogue (verified at curation time).
-
-  # ── United States ──────────────────────────────────────────────
-  abc-news:
-    name:    "ABC News Live"
-    country: US
-    aliases: ["ABC News Live", "ABC News"]
-    categories: [news]
-    sources:
-      - "youtube-live:abc-news-live"
-
-  nbc-news:
-    name:    "NBC News NOW"
-    country: US
-    aliases: ["NBC News NOW", "NBC News"]
-    categories: [news]
-    sources:
-      - "youtube-live:nbc-news-now"
-
-  cbs-news:
-    name:    "CBS News"
-    country: US
-    aliases: ["CBS News"]
-    categories: [news]
-    sources:
-      - "youtube-live:cbs-news"
-
-  cnbc:
-    name:    "CNBC"
-    country: US
-    aliases: ["CNBC", "CNBC Television"]
-    categories: [news, business]
-    sources:
-      - "youtube-live:cnbc-live"
-
-  reuters:
-    name:    "Reuters"
-    country: US
-    aliases: ["Reuters"]
-    categories: [news]
-    sources:
-      - "youtube-live:reuters"
-
-  pbs-newshour:
-    name:    "PBS NewsHour"
-    country: US
-    aliases: ["PBS NewsHour"]
-    categories: [news]
-    sources:
-      - "youtube-live:pbs-newshour"
-
-  # ── United Kingdom / Europe ────────────────────────────────────
-  sky-news:
-    name:    "Sky News"
-    country: GB
-    aliases: ["Sky News"]
-    categories: [news]
-    sources:
-      - "youtube-live:sky-news"
-
   euronews:
     name:    "Euronews"
     country: FR
-    aliases: ["Euronews"]
+    aliases: ["Euronews", "Euronews English"]
     categories: [news]
     sources:
       - "youtube-live:euronews-en"
+
+  cgtn:
+    name:    "CGTN"
+    country: CN
+    aliases: ["CGTN", "China Global Television Network"]
+    categories: [news]
+    sources:
+      - "youtube-live:cgtn"
 
   trt-world:
     name:    "TRT World"
@@ -186,141 +390,185 @@ channels:
   africanews:
     name:    "Africanews"
     country: FR
-    aliases: ["Africanews"]
+    aliases: ["Africanews", "Africa News"]
     categories: [news]
     sources:
+      - "iptv-org:AfricanewsEnglish.fr"
       - "youtube-live:africanews"
-
-  # ── Asia ───────────────────────────────────────────────────────
-  cgtn:
-    name:    "CGTN"
-    country: CN
-    aliases: ["CGTN"]
-    categories: [news]
-    sources:
-      - "youtube-live:cgtn"
 
   arirang:
     name:    "Arirang TV"
     country: KR
-    aliases: ["Arirang TV"]
+    aliases: ["Arirang TV", "Arirang", "Arirang World"]
     categories: [news]
     sources:
+      - "free-tv:ArirangTV.kr"
+      - "free-tv:ArirangWorld.kr"
       - "youtube-live:arirang-tv"
 
   yonhap:
     name:    "Yonhap News TV"
     country: KR
-    aliases: ["Yonhap News TV"]
+    aliases: ["Yonhap News TV", "Yonhap"]
     categories: [news]
     sources:
       - "youtube-live:yonhap"
 
-  # ── Singapore (Mediacorp linear) ───────────────────────────────
-  # Mediacorp's CDN entries in iptv-org are on viloud.tv (community
-  # re-stream); curated entry groups them under one logical channel
-  # so the play page shows the available options.
-  channel-5-sg:
-    name:    "Channel 5"
-    country: SG
-    aliases: ["Channel 5", "MediaCorp Channel 5"]
-    categories: [entertainment]
-    sources:
-      - "iptv-org:Channel5.sg"
-      - "iptv-org-sg:Channel5.sg"
+  # ═══════════════════════════════════════════════════════════════
+  # UNITED STATES — major news + business
+  # ═══════════════════════════════════════════════════════════════
 
-  channel-8-sg:
-    name:    "Channel 8"
-    country: SG
-    aliases: ["Channel 8", "MediaCorp Channel 8"]
-    categories: [entertainment]
+  abc-news:
+    name:    "ABC News Live"
+    country: US
+    aliases: ["ABC News Live", "ABC News"]
+    categories: [news]
     sources:
-      - "iptv-org:Channel8.sg"
-      - "iptv-org-sg:Channel8.sg"
+      - "iptv-org:ABCNewsLive.us"
+      - "free-tv:ABCNewsLive.us"
+      - "free-tv:ABCNews.us"
+      - "youtube-live:abc-news-live"
 
-  channel-u-sg:
-    name:    "Channel U"
-    country: SG
-    aliases: ["Channel U", "MediaCorp Channel U"]
-    categories: [entertainment]
+  nbc-news:
+    name:    "NBC News NOW"
+    country: US
+    aliases: ["NBC News NOW", "NBC News"]
+    categories: [news]
     sources:
-      - "iptv-org:ChannelU.sg"
-      - "iptv-org-sg:ChannelU.sg"
+      - "free-tv:NBCNewsNow.us"
+      - "youtube-live:nbc-news-now"
 
-  # ── Malaysia ───────────────────────────────────────────────────
-  tv3-malaysia:
-    name:    "TV3 Malaysia"
-    country: MY
-    aliases: ["TV3", "TV3 Malaysia", "Buletin TV3"]
-    categories: [news, general]
+  cbs-news:
+    name:    "CBS News"
+    country: US
+    aliases: ["CBS News", "CBS News 24/7"]
+    categories: [news]
     sources:
-      - "youtube-live:tv3-malaysia"
+      - "free-tv:CBSNews.us"
+      - "iptv-org:CBSNews247.us"
+      - "youtube-live:cbs-news"
 
-  rtm-tv1:
-    name:    "RTM TV1"
-    country: MY
-    aliases: ["RTM TV1", "TV1"]
+  cnbc:
+    name:    "CNBC"
+    country: US
+    aliases: ["CNBC", "CNBC Television"]
+    categories: [news, business]
+    sources:
+      - "free-tv:CNBC.us"
+      - "youtube-live:cnbc-live"
+
+  fox-news:
+    name:    "Fox News Channel"
+    country: US
+    aliases: ["Fox News Channel", "Fox News"]
+    categories: [news]
+    sources:
+      - "iptv-org:FoxNewsChannel.us"
+
+  cnn-us:
+    name:    "CNN"
+    country: US
+    aliases: ["CNN"]
+    categories: [news]
+    sources:
+      - "free-tv:CNN.us"
+
+  cnn-international:
+    name:    "CNN International"
+    country: US
+    aliases: ["CNN International", "CNN Intl"]
+    categories: [news]
+    sources:
+      - "free-tv:CNNInternationalEurope.us"
+
+  bloomberg:
+    name:    "Bloomberg Television"
+    country: US
+    aliases: ["Bloomberg Television", "Bloomberg TV", "Bloomberg TV+"]
+    categories: [news, business]
+    sources:
+      - "free-tv:BloombergTelevision.us"
+      - "free-tv:BloombergTVPlus.us"
+      - "youtube-live:bloomberg-tv"
+
+  pbs-newshour:
+    name:    "PBS NewsHour"
+    country: US
+    aliases: ["PBS NewsHour"]
+    categories: [news]
+    sources:
+      - "youtube-live:pbs-newshour"
+
+  reuters:
+    name:    "Reuters"
+    country: US
+    aliases: ["Reuters"]
+    categories: [news]
+    sources:
+      - "youtube-live:reuters"
+
+  # ═══════════════════════════════════════════════════════════════
+  # ITALY — Rai (state broadcaster) trio
+  # ═══════════════════════════════════════════════════════════════
+
+  rai-1:
+    name:    "Rai 1"
+    country: IT
+    aliases: ["Rai 1", "Rai 1 HD", "Rai Uno"]
     categories: [general]
     sources:
-      - "iptv-org:RTM1.my"
-      - "iptv-org-my:RTM1.my"
+      - "iptv-org:Rai1.it"
+      - "free-tv:Rai1.it"
+      - "openiptvitaly:Rai.1.HD..101.it"
 
-  rtm-tv2:
-    name:    "RTM TV2"
-    country: MY
-    aliases: ["RTM TV2", "TV2"]
+  rai-2:
+    name:    "Rai 2"
+    country: IT
+    aliases: ["Rai 2", "Rai 2 HD", "Rai Due"]
     categories: [general]
     sources:
-      - "iptv-org:RTM2.my"
-      - "iptv-org-my:RTM2.my"
-      - "youtube-live:rtm-news"
+      - "iptv-org:Rai2.it"
+      - "free-tv:Rai2.it"
+      - "openiptvitaly:Rai.2.HD..102.it"
 
-  bernama-tv:
-    name:    "BERNAMA TV"
-    country: MY
-    aliases: ["BERNAMA TV", "Bernama News Channel"]
-    categories: [news]
+  rai-3:
+    name:    "Rai 3"
+    country: IT
+    aliases: ["Rai 3", "Rai 3 HD", "Rai Tre"]
+    categories: [general]
     sources:
-      - "youtube-live:bernama-tv"
+      - "iptv-org:Rai3.it"
+      - "free-tv:Rai3.it"
+      - "openiptvitaly:Rai.3.HD..103.it"
 
-  # ── Indonesia ──────────────────────────────────────────────────
-  metro-tv-id:
-    name:    "Metro TV"
-    country: ID
-    aliases: ["Metro TV"]
-    categories: [news]
+  # ═══════════════════════════════════════════════════════════════
+  # NEW ZEALAND — TVNZ
+  # ═══════════════════════════════════════════════════════════════
+
+  tvnz-1:
+    name:    "TVNZ 1"
+    country: NZ
+    aliases: ["TVNZ 1", "TV ONE", "TVNZ One"]
+    categories: [general]
     sources:
-      - "youtube-live:metro-tv"
+      - "iptv-org:TVNZ1.nz"
 
-  cnn-indonesia:
-    name:    "CNN Indonesia"
-    country: ID
-    aliases: ["CNN Indonesia"]
-    categories: [news]
+  tvnz-2:
+    name:    "TVNZ 2"
+    country: NZ
+    aliases: ["TVNZ 2", "TV TWO"]
+    categories: [general]
     sources:
-      - "youtube-live:cnn-indonesia"
+      - "iptv-org:TVNZ2.nz"
 
-  tvone-id:
-    name:    "tvOne"
-    country: ID
-    aliases: ["tvOne", "tvOne News"]
-    categories: [news]
+  # ═══════════════════════════════════════════════════════════════
+  # AUSTRALIA — ABC (state)
+  # ═══════════════════════════════════════════════════════════════
+
+  abc-tv-au:
+    name:    "ABC TV"
+    country: AU
+    aliases: ["ABC TV", "ABC TV HD", "ABC NSW"]
+    categories: [general]
     sources:
-      - "youtube-live:tvone-news"
-
-  beritasatu:
-    name:    "BeritaSatu"
-    country: ID
-    aliases: ["BeritaSatu", "Berita Satu"]
-    categories: [news]
-    sources:
-      - "youtube-live:beritasatu"
-
-  # NOTE: previously planned curated entries for AU broadcasters
-  # (ABC TV, SBS, Channel 10, Seven), NZ (TVNZ 1, Three NZ), and
-  # Italian Rai 1/2/3 were dropped from this Phase 3 pass because
-  # the auto-dedup pipeline already creates reasonable logical
-  # channels for them via (slug + country) bucketing. We can add
-  # curated entries later if we want hand-picked source priorities
-  # or aliases — but it requires knowing the exact source-row IDs
-  # to pin (TBD; need to inspect the catalogue first).
+      - "iptv-org:ABCTV.au"

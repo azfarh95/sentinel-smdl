@@ -57,6 +57,54 @@ if [[ ! -f "$APK" ]]; then
 fi
 ls -lh "$APK"
 
+# ── Publish to the Sentinel Apps store (suite.az-sentinel.xyz/apps) ──
+# Copies the APK to metamcp-local/sentinel-apps/smdl-iptv/v<version>/app.apk
+# and patches the version entry in manifest.json with the new size + sha.
+SENTINEL_APPS_DIR="/c/Users/azfar/metamcp-local/sentinel-apps"
+APP_ID="smdl-iptv"
+if [[ -d "$SENTINEL_APPS_DIR" ]]; then
+  VER="$(grep -E 'versionName\s*=' "$PROJECT_DIR/app/build.gradle.kts" \
+         | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+  if [[ -n "$VER" ]]; then
+    DEST_DIR="$SENTINEL_APPS_DIR/$APP_ID/v$VER"
+    mkdir -p "$DEST_DIR"
+    cp "$APK" "$DEST_DIR/app.apk"
+    SIZE=$(stat -c%s "$DEST_DIR/app.apk")
+    SHA=$(sha256sum "$DEST_DIR/app.apk" | awk '{print $1}')
+    echo "==> published to sentinel-apps: $DEST_DIR/app.apk (${SIZE}B, sha256=${SHA:0:16}…)"
+    # Stamp the manifest's `latest` + the first versions[] entry to match.
+    # Quick jq-free patch via python (already on PATH for Sentinel hosts).
+    python -c "
+import json, datetime, pathlib
+mp = pathlib.Path(r'$SENTINEL_APPS_DIR/manifest.json')
+m = json.loads(mp.read_text(encoding='utf-8'))
+for app in m.get('apps', []):
+    if app.get('id') != '$APP_ID': continue
+    app['latest'] = '$VER'
+    new = {
+        'version': '$VER',
+        'released': datetime.date.today().isoformat(),
+        'file': 'v$VER/app.apk',
+        'size_bytes': $SIZE,
+        'sha256': '$SHA',
+        'min_sdk': app.get('versions', [{}])[0].get('min_sdk', 26),
+        'target_sdk': app.get('versions', [{}])[0].get('target_sdk', 34),
+        'changelog': app.get('versions', [{}])[0].get('changelog', ''),
+    }
+    # de-dup: drop any existing entry with the same version, then prepend
+    app['versions'] = [v for v in app.get('versions', []) if v.get('version') != '$VER']
+    app['versions'].insert(0, new)
+m['updated_at'] = datetime.datetime.utcnow().isoformat() + 'Z'
+mp.write_text(json.dumps(m, indent=2, ensure_ascii=False), encoding='utf-8')
+print('==> manifest updated:', mp)
+"
+  else
+    echo "WARN: could not read versionName from build.gradle.kts — skipping publish" >&2
+  fi
+else
+  echo "WARN: $SENTINEL_APPS_DIR not present — skipping publish (build only)" >&2
+fi
+
 CAPTION=$'📺 SMDL IPTV v0.2.0 (debug-signed)\n\nWhat\'s new:\n• Stream URLs (HLS/DASH/TS) now intent-dispatch with proper MIME and prefer VLC > MX Player > chooser → no more browser-download for .mpd files.\n• Left drawer / sidebar with alphabetical Country list.\n• Filters persist across launches.\n• Sticky search bar no longer disappears after scroll.\n\nSideload over v0.1.0 — cookie + filters survive.'
 
 echo "==> sending to Telegram chat $CHAT_ID"

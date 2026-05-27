@@ -889,8 +889,9 @@ _BROWSE_HTML = r"""<!doctype html>
     <div class="ft-options chip-row" id="category-chips"></div>
   </details>
 
-  <div class="section-h" style="margin-top:18px">
-    <a href="/app" style="color:#5ac8fa; text-decoration:none;">← Back to SMDL</a>
+  <div class="section-h" style="margin-top:18px; display:flex; gap:14px; padding:14px;">
+    <a href="/iptv/recordings" style="color:#5ac8fa; text-decoration:none;">📼 Recordings</a>
+    <a href="/app" style="color:#5ac8fa; text-decoration:none; margin-left:auto;">← Back to SMDL</a>
   </div>
 </aside>
 
@@ -2074,6 +2075,225 @@ _NO_CACHE_HEADERS = {
     "Pragma": "no-cache",
     "Expires": "0",
 }
+
+
+_RECORDINGS_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>SMDL · IPTV Recordings</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root { color-scheme: dark light; }
+    * { box-sizing: border-box; }
+    html, body { margin:0; padding:0; background:#0f1115; color:#e8eaed;
+                 font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+    .topbar {
+      position:sticky; top:0; z-index:10;
+      padding:12px 14px; background:rgba(15,17,21,.92);
+      backdrop-filter:saturate(180%) blur(8px);
+      border-bottom:1px solid #1d2129;
+      display:flex; align-items:center; gap:10px;
+    }
+    .topbar a.back { color:#5ac8fa; text-decoration:none; font-size:14px; }
+    .topbar h1 { font-size:16px; margin:0 auto; font-weight:600; }
+    .topbar .spacer { width:60px; }
+    .summary {
+      padding:10px 14px; font-size:11px; color:#8a8f99;
+      border-bottom:1px solid #1d2129; background:#0c0e13;
+    }
+    .empty { padding:48px 16px; text-align:center; color:#8a8f99; font-size:13px; }
+    .list { padding:8px 14px 90px; }
+    .row {
+      background:#15181f; border:1px solid #232831; border-radius:10px;
+      padding:11px 13px; margin-bottom:8px;
+    }
+    .row .h { display:flex; gap:8px; align-items:center; }
+    .row .h .name { font-weight:600; font-size:14px; flex:1;
+                     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .row .h .status {
+      font-size:10px; padding:3px 7px; border-radius:5px; letter-spacing:.04em;
+      text-transform:uppercase; font-weight:600;
+    }
+    .status.queued   { background:#3a3a3a; color:#cfd2d8; }
+    .status.recording{ background:#5a3a18; color:#ffd9a0; }
+    .status.finished { background:#1f5230; color:#a9e8be; }
+    .status.failed   { background:#5a2020; color:#f5b4b4; }
+    .row .meta {
+      display:flex; gap:6px; flex-wrap:wrap; font-size:11px;
+      color:#8a8f99; margin-top:6px;
+    }
+    .row .meta .tag { background:#0d0f14; padding:2px 6px; border-radius:4px; }
+    .row .meta .tag.size { color:#9ec9ec; }
+    .row .file {
+      font-family:ui-monospace,Menlo,monospace; font-size:10px;
+      color:#cfd2d8; background:#0d0f14; padding:6px 8px; border-radius:6px;
+      word-break:break-all; margin-top:8px;
+    }
+    .row .err {
+      font-size:11px; color:#f5b4b4; background:#2a1818;
+      padding:6px 8px; border-radius:6px; margin-top:6px;
+    }
+    .progress {
+      height:3px; background:#15181f; border-radius:2px; margin-top:8px;
+      overflow:hidden;
+    }
+    .progress .bar {
+      height:100%; background:#5ac8fa; transition: width .5s linear;
+    }
+    .live-dot {
+      display:inline-block; width:6px; height:6px; border-radius:50%;
+      background:#34c759; margin-right:4px;
+      animation: pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes pulse { 50% { opacity:.4; } }
+  </style>
+</head>
+<body>
+
+<div class="topbar">
+  <a class="back" href="/iptv">← Live TV</a>
+  <h1>📼 Recordings</h1>
+  <div class="spacer"></div>
+</div>
+
+<div class="summary" id="summary">Loading…</div>
+
+<div class="list" id="list"><div class="empty">Loading…</div></div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const initData = tg?.initData || '';
+
+async function api(path, opts = {}) {
+  opts.credentials = 'same-origin';
+  opts.headers = Object.assign({}, opts.headers || {}, {
+    'X-Init-Data': initData,
+    ...(opts.body ? {'Content-Type': 'application/json'} : {}),
+  });
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    let detail = r.statusText;
+    try { detail = (await r.json()).detail || detail; } catch (_) {}
+    throw new Error(`${r.status}: ${detail}`);
+  }
+  return await r.json();
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function fmtBytes(n) {
+  if (!n || n < 0) return '—';
+  const u = ['B','KB','MB','GB']; let i = 0; let v = n;
+  while (v >= 1024 && i < u.length-1) { v /= 1024; i++; }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${u[i]}`;
+}
+
+function fmtElapsed(startIso, endIso) {
+  if (!startIso) return '—';
+  const start = new Date(startIso).getTime();
+  const end   = endIso ? new Date(endIso).getTime() : Date.now();
+  const sec   = Math.max(0, Math.floor((end - start) / 1000));
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60); const s = sec % 60;
+  if (m < 60) return `${m}m ${s.toString().padStart(2,'0')}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${(m % 60).toString().padStart(2,'0')}m`;
+}
+
+function fmtWhen(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString([], { dateStyle:'short', timeStyle:'short' });
+}
+
+async function refresh() {
+  let data;
+  try {
+    data = await api('/api/iptv/recordings?limit=100');
+  } catch (e) {
+    document.getElementById('list').innerHTML =
+      `<div class="empty">Error: ${escapeHtml(e.message)}</div>`;
+    document.getElementById('summary').textContent = '';
+    return;
+  }
+  const rows = data.recordings || [];
+  const live  = rows.filter(r => r.status === 'recording').length;
+  const queued= rows.filter(r => r.status === 'queued').length;
+  const ok    = rows.filter(r => r.status === 'finished').length;
+  const bad   = rows.filter(r => r.status === 'failed').length;
+  document.getElementById('summary').innerHTML =
+    `${rows.length} total · ` +
+    (live  ? `<span class="live-dot"></span>${live} recording · ` : '') +
+    (queued? `${queued} queued · ` : '') +
+    `${ok} finished · ${bad} failed`;
+  if (!rows.length) {
+    document.getElementById('list').innerHTML =
+      `<div class="empty">No recordings yet. Tap <strong>⏺ Record 5 min</strong> on any channel's play page to start one.</div>`;
+    return;
+  }
+  document.getElementById('list').innerHTML = rows.map(r => {
+    const status   = r.status || 'queued';
+    const fileName = (r.output_path || '').split('/').pop();
+    const duration = (r.duration_min || 5) * 60;
+    const elapsedNow = (status === 'recording' && r.started_at)
+      ? Math.floor((Date.now() - new Date(r.started_at).getTime()) / 1000)
+      : 0;
+    const pct = (status === 'recording' && duration)
+      ? Math.min(100, Math.floor(100 * elapsedNow / duration))
+      : (status === 'finished' ? 100 : 0);
+    const progressBar = (status === 'recording')
+      ? `<div class="progress"><div class="bar" style="width:${pct}%"></div></div>`
+      : '';
+    const errBlock = (status === 'failed' && r.error)
+      ? `<div class="err">${escapeHtml(r.error)}</div>`
+      : '';
+    const fileBlock = (status === 'finished' && r.output_path)
+      ? `<div class="file">${escapeHtml(r.output_path)}</div>`
+      : '';
+    return `
+      <div class="row" data-id="${r.id}">
+        <div class="h">
+          <div class="name">${escapeHtml(r.channel_id || '')}</div>
+          <div class="status ${status}">${status}</div>
+        </div>
+        <div class="meta">
+          <span class="tag">${r.duration_min}m target</span>
+          <span class="tag">elapsed ${fmtElapsed(r.started_at, r.finished_at)}</span>
+          ${r.requested_at ? `<span class="tag">requested ${fmtWhen(r.requested_at)}</span>` : ''}
+          ${fileName ? `<span class="tag size">${escapeHtml(fileName)}</span>` : ''}
+        </div>
+        ${progressBar}
+        ${errBlock}
+        ${fileBlock}
+      </div>
+    `;
+  }).join('');
+}
+
+let _liveTimer = null;
+async function tick() {
+  await refresh();
+  // Auto-refresh every 3s if at least one recording is in flight;
+  // every 30s otherwise (catch the transition queued → recording → finished).
+  const isLive = document.querySelector('.status.recording, .status.queued');
+  const delay = isLive ? 3000 : 30000;
+  _liveTimer = setTimeout(tick, delay);
+}
+tick();
+</script>
+</body></html>
+"""
+
+
+@router.get("/iptv/recordings", response_class=HTMLResponse)
+async def iptv_recordings_page():
+    return HTMLResponse(_RECORDINGS_HTML, headers=_NO_CACHE_HEADERS)
 
 
 @router.get("/iptv", response_class=HTMLResponse)

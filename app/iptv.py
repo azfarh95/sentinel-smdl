@@ -1009,19 +1009,89 @@ def probe_all_status() -> dict:
     return dict(_probe_all_state)
 
 
+# Channels whose last_check_at is within this window are considered
+# "fresh" and skipped by start_probe_all() unless force_recheck=True.
+# Dead and unprobed channels are always re-probed (status filter inside
+# the skip predicate). 6h = "manual sweep around once a day catches all
+# stale rows but doesn't redo today's work twice".
+PROBE_FRESH_WINDOW_HOURS = 6
+# DB writes are batched through a single writer task — sqlite serialises
+# writes anyway, but batching cuts commit() overhead by ~50x at scale
+# (one fsync per batch instead of one per probe).
+PROBE_DB_BATCH_SIZE = 50
+
+
+def _is_probe_fresh(channel: "IptvChannel", window_hours: int) -> bool:
+    """A channel's status is "fresh" if it was alive-probed within the
+    window. Dead/unprobed channels are never fresh — we want aggressive
+    rechecks for those (a dead stream may have come back)."""
+    if channel.status != "alive" or not channel.last_check_at:
+        return False
+    try:
+        from datetime import datetime, timezone, timedelta
+        last = datetime.fromisoformat(channel.last_check_at)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last) < timedelta(hours=window_hours)
+    except Exception:
+        return False
+
+
+async def _probe_db_writer(queue: asyncio.Queue) -> int:
+    """Consumes probe results from the queue and batch-writes them.
+    Exits when it sees the sentinel None. Returns total rows written."""
+    written = 0
+    batch: list[tuple] = []
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=2.0)
+            except asyncio.TimeoutError:
+                item = "FLUSH"   # sentinel for "no new items, just flush"
+            if item is None:    # caller signalled "done"
+                if batch:
+                    await conn.executemany(
+                        "UPDATE iptv_channels SET status=?, last_check_at=?, "
+                        "last_error=?, alive=? WHERE id=?", batch)
+                    await conn.commit()
+                    written += len(batch)
+                return written
+            if item != "FLUSH":
+                batch.append(item)
+            if len(batch) >= PROBE_DB_BATCH_SIZE or item == "FLUSH":
+                if batch:
+                    await conn.executemany(
+                        "UPDATE iptv_channels SET status=?, last_check_at=?, "
+                        "last_error=?, alive=? WHERE id=?", batch)
+                    await conn.commit()
+                    written += len(batch)
+                    batch.clear()
+
+
 async def _probe_all_worker(
     source: str | None,
     country: str | None,
     concurrency: int,
     timeout_s: float,
+    force_recheck: bool,
+    fresh_window_hours: int,
 ) -> None:
     """Long-running task body. Pulls channel ids in scope, probes each
-    via probe_channel(), updates the row-level status. Designed to be
-    started with asyncio.create_task() — the caller doesn't wait."""
+    via _probe_url_only(), feeds results into a single DB writer task
+    that batches UPDATEs. Skips channels with status='alive' inside the
+    freshness window (unless force_recheck=True)."""
     try:
-        chans = await list_channels(
+        all_chans = await list_channels(
             source=source, country=country, limit=20000,
         )
+        if not force_recheck:
+            chans = [c for c in all_chans
+                     if not _is_probe_fresh(c, fresh_window_hours)]
+            skipped = len(all_chans) - len(chans)
+        else:
+            chans = all_chans
+            skipped = 0
+
         _probe_all_state.update({
             "running": True,
             "started_at": _iso_now(),
@@ -1029,27 +1099,53 @@ async def _probe_all_worker(
             "checked": 0,
             "alive": 0,
             "dead": 0,
+            "skipped_fresh": skipped,
             "last_channel": "",
-            "scope": f"source={source or 'all'} country={country or 'all'}",
+            "scope": f"source={source or 'all'} country={country or 'all'} force={force_recheck}",
         })
-        sem = asyncio.Semaphore(concurrency)
+        if not chans:
+            return
 
-        async def _one(cid: str, cname: str):
+        sem = asyncio.Semaphore(concurrency)
+        write_queue: asyncio.Queue = asyncio.Queue(maxsize=concurrency * 4)
+        writer_task = asyncio.create_task(_probe_db_writer(write_queue))
+
+        # Single shared HTTP client → connection-pool reuse across probes.
+        # Without this every probe opens its own TCP/TLS handshake.
+        limits = httpx.Limits(max_connections=concurrency * 2,
+                              max_keepalive_connections=concurrency)
+        shared_client = httpx.AsyncClient(
+            timeout=timeout_s, follow_redirects=True, limits=limits,
+        )
+
+        async def _one(cid: str, curl: str, cname: str):
             async with sem:
                 try:
-                    refreshed = await probe_channel(cid, timeout_s=timeout_s)
-                    _probe_all_state["last_channel"] = cname
-                    if refreshed.status == "alive":
-                        _probe_all_state["alive"] += 1
-                    else:
-                        _probe_all_state["dead"] += 1
+                    status, err = await _probe_url_only(
+                        curl, timeout_s=timeout_s, client=shared_client,
+                    )
                 except Exception as exc:
-                    logger.debug("probe_all: %s failed: %s", cid, exc)
+                    status, err = "dead", str(exc)[:300]
+                _probe_all_state["last_channel"] = cname
+                if status == "alive":
+                    _probe_all_state["alive"] += 1
+                else:
                     _probe_all_state["dead"] += 1
-                finally:
-                    _probe_all_state["checked"] += 1
+                _probe_all_state["checked"] += 1
+                await write_queue.put(
+                    (status, _iso_now(), err,
+                     1 if status == "alive" else 0, cid)
+                )
 
-        await asyncio.gather(*(_one(c.id, c.name) for c in chans))
+        try:
+            await asyncio.gather(*(
+                _one(c.id, c.url or "", c.name) for c in chans if c.url
+            ))
+        finally:
+            await shared_client.aclose()
+            # signal writer to flush + exit
+            await write_queue.put(None)
+            await writer_task
     except Exception:
         logger.exception("probe_all worker crashed")
     finally:
@@ -1059,16 +1155,29 @@ async def _probe_all_worker(
 def start_probe_all(
     source: str | None = None,
     country: str | None = None,
-    concurrency: int = 12,
+    concurrency: int = 32,
     timeout_s: float = 6.0,
+    force_recheck: bool = False,
+    fresh_window_hours: int = PROBE_FRESH_WINDOW_HOURS,
 ) -> dict:
     """Kick off a background sweep. Idempotent — refuses to start a new
-    sweep if one is already running (returns the current status)."""
+    sweep if one is already running (returns the current status).
+
+    force_recheck=False (default) skips channels whose status='alive' was
+    set within the last `fresh_window_hours` (default 6h). Dead +
+    unprobed channels are always re-probed regardless."""
     if _probe_all_state.get("running"):
         return {"already_running": True, **probe_all_status()}
-    asyncio.create_task(_probe_all_worker(source, country, concurrency, timeout_s))
-    return {"started": True, "scope": f"source={source} country={country}",
-            "concurrency": concurrency, "timeout_s": timeout_s}
+    asyncio.create_task(_probe_all_worker(
+        source, country, concurrency, timeout_s, force_recheck, fresh_window_hours,
+    ))
+    return {
+        "started": True,
+        "scope": f"source={source} country={country}",
+        "concurrency": concurrency, "timeout_s": timeout_s,
+        "force_recheck": force_recheck,
+        "fresh_window_hours": fresh_window_hours,
+    }
 
 
 # ── Channel listing / lookup ───────────────────────────────────────
@@ -1133,6 +1242,42 @@ async def get_channel(channel_id: str) -> IptvChannel | None:
 # ── Probe (HEAD + first-segment fetch) ─────────────────────────────
 
 
+async def _probe_url_only(
+    url: str,
+    timeout_s: float = 7.0,
+    client: httpx.AsyncClient | None = None,
+) -> tuple[str, str | None]:
+    """Pure I/O probe — no DB write. Returns (status, error_message).
+    Optionally takes a shared client so the caller can reuse the connection
+    pool across many probes (probe_all worker does this)."""
+    own_client = client is None
+    if own_client:
+        client = httpx.AsyncClient(timeout=timeout_s, follow_redirects=True)
+    status = "dead"
+    err: str | None = None
+    try:
+        # HEAD first — some HLS servers don't support HEAD, fall through to GET
+        r = await client.head(url)
+        if r.status_code >= 400:
+            async with client.stream("GET", url) as gr:
+                if gr.status_code >= 400:
+                    raise RuntimeError(f"HTTP {gr.status_code}")
+                n = 0
+                async for chunk in gr.aiter_bytes(chunk_size=4096):
+                    n += len(chunk)
+                    if n >= 16_384:
+                        break
+                if n == 0:
+                    raise RuntimeError("empty body")
+        status = "alive"
+    except Exception as exc:
+        err = str(exc)[:300]
+    finally:
+        if own_client:
+            await client.aclose()
+    return status, err
+
+
 async def probe_channel(channel_id: str, timeout_s: float = 7.0) -> IptvChannel:
     """HEAD the channel's M3U8 URL, then GET the first ~16KB to confirm
     the stream is actually responding. Persists the result on the row.
@@ -1142,27 +1287,7 @@ async def probe_channel(channel_id: str, timeout_s: float = 7.0) -> IptvChannel:
     ch = await get_channel(channel_id)
     if ch is None or not ch.url:
         raise KeyError(f"channel {channel_id} not found or has no URL")
-    status = "dead"
-    err: str | None = None
-    try:
-        async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
-            # HEAD first — some HLS servers don't support HEAD, fall through to GET
-            r = await client.head(ch.url)
-            if r.status_code >= 400:
-                # Try GET with a 16KB read cap
-                async with client.stream("GET", ch.url) as gr:
-                    if gr.status_code >= 400:
-                        raise RuntimeError(f"HTTP {gr.status_code}")
-                    n = 0
-                    async for chunk in gr.aiter_bytes(chunk_size=4096):
-                        n += len(chunk)
-                        if n >= 16_384:
-                            break
-                    if n == 0:
-                        raise RuntimeError("empty body")
-            status = "alive"
-    except Exception as exc:
-        err = str(exc)[:300]
+    status, err = await _probe_url_only(ch.url, timeout_s=timeout_s)
     now = _iso_now()
     async with aiosqlite.connect(db.DB_PATH) as conn:
         await conn.execute(

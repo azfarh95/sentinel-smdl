@@ -236,8 +236,10 @@ async def iptv_channel_get(channel_id: str, request: Request):
 class ProbeAllBody(BaseModel):
     source: str | None = None
     country: str | None = None
-    concurrency: int = 12
+    concurrency: int = 32
     timeout_s: float = 6.0
+    force_recheck: bool = False     # set True to re-probe channels alive within the freshness window
+    fresh_window_hours: int = 6
 
 
 @router.post("/api/iptv/probe_all")
@@ -247,8 +249,10 @@ async def iptv_probe_all(body: ProbeAllBody, request: Request):
     await _mini._verify(request)
     return _iptv.start_probe_all(
         source=body.source, country=body.country,
-        concurrency=max(1, min(int(body.concurrency or 12), 32)),
+        concurrency=max(1, min(int(body.concurrency or 32), 128)),
         timeout_s=float(body.timeout_s or 6.0),
+        force_recheck=bool(body.force_recheck),
+        fresh_window_hours=max(1, min(int(body.fresh_window_hours or 6), 168)),
     )
 
 

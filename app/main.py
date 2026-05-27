@@ -73,6 +73,12 @@ async def lifespan(app: FastAPI):
         lambda t: t.cancelled() or t.exception() and
         logger.error("IPTV auto-probe loop crashed: %s", t.exception(), exc_info=t.exception())
     )
+    # IPTV scheduled-DVR ticker — wakes every 60s, fires pending records.
+    try:
+        from . import iptv_routes as _iptv_routes
+        await _iptv_routes.start_scheduler_loop()
+    except Exception as _e:
+        logger.warning("IPTV scheduled-DVR loop failed to start: %s", _e)
 
     # Bot initialization is best-effort. A bad/missing token must NOT crash
     # the FastAPI lifespan — keep the /health endpoint up so the operator

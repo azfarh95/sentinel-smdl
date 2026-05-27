@@ -1,0 +1,33 @@
+# Singapore-pinned channels — drives /iptv?tab=sg
+#
+# Entries are channel IDs from the LIVE catalogue (run /api/iptv/v2/channels
+# to see them) or legacy source-prefixed IDs (e.g. "iptv-org:CNA.sg").
+# Order in this list = display order on the SG tab.
+#
+# Edit + commit. No app restart needed — the YAML is read on each request.
+
+channels:
+  # ── Free-to-air (Mediacorp + others) ────────────────────────────
+  # Replace these placeholders with the real channel IDs from
+  # /api/iptv/v2/channels?country=SG once the catalogue is refreshed.
+  # The endpoint gracefully drops any ID that isn't in the DB.
+  - mediacorp-channel-5
+  - mediacorp-channel-8
+  - mediacorp-channel-u
+  - mediacorp-suria
+  - mediacorp-vasantham
+
+  # ── News (regional + global) ────────────────────────────────────
+  - cna
+  - bloomberg-tv-asia
+  - cnbc-asia
+  - bbc-world-news
+  - nhk-world
+
+  # ── Sports ──────────────────────────────────────────────────────
+  - singtel-mio-sports-1
+  - singtel-mio-sports-2
+
+  # ── Lifestyle / docs ────────────────────────────────────────────
+  - mediacorp-channel-newsasia
+  - discovery-asia

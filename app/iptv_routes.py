@@ -30,11 +30,14 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import httpx
+
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
 import aiosqlite
@@ -658,6 +661,548 @@ async def iptv_recordings(request: Request, limit: int = 50):
     return {"recordings": await _iptv.list_iptv_recordings(limit=limit)}
 
 
+# ── Enhancement pass 2026-05-27: logo cache + now-playing + play history
+#    + scheduled DVR + M3U import + SG-curated ──────────────────────
+
+
+LOGO_CACHE_DIR = Path(os.environ.get("IPTV_LOGO_CACHE_DIR", "/data/iptv_logos"))
+
+
+_TILE_COLORS = [
+    "#3390ec", "#34c759", "#ff9f0a", "#ff453a", "#5ac8fa", "#bf5af2",
+    "#ffd60a", "#30d158", "#ff375f", "#64d2ff", "#a162e8", "#ff6b35",
+]
+
+
+def _letter_tile_svg(channel_name: str, size: int = 96) -> bytes:
+    """Two-letter colored SVG tile. Used as logo fallback when no origin
+    URL exists or its fetch failed. Inline SVG is browser-renderable
+    in <img>, no Pillow dep required."""
+    name = (channel_name or "?").strip()
+    parts = [p for p in name.replace("-", " ").replace("_", " ").split() if p]
+    initials = "".join(p[0] for p in parts[:2])[:2].upper() or "?"
+    color_idx = sum(ord(c) for c in name) % len(_TILE_COLORS)
+    color = _TILE_COLORS[color_idx]
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}">'
+        f'<rect width="{size}" height="{size}" rx="{size//6}" fill="{color}"/>'
+        f'<text x="50%" y="52%" dy="0.36em" text-anchor="middle" '
+        f'fill="white" font-family="-apple-system,system-ui,Arial,sans-serif" '
+        f'font-size="{int(size*0.42)}" font-weight="700">{initials}</text>'
+        f'</svg>'
+    ).encode("utf-8")
+
+
+def _safe_logo_filename(channel_id: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in channel_id)[:64]
+
+
+@router.get("/iptv/logo/{channel_id:path}")
+async def iptv_logo(channel_id: str, request: Request):
+    """Serve a channel logo from on-disk cache, fetching the origin URL
+    on first miss. Falls back to a generated letter-tile SVG when there's
+    no usable origin or the fetch fails. Same scope gate as the rest of
+    /iptv. Browser sends the auth cookie via <img src>."""
+    await _verify_iptv(request)
+    LOGO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    safe = _safe_logo_filename(channel_id)
+    cache_path = LOGO_CACHE_DIR / f"{safe}.bin"
+    meta_path  = LOGO_CACHE_DIR / f"{safe}.mime"
+
+    if cache_path.is_file() and meta_path.is_file():
+        try:
+            mime = (meta_path.read_text(encoding="utf-8").strip()
+                    or "image/png")
+            return FileResponse(str(cache_path), media_type=mime,
+                                headers={"Cache-Control": "public, max-age=86400"})
+        except Exception:
+            pass
+
+    origin_url = None
+    channel_name = channel_id
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT lc.name AS name, ic.logo AS logo "
+            "FROM logical_channels lc "
+            "LEFT JOIN iptv_channels ic ON ic.channel_id = lc.id "
+            "WHERE lc.id = ? AND ic.logo IS NOT NULL AND ic.logo != '' "
+            "LIMIT 1",
+            (channel_id,),
+        )
+        row = await cur.fetchone()
+        if row:
+            origin_url, channel_name = row["logo"], row["name"]
+        else:
+            cur = await conn.execute(
+                "SELECT name, logo FROM iptv_channels WHERE id = ? LIMIT 1",
+                (channel_id,),
+            )
+            row = await cur.fetchone()
+            if row:
+                origin_url, channel_name = row["logo"], row["name"]
+
+    if origin_url and origin_url.startswith(("http://", "https://")):
+        try:
+            async with httpx.AsyncClient(timeout=4.0, follow_redirects=True) as cli:
+                r = await cli.get(origin_url)
+            if r.status_code == 200 and len(r.content) > 100:
+                mime = r.headers.get("content-type", "image/png").split(";")[0].strip()
+                if mime.startswith("image/"):
+                    cache_path.write_bytes(r.content)
+                    meta_path.write_text(mime, encoding="utf-8")
+                    return FileResponse(str(cache_path), media_type=mime,
+                                        headers={"Cache-Control": "public, max-age=86400"})
+        except Exception:
+            pass
+
+    svg = _letter_tile_svg(channel_name)
+    cache_path.write_bytes(svg)
+    meta_path.write_text("image/svg+xml", encoding="utf-8")
+    return FileResponse(str(cache_path), media_type="image/svg+xml",
+                        headers={"Cache-Control": "public, max-age=3600"})
+
+
+@router.get("/api/iptv/now_playing")
+async def iptv_now_playing(request: Request):
+    """Map logical-channel-id → current programme. Driven by EPG
+    (iptv_programmes). One SQL query, no N+1. Used by the grid to
+    decorate each card with a "what's on now" line."""
+    await _verify_iptv(request)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out: dict[str, dict] = {}
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        # Logical channels don't carry tvg_id directly; their source rows do
+        # (the tvg_id is the suffix after `<source>:` in iptv_channels.id).
+        # Strip the source prefix off via REPLACE() to JOIN on iptv_programmes.
+        cur = await conn.execute(
+            """
+            SELECT lc.id AS channel_id,
+                   ip.title AS title,
+                   ip.end_utc AS end_utc,
+                   ip.description AS description
+              FROM logical_channels lc
+              JOIN iptv_channels ic ON ic.channel_id = lc.id
+              JOIN iptv_programmes ip
+                ON ip.tvg_id = REPLACE(ic.id, ic.source || ':', '')
+             WHERE ip.start_utc <= ?
+               AND ip.end_utc > ?
+             GROUP BY lc.id
+            """,
+            (now, now),
+        )
+        for r in await cur.fetchall():
+            out[r["channel_id"]] = {
+                "title":       r["title"],
+                "end_utc":     r["end_utc"],
+                "description": r["description"],
+            }
+    return {"now_playing": out, "count": len(out), "as_of": now}
+
+
+# ── Play history (drives the "Last watched" row at top of grid) ──
+
+
+async def _ensure_play_history_table():
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS iptv_play_history (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id  TEXT NOT NULL,
+                played_at   TEXT NOT NULL,
+                source_id   TEXT
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_iptv_play_history_ts
+              ON iptv_play_history(played_at DESC)
+        """)
+        await conn.commit()
+
+
+class PlayLogBody(BaseModel):
+    source_id: str | None = None
+
+
+@router.post("/api/iptv/channels/{channel_id}/played")
+async def iptv_log_play(channel_id: str, body: PlayLogBody, request: Request):
+    """Lightweight beacon — frontend POSTs after a successful inline-play
+    or external-player handoff. Drives the "Last watched" pinned row."""
+    await _verify_iptv(request)
+    await _ensure_play_history_table()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        await conn.execute(
+            "INSERT INTO iptv_play_history (channel_id, played_at, source_id) "
+            "VALUES (?, ?, ?)",
+            (channel_id, now, body.source_id),
+        )
+        await conn.commit()
+    return {"ok": True, "played_at": now}
+
+
+@router.get("/api/iptv/last_watched")
+async def iptv_last_watched(request: Request, limit: int = 8):
+    """Last N distinct channels played, newest first. Joined with
+    logical_channels so the grid can render name + logo lookup key."""
+    await _verify_iptv(request)
+    await _ensure_play_history_table()
+    limit = max(1, min(int(limit or 8), 24))
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            """
+            SELECT ph.channel_id, MAX(ph.played_at) AS played_at,
+                   COALESCE(lc.name, ic.name) AS name,
+                   COALESCE(lc.country, ic.country) AS country
+              FROM iptv_play_history ph
+         LEFT JOIN logical_channels lc ON lc.id = ph.channel_id
+         LEFT JOIN iptv_channels ic ON ic.id = ph.channel_id
+             GROUP BY ph.channel_id
+             ORDER BY MAX(ph.played_at) DESC
+             LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cur.fetchall()
+    return {"items": [dict(r) for r in rows], "count": len(rows)}
+
+
+# ── Scheduled DVR ───────────────────────────────────────────────
+
+
+async def _ensure_scheduled_table():
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS iptv_scheduled (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id    TEXT NOT NULL,
+                start_at      TEXT NOT NULL,
+                duration_min  INTEGER NOT NULL,
+                padding_pre   INTEGER NOT NULL DEFAULT 0,
+                padding_post  INTEGER NOT NULL DEFAULT 0,
+                programme     TEXT,
+                status        TEXT NOT NULL DEFAULT 'pending',
+                created_at    TEXT NOT NULL,
+                triggered_at  TEXT,
+                job_id        TEXT,
+                error         TEXT
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_iptv_sched_pending
+              ON iptv_scheduled(status, start_at)
+        """)
+        await conn.commit()
+
+
+class ScheduleBody(BaseModel):
+    channel_id:    str
+    start_at:      str            # ISO-8601 UTC ("2026-05-27T20:00:00Z")
+    duration_min:  int            # minutes to record (excluding padding)
+    padding_pre:   int = 0
+    padding_post:  int = 0
+    programme:     str | None = None
+
+
+@router.post("/api/iptv/schedule")
+async def iptv_schedule(body: ScheduleBody, request: Request):
+    """Create a future recording job. The background tick (started in
+    main.py's lifespan) wakes once a minute, kicks off any 'pending'
+    rows whose effective start_at minus padding_pre is in the past."""
+    await _verify_iptv(request)
+    await _ensure_scheduled_table()
+    if body.duration_min <= 0 or body.duration_min > 12 * 60:
+        raise HTTPException(400, "duration_min must be 1..720")
+    try:
+        # Validate start_at parses; the column stores the raw input.
+        datetime.strptime(body.start_at.rstrip("Z"), "%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        raise HTTPException(400, "start_at must be ISO-8601 UTC like 2026-05-27T20:00:00Z")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        cur = await conn.execute(
+            "INSERT INTO iptv_scheduled "
+            "(channel_id, start_at, duration_min, padding_pre, padding_post, "
+            " programme, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
+            (body.channel_id, body.start_at, body.duration_min,
+             max(0, body.padding_pre), max(0, body.padding_post),
+             body.programme, now),
+        )
+        await conn.commit()
+        sched_id = cur.lastrowid
+    return {"ok": True, "id": sched_id, "status": "pending"}
+
+
+@router.get("/api/iptv/scheduled")
+async def iptv_scheduled_list(request: Request, limit: int = 100):
+    """List recently-created scheduled records, newest first.  Frontend
+    uses this for the "Upcoming" section on the recordings page."""
+    await _verify_iptv(request)
+    await _ensure_scheduled_table()
+    limit = max(1, min(int(limit or 100), 500))
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT id, channel_id, start_at, duration_min, padding_pre, "
+            "       padding_post, programme, status, created_at, "
+            "       triggered_at, job_id, error "
+            "FROM iptv_scheduled ORDER BY start_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+    return {"items": [dict(r) for r in rows], "count": len(rows)}
+
+
+@router.delete("/api/iptv/scheduled/{sched_id}")
+async def iptv_scheduled_cancel(sched_id: int, request: Request):
+    """Cancel a pending scheduled recording. Only 'pending' rows can be
+    cancelled; once 'triggered' the actual recording is managed by the
+    existing iptv_recordings flow."""
+    await _verify_iptv(request)
+    await _ensure_scheduled_table()
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        cur = await conn.execute(
+            "UPDATE iptv_scheduled SET status='cancelled' "
+            "WHERE id=? AND status='pending'",
+            (sched_id,),
+        )
+        await conn.commit()
+        changed = cur.rowcount or 0
+    if not changed:
+        raise HTTPException(404, "no pending row with that id")
+    return {"ok": True, "cancelled": sched_id}
+
+
+# Module-level holder for the lifespan-started background task. Main app
+# starts it once via `await iptv_routes.start_scheduler_loop()`.
+_scheduler_task: asyncio.Task | None = None
+
+
+async def _scheduler_tick_once():
+    """Inspect iptv_scheduled, fire anything due. Tolerates per-row
+    failures (one bad schedule shouldn't block the rest)."""
+    await _ensure_scheduled_table()
+    now_dt = datetime.now(timezone.utc)
+    now_s = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT id, channel_id, start_at, duration_min, "
+            "       padding_pre, padding_post "
+            "FROM iptv_scheduled "
+            "WHERE status='pending'",
+        )
+        rows = await cur.fetchall()
+    for r in rows:
+        try:
+            start_dt = datetime.strptime(
+                r["start_at"].rstrip("Z"), "%Y-%m-%dT%H:%M:%S"
+            ).replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        effective_start = start_dt.timestamp() - (r["padding_pre"] or 0) * 60
+        if now_dt.timestamp() < effective_start:
+            continue
+        total_min = (r["duration_min"] or 0) + (r["padding_pre"] or 0) + (r["padding_post"] or 0)
+        if total_min <= 0:
+            continue
+        try:
+            result = await _iptv.record_channel(r["channel_id"], int(total_min))
+        except Exception as exc:
+            logger.exception("scheduled DVR row %s failed", r["id"])
+            async with aiosqlite.connect(_db.DB_PATH) as conn:
+                await conn.execute(
+                    "UPDATE iptv_scheduled SET status='failed', "
+                    "triggered_at=?, error=? WHERE id=?",
+                    (now_s, str(exc)[:300], r["id"]),
+                )
+                await conn.commit()
+            continue
+        job_id = (result or {}).get("job_id") or (result or {}).get("id")
+        async with aiosqlite.connect(_db.DB_PATH) as conn:
+            await conn.execute(
+                "UPDATE iptv_scheduled SET status='triggered', "
+                "triggered_at=?, job_id=? WHERE id=?",
+                (now_s, str(job_id) if job_id else None, r["id"]),
+            )
+            await conn.commit()
+
+
+async def _scheduler_loop():
+    while True:
+        try:
+            await _scheduler_tick_once()
+        except Exception:
+            logger.exception("scheduler tick crashed")
+        await asyncio.sleep(60)
+
+
+async def start_scheduler_loop():
+    """Idempotent: starts the background DVR scheduler once.
+    Called from app.main lifespan."""
+    global _scheduler_task
+    if _scheduler_task and not _scheduler_task.done():
+        return
+    await _ensure_scheduled_table()
+    await _ensure_play_history_table()
+    _scheduler_task = asyncio.create_task(_scheduler_loop())
+    logger.info("iptv: scheduled-DVR tick loop started")
+
+
+# ── M3U / Xtream import ─────────────────────────────────────────
+
+
+class M3UImportBody(BaseModel):
+    label: str                     # operator-friendly name for the playlist
+    m3u_url: str | None = None     # fetch from URL …
+    m3u_text: str | None = None    # …or accept inline pasted M3U body
+
+
+@router.post("/api/iptv/import_m3u")
+async def iptv_import_m3u(body: M3UImportBody, request: Request):
+    """Ingest a third-party M3U playlist into the iptv_channels table
+    under a custom `source` tag. Re-uses the existing iptv.parse_m3u
+    helper. After insert, the user can run /api/iptv/dedup/run to
+    merge them into logical_channels with the official iptv-org data."""
+    await _verify_iptv(request)
+    _mini.require_scope(await _mini._verify(request), "*")  # owner-only
+
+    label = (body.label or "").strip().lower().replace(" ", "-")
+    if not label or not all(c.isalnum() or c in "-_" for c in label):
+        raise HTTPException(400, "label must be alphanumeric+hyphen")
+
+    if body.m3u_text and body.m3u_text.strip():
+        text = body.m3u_text
+    elif body.m3u_url and body.m3u_url.startswith(("http://", "https://")):
+        try:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as cli:
+                r = await cli.get(body.m3u_url)
+            if r.status_code != 200:
+                raise HTTPException(502, f"M3U fetch returned {r.status_code}")
+            text = r.text
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"M3U fetch failed: {exc}")
+    else:
+        raise HTTPException(400, "supply either m3u_url or m3u_text")
+
+    try:
+        parsed = _iptv.parse_m3u(text)
+    except Exception as exc:
+        raise HTTPException(400, f"M3U parse failed: {exc}")
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    inserted, skipped = 0, 0
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        for ch in parsed:
+            ch_name = (ch.get("name") or "").strip()
+            ch_url  = (ch.get("url") or "").strip()
+            if not ch_name or not ch_url:
+                skipped += 1
+                continue
+            row_id = f"{label}:{ch.get('id') or ch_name}"[:255]
+            try:
+                await conn.execute(
+                    "INSERT OR IGNORE INTO iptv_channels "
+                    "(id, name, country, languages, categories, url, logo, "
+                    " source, last_seen_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row_id, ch_name,
+                        (ch.get("country") or "").upper() or None,
+                        ch.get("languages") or "",
+                        ch.get("categories") or "",
+                        ch_url, ch.get("logo") or "",
+                        label, now,
+                    ),
+                )
+                if conn.total_changes:
+                    inserted += 1
+                else:
+                    skipped += 1
+            except Exception:
+                skipped += 1
+        await conn.commit()
+    return {
+        "ok": True, "source": label,
+        "parsed": len(parsed), "inserted": inserted, "skipped": skipped,
+        "hint": "Run POST /api/iptv/dedup/run to merge into logical channels.",
+    }
+
+
+# ── SG-curated pin (data lives in scopes-yaml-adjacent file) ──
+
+
+SG_CURATED_PATH = Path(os.environ.get(
+    "SMDL_SG_CURATED", "/app/data/iptv_sg_curated.yaml"
+))
+
+
+def _load_sg_curated() -> list[str]:
+    """List of channel IDs (logical preferred, source-prefixed accepted)
+    that should appear on the SG-pinned tab. Order in the file is the
+    display order."""
+    if not SG_CURATED_PATH.is_file():
+        return []
+    try:
+        import yaml
+        with SG_CURATED_PATH.open("r", encoding="utf-8") as f:
+            doc = yaml.safe_load(f) or {}
+        ch = doc.get("channels") or []
+        return [str(x).strip() for x in ch if x]
+    except Exception as exc:
+        logger.warning("SG curated load failed: %s", exc)
+        return []
+
+
+@router.get("/api/iptv/sg")
+async def iptv_sg_curated(request: Request):
+    """Curated SG channels — Mediacorp, CNA, Singtel sports, regional news.
+    Pulled from data/iptv_sg_curated.yaml (manually maintained).  Each
+    entry hydrated with name + logo lookup id so the grid can render
+    using existing card markup."""
+    await _verify_iptv(request)
+    ids = _load_sg_curated()
+    if not ids:
+        return {"items": [], "count": 0, "note": "no curated list yet"}
+    placeholders = ",".join("?" * len(ids))
+    out: list[dict] = []
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        # Try logical channels first
+        cur = await conn.execute(
+            f"SELECT id, name, country, categories, is_curated, "
+            f"       source_count, alive_count_srcs AS alive_count "
+            f"FROM v_channels_with_status WHERE id IN ({placeholders})",
+            ids,
+        )
+        found = {r["id"]: dict(r) for r in await cur.fetchall()}
+        # Fall back to source-prefixed rows for any that didn't match
+        missing = [i for i in ids if i not in found]
+        if missing:
+            ph2 = ",".join("?" * len(missing))
+            cur = await conn.execute(
+                f"SELECT id, name, country, categories, logo "
+                f"FROM iptv_channels WHERE id IN ({ph2})",
+                missing,
+            )
+            for r in await cur.fetchall():
+                found[r["id"]] = dict(r)
+        # Preserve curated YAML order
+        for cid in ids:
+            row = found.get(cid)
+            if not row:
+                continue
+            row["categories"] = [
+                c for c in (row.get("categories") or "").split(",") if c
+            ] if isinstance(row.get("categories"), str) else (row.get("categories") or [])
+            out.append(row)
+    return {"items": out, "count": len(out)}
+
+
 # ── HTML ────────────────────────────────────────────────────────────
 
 
@@ -793,6 +1338,72 @@ _BROWSE_HTML = r"""<!doctype html>
       grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
     }
 
+    /* ── Quick-tab strip (All / SG / Favorites / Last watched) ──── */
+    .quick-tabs {
+      display:flex; gap:6px; padding:10px 14px 0; flex-wrap:wrap;
+      border-bottom:1px solid #1d2129;
+    }
+    .quick-tabs .qt {
+      font:inherit; border:0; background:transparent; color:#cfd2d8;
+      padding:8px 14px; border-radius:8px 8px 0 0; cursor:pointer;
+      font-size:13px; border-bottom:2px solid transparent;
+    }
+    .quick-tabs .qt:hover { background:#15181f; }
+    .quick-tabs .qt.active {
+      color:#5ac8fa; border-bottom-color:#5ac8fa; font-weight:600;
+    }
+
+    /* ── Last-watched horizontal scroller row ─────────────────── */
+    .recent-grid {
+      display:flex; gap:10px; padding:6px 14px 8px;
+      overflow-x:auto; overflow-y:hidden;
+      scrollbar-width:thin;
+    }
+    .recent-grid .rcard {
+      flex:0 0 auto; width:84px;
+      background:#181b22; border:1px solid #232831; border-radius:10px;
+      padding:8px; cursor:pointer; text-align:center;
+    }
+    .recent-grid .rcard:active { transform:scale(.96); border-color:#3390ec; }
+    .recent-grid .rcard .logo {
+      width:64px; height:64px; margin:0 auto 6px; border-radius:8px;
+      background:#0d0f14; display:flex; align-items:center; justify-content:center;
+      overflow:hidden;
+    }
+    .recent-grid .rcard .logo img { max-width:88%; max-height:88%; }
+    .recent-grid .rcard .rname {
+      font-size:10.5px; line-height:1.15;
+      max-height:28px; overflow:hidden;
+    }
+
+    /* ── Import modal ─────────────────────────────────────────── */
+    .import-modal {
+      position:fixed; inset:0; background:rgba(8,10,14,.85);
+      z-index:80; display:none; align-items:center; justify-content:center; padding:18px;
+    }
+    .import-modal.show { display:flex; }
+    .import-card {
+      width:100%; max-width:480px; background:#15181f; border:1px solid #232831;
+      border-radius:14px; padding:18px;
+    }
+    .import-card h3 { font-size:15px; }
+    .import-card label { display:block; font-size:11px; letter-spacing:.06em;
+                          text-transform:uppercase; color:#8a8f99; margin:10px 0 4px; }
+    .import-card label small { text-transform:none; letter-spacing:0;
+                                 color:#5a5a5a; font-weight:normal; }
+    .import-card input, .import-card textarea {
+      width:100%; padding:9px 11px; border-radius:8px; border:1px solid #2a2f3a;
+      background:#0d0f14; color:#fff; font:13px monospace; outline:none;
+    }
+    .import-card input:focus, .import-card textarea:focus { border-color:#3390ec; }
+    .import-card button {
+      flex:1; font:inherit; border:0; padding:10px 14px; border-radius:8px;
+      background:#3390ec; color:#fff; font-size:13px; cursor:pointer;
+    }
+    .import-card button.ghost {
+      background:transparent; color:#5ac8fa; border:1px solid #5ac8fa;
+    }
+
     /* ── Mobile (<768px) — drawer becomes slide-in overlay ──────── */
     @media (max-width: 767px) {
       body { display:block; height:100vh; overflow:hidden; }
@@ -837,6 +1448,8 @@ _BROWSE_HTML = r"""<!doctype html>
                    overflow:hidden; text-overflow:ellipsis; display:-webkit-box;
                    -webkit-line-clamp:2; -webkit-box-orient:vertical; }
     .card .meta { font-size:10px; color:var(--tg-theme-hint-color,#8a8f99); }
+    .card .np   { font-size:10.5px; color:#a9e8be; line-height:1.2;
+                   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .card .badges { display:flex; gap:4px; flex-wrap:wrap; margin-top:auto; }
     .card .badges .b {
       font-size:9px; font-weight:600; padding:1px 5px; border-radius:3px;
@@ -916,6 +1529,9 @@ _BROWSE_HTML = r"""<!doctype html>
   <div class="actions-row">
     <button class="ghost" id="alive-only-btn">✓ Alive only: off</button>
     <button class="ghost" id="favorites-only-btn">⭐ Favorites: off</button>
+  </div>
+  <div class="actions-row">
+    <button class="ghost" id="import-m3u-btn" title="Import third-party M3U / Xtream playlist">📥 Import M3U…</button>
   </div>
   <div class="actions-row" id="country-quick-row"></div>
 
@@ -999,8 +1615,40 @@ _BROWSE_HTML = r"""<!doctype html>
     <button class="icon-btn" id="refresh-top-btn" title="Refresh all sources" aria-label="refresh">↻</button>
   </div>
 
+  <!-- Quick-tab strip: All / SG / Favorites -->
+  <div class="quick-tabs" id="quick-tabs">
+    <button class="qt active" data-tab="all">All</button>
+    <button class="qt" data-tab="sg">🇸🇬 Singapore</button>
+    <button class="qt" data-tab="fav">⭐ Favorites</button>
+    <button class="qt" data-tab="recent" id="qt-recent" style="display:none">⏱ Last watched</button>
+  </div>
+
+  <!-- "Last watched" pinned row, only rendered when state.tab==='all' -->
+  <section class="recent-row" id="recent-row" style="display:none">
+    <div class="section-h" style="margin-top:14px">Last watched</div>
+    <div class="recent-grid" id="recent-grid"></div>
+  </section>
+
   <div class="section-h result-h" id="result-h">Channels</div>
   <div class="grid" id="grid"><div class="loading">Loading…</div></div>
+
+  <!-- Owner-only import modal (toggled by Admin panel below) -->
+  <div class="import-modal" id="import-modal">
+    <div class="import-card">
+      <h3 style="margin:0 0 10px">Import M3U / Xtream playlist</h3>
+      <label>Label <small>(alphanumeric, used as source tag)</small></label>
+      <input type="text" id="m3u-label" placeholder="my-iptv-provider" maxlength="32">
+      <label>M3U URL <small>(or paste raw M3U below)</small></label>
+      <input type="text" id="m3u-url" placeholder="http://provider.example/playlist.m3u">
+      <label>or paste M3U body</label>
+      <textarea id="m3u-text" rows="6" placeholder="#EXTM3U..."></textarea>
+      <div style="display:flex; gap:8px; margin-top:12px">
+        <button id="m3u-go">Import</button>
+        <button class="ghost" id="m3u-cancel">Cancel</button>
+      </div>
+      <div class="hint" id="m3u-status" style="margin-top:8px; min-height:18px"></div>
+    </div>
+  </div>
 </main>
 
 <div class="toast" id="toast"></div>
@@ -1016,6 +1664,8 @@ const FAV_KEY    = 'smdl_iptv_favorites_v2';  // current — logical channel IDs
 const _defaultState = {
   country: null, category: null, source: null,
   status: null, q: '', favorites_only: false,
+  tab: 'all',                // 'all' | 'sg' | 'fav' | 'recent'
+  now_playing: {},           // populated lazily by loadNowPlaying()
 };
 
 // ── Favorites — Set of channel ids, persisted to localStorage ──────
@@ -1274,24 +1924,33 @@ function makeChip(label, value, active, kind) {
 async function loadChannels() {
   const grid = document.getElementById('grid');
   grid.innerHTML = '<div class="loading">Loading…</div>';
-  const params = new URLSearchParams();
-  if (state.country) params.set('country', state.country);
-  if (state.category) params.set('category', state.category);
-  if (state.source) params.set('source', state.source);    // Phase 3 — fixed
-  if (state.q) params.set('q', state.q);
-  // favorites_only needs a wider fetch since the filter happens client-
-  // side — a favorite outside the first 300 by (country,name) order
-  // would be invisible at the default limit.
-  params.set('limit', state.favorites_only ? '20000' : '300');
+  // SG tab takes a dedicated endpoint (curated yaml-driven list).
+  // Other tabs use the v2 channels list with state filters.
   let data;
   try {
-    // v2 endpoint returns LOGICAL channels (deduplicated). One card
-    // per channel even if it has 4 sources behind it.
-    data = await api('/api/iptv/v2/channels?' + params.toString());
+    if (state.tab === 'sg') {
+      const r = await api('/api/iptv/sg');
+      data = { channels: r.items || [] };
+    } else {
+      const params = new URLSearchParams();
+      if (state.country) params.set('country', state.country);
+      if (state.category) params.set('category', state.category);
+      if (state.source) params.set('source', state.source);
+      if (state.q) params.set('q', state.q);
+      // favorites_only and the fav-tab need a wider fetch — a favorite
+      // outside the first 300 by (country,name) would otherwise be invisible.
+      const wide = state.favorites_only || state.tab === 'fav';
+      params.set('limit', wide ? '20000' : '300');
+      data = await api('/api/iptv/v2/channels?' + params.toString());
+    }
   } catch (e) {
     grid.innerHTML = `<div class="empty">Error: ${escapeHtml(e.message)}</div>`;
     return;
   }
+  // Fetch now-playing + last-watched in parallel; don't block first-paint
+  // if either fails.
+  loadNowPlaying();
+  loadLastWatched();
   // Alive-only filter happens client-side — the v2 endpoint doesn't
   // have a status= param (logical channels don't have a status — only
   // their underlying sources do).
@@ -1301,7 +1960,7 @@ async function loadChannels() {
   let channels = data.channels || [];
   // Favorites-only is purely a client-side filter — the server doesn't
   // know which channels you've starred. Apply after the fetch.
-  if (state.favorites_only) {
+  if (state.favorites_only || state.tab === 'fav') {
     channels = channels.filter(c => isFavorite(c.id));
   }
   document.getElementById('result-h').textContent =
@@ -1317,10 +1976,17 @@ async function loadChannels() {
   for (const ch of channels) {
     const card = document.createElement('div');
     card.className = 'card';
-    const logoHtml = ch.logo
-      ? `<img src="${escapeAttr(ch.logo)}" alt="" referrerpolicy="no-referrer"
-              onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'glyph',textContent:'📺'}))">`
-      : `<div class="glyph">📺</div>`;
+    card.dataset.channelId = ch.id;
+    // Logos are served from local cache (/iptv/logo/<id>) — the endpoint
+    // fetches origin once, then serves from disk with a letter-tile fallback.
+    // Same-origin <img> sends the auth cookie automatically.
+    const logoHtml =
+      `<img src="/iptv/logo/${encodeURIComponent(ch.id)}" alt="" loading="lazy"
+            onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'glyph',textContent:'📺'}))">`;
+    const np = (state.now_playing || {})[ch.id];
+    const npHtml = np
+      ? `<div class="np" title="${escapeAttr(np.title)}">● ${escapeHtml((np.title||'').slice(0,40))}${(np.title||'').length>40?'…':''}</div>`
+      : '';
     // Logical channels carry source_count + alive_count + curated flag
     // instead of a single url/source. Multi-source badge ("×4") when N>1
     // tells the user this channel has alternate streams behind it.
@@ -1339,6 +2005,7 @@ async function loadChannels() {
       <div class="logo-wrap">${logoHtml}</div>
       <div class="name">${escapeHtml(ch.name)}</div>
       <div class="meta">${flag(ch.country||'')} ${escapeHtml(ch.country||'?')} · ${escapeHtml((ch.categories||[]).slice(0,1).join(''))}</div>
+      ${npHtml}
       <div class="badges">${badges.join('')}</div>
     `;
     const starBtn = card.querySelector('.star-btn');
@@ -1573,7 +2240,114 @@ async function _migrateFavoritesIfNeeded() {
   if (ab) ab.textContent = `✓ Alive only: ${state.status === 'alive' ? 'on' : 'off'}`;
   const fb = document.getElementById('favorites-only-btn');
   if (fb) fb.textContent = `⭐ Favorites: ${state.favorites_only ? 'on' : 'off'}`;
+  // Highlight the active quick-tab from persisted state.
+  document.querySelectorAll('.quick-tabs .qt').forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === (state.tab || 'all'));
+  });
 })();
+
+// ── Quick-tab strip handlers ───────────────────────────────────
+document.querySelectorAll('.quick-tabs .qt').forEach(btn => {
+  btn.addEventListener('click', () => {
+    state.tab = btn.dataset.tab || 'all';
+    document.querySelectorAll('.quick-tabs .qt').forEach(b =>
+      b.classList.toggle('active', b === btn));
+    _persistState();
+    loadChannels();
+  });
+});
+
+// ── "Last watched" pinned row ───────────────────────────────────
+async function loadLastWatched() {
+  const wrap = document.getElementById('recent-row');
+  const grid = document.getElementById('recent-grid');
+  const qtRecent = document.getElementById('qt-recent');
+  if (!wrap || !grid) return;
+  // Show only on the All tab — keeps SG/fav/recent views uncluttered.
+  if (state.tab !== 'all') { wrap.style.display = 'none'; return; }
+  try {
+    const r = await api('/api/iptv/last_watched?limit=8');
+    const items = r.items || [];
+    if (!items.length) { wrap.style.display = 'none'; if (qtRecent) qtRecent.style.display='none'; return; }
+    if (qtRecent) qtRecent.style.display = '';
+    grid.innerHTML = items.map(it => `
+      <div class="rcard" data-id="${escapeAttr(it.channel_id)}">
+        <div class="logo"><img src="/iptv/logo/${encodeURIComponent(it.channel_id)}" alt="" loading="lazy"></div>
+        <div class="rname">${escapeHtml(it.name || it.channel_id)}</div>
+      </div>`).join('');
+    grid.querySelectorAll('.rcard').forEach(el => {
+      el.addEventListener('click', () =>
+        location.href = `/iptv/play/${encodeURIComponent(el.dataset.id)}`);
+    });
+    wrap.style.display = '';
+  } catch (e) { wrap.style.display = 'none'; }
+}
+
+// ── "What's on now" populator ──────────────────────────────────
+let _nowPlayingFetchAt = 0;
+async function loadNowPlaying() {
+  // Cache for 5 min — EPG doesn't change second-by-second.
+  if (Date.now() - _nowPlayingFetchAt < 5 * 60 * 1000) return;
+  try {
+    const r = await api('/api/iptv/now_playing');
+    state.now_playing = r.now_playing || {};
+    _nowPlayingFetchAt = Date.now();
+    // Patch the existing cards in place — avoids a second channels fetch.
+    document.querySelectorAll('#grid .card').forEach(card => {
+      const cid = card.dataset.channelId;
+      if (!cid) return;
+      const np = state.now_playing[cid];
+      // Remove any pre-existing .np line first (in case of stale data).
+      card.querySelectorAll('.np').forEach(n => n.remove());
+      if (!np) return;
+      const title = (np.title || '').slice(0, 40);
+      const more = (np.title || '').length > 40 ? '…' : '';
+      const npDiv = document.createElement('div');
+      npDiv.className = 'np';
+      npDiv.title = np.title || '';
+      npDiv.textContent = `● ${title}${more}`;
+      // Insert just before the badges block.
+      const badges = card.querySelector('.badges');
+      if (badges) card.insertBefore(npDiv, badges); else card.appendChild(npDiv);
+    });
+  } catch (e) { /* silently skip */ }
+}
+
+// ── M3U import modal (owner-only — endpoint enforces "*" scope) ─
+const _importModal = document.getElementById('import-modal');
+function openImportModal() { _importModal && _importModal.classList.add('show'); }
+function closeImportModal() {
+  if (!_importModal) return;
+  _importModal.classList.remove('show');
+  ['m3u-label','m3u-url','m3u-text'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
+  const st = document.getElementById('m3u-status'); if (st) st.textContent = '';
+}
+document.getElementById('m3u-cancel')?.addEventListener('click', closeImportModal);
+document.getElementById('m3u-go')?.addEventListener('click', async () => {
+  const label = document.getElementById('m3u-label').value.trim();
+  const url   = document.getElementById('m3u-url').value.trim();
+  const text  = document.getElementById('m3u-text').value.trim();
+  const st = document.getElementById('m3u-status');
+  if (!label) { st.textContent = '⚠ Need a label.'; return; }
+  if (!url && !text) { st.textContent = '⚠ Provide either a URL or pasted M3U.'; return; }
+  st.textContent = 'Importing…';
+  try {
+    const body = { label };
+    if (url)  body.m3u_url  = url;
+    if (text) body.m3u_text = text;
+    const r = await api('/api/iptv/import_m3u', { method:'POST', body: JSON.stringify(body) });
+    st.innerHTML = `✓ Imported ${r.inserted} channel(s), skipped ${r.skipped}. <br>${escapeHtml(r.hint||'')}`;
+    setTimeout(() => { closeImportModal(); loadChannels(); }, 2500);
+  } catch (e) {
+    st.textContent = '✗ ' + e.message;
+  }
+});
+// Expose for the drawer admin button (added if present).
+window.smdlIptvOpenImport = openImportModal;
+document.getElementById('import-m3u-btn')?.addEventListener('click', openImportModal);
+
 (async () => {
   await _migrateFavoritesIfNeeded();
   loadFilters();
@@ -1619,6 +2393,36 @@ _PLAY_HTML = r"""<!doctype html>
       border:1px solid currentColor;
     }
     .actions button.warn { background:#a23; }
+    /* Scheduling modal — overlays the page; matches the import modal style. */
+    .sched-modal {
+      position:fixed; inset:0; background:rgba(8,10,14,.85); z-index:80;
+      display:none; align-items:center; justify-content:center; padding:18px;
+    }
+    .sched-modal.show { display:flex; }
+    .sched-card {
+      width:100%; max-width:380px; background:#15181f; border:1px solid #232831;
+      border-radius:14px; padding:18px;
+    }
+    .sched-card h3 { font-size:15px; }
+    .sched-card label { display:block; font-size:11px; letter-spacing:.06em;
+                         text-transform:uppercase; color:#8a8f99; margin:10px 0 4px; }
+    .sched-card label small { text-transform:none; letter-spacing:0;
+                                color:#5a5a5a; font-weight:normal; }
+    .sched-card input {
+      width:100%; padding:9px 11px; border-radius:8px; border:1px solid #2a2f3a;
+      background:#0d0f14; color:#fff; font:13px monospace; outline:none;
+    }
+    .sched-card input:focus { border-color:#3390ec; }
+    .sched-card button {
+      flex:1; font:inherit; border:0; padding:10px 14px; border-radius:8px;
+      background:#3390ec; color:#fff; font-size:13px; cursor:pointer;
+    }
+    .sched-card button.ghost {
+      background:transparent; color:#5ac8fa; border:1px solid #5ac8fa;
+    }
+    /* Cast button gets a subtle highlight when an active CastSession is up. */
+    #cast-btn.casting { background:rgba(41,151,255,.18); color:#fff;
+                         border-color:#3390ec; }
     .url-box {
       margin-top:10px; padding:10px; background:#181b22; border:1px solid #232831;
       border-radius:8px; font-family:ui-monospace,Menlo,monospace; font-size:11px;
@@ -1698,11 +2502,36 @@ _PLAY_HTML = r"""<!doctype html>
 
   <div class="actions">
     <button id="play-inline">▶ Play</button>
+    <button class="ghost" id="cast-btn" style="display:none">📺 Cast</button>
     <button class="ghost" id="play-vlc">📤 Open in VLC / external player</button>
     <button class="ghost" id="copy-url">📋 Copy stream URL</button>
     <button class="ghost" id="probe-btn">🩺 Probe stream health</button>
     <button class="ghost" id="curate-btn" style="display:none">★ Curate this channel</button>
     <button class="warn" id="record-btn">⏺ Record 5 min</button>
+    <button class="warn ghost" id="schedule-btn">📅 Schedule record…</button>
+    <button class="ghost" id="report-bad-btn" title="Report this source as broken">👎 Report bad stream</button>
+  </div>
+
+  <!-- Schedule modal (date/time + duration + padding) -->
+  <div class="sched-modal" id="sched-modal">
+    <div class="sched-card">
+      <h3 style="margin:0 0 10px">Schedule recording</h3>
+      <div style="font-size:11.5px; color:#8a8f99; margin-bottom:10px" id="sched-channel"></div>
+      <label>Start <small>(your local time)</small></label>
+      <input type="datetime-local" id="sched-start" step="60">
+      <label>Duration (minutes)</label>
+      <input type="number" id="sched-duration" min="1" max="720" value="30">
+      <label>Padding before / after (minutes)</label>
+      <div style="display:flex; gap:8px">
+        <input type="number" id="sched-pre"  min="0" max="60" value="0" placeholder="pre">
+        <input type="number" id="sched-post" min="0" max="60" value="0" placeholder="post">
+      </div>
+      <div style="display:flex; gap:8px; margin-top:14px">
+        <button id="sched-go">Schedule</button>
+        <button class="ghost" id="sched-cancel">Cancel</button>
+      </div>
+      <div class="hint" id="sched-status" style="margin-top:8px; min-height:18px"></div>
+    </div>
   </div>
 
   <div class="url-box" id="url-box">…</div>
@@ -2195,6 +3024,186 @@ document.getElementById('record-btn').addEventListener('click', async () => {
     toast('Record failed: ' + e.message, 3500);
   }
 });
+
+// ── Report bad stream (closes the feedback loop on stale dead sources) ──
+document.getElementById('report-bad-btn')?.addEventListener('click', async () => {
+  const src = (SOURCES && SOURCES[CURRENT_SOURCE_IDX]) || null;
+  if (!src) { toast('No source to report.', 2500); return; }
+  if (!confirm(`Report ${src.source} (${src.url.slice(0,50)}…) as bad?\n\n` +
+               'This demotes the source so failover prefers others. ' +
+               'Useful when probes say "alive" but the stream is silent / black-screen.')) return;
+  try {
+    await api(`/api/iptv/sources/${encodeURIComponent(src.id)}/report_failure`,
+              { method:'POST', body: '{}' });
+    toast('✓ Source reported. Failing over…', 3000);
+    // Best-effort: bump to the next source if there is one (same UX as
+    // auto-failover, but user-initiated).
+    if (SOURCES && CURRENT_SOURCE_IDX + 1 < SOURCES.length) await failoverToNextSource();
+  } catch (e) {
+    toast('Report failed: ' + e.message, 3000);
+  }
+});
+
+// ── Schedule recording modal ──
+const _schedModal = document.getElementById('sched-modal');
+document.getElementById('schedule-btn')?.addEventListener('click', () => {
+  if (!_schedModal) return;
+  // Default start = top of next hour, local time
+  const d = new Date(); d.setMinutes(0, 0, 0); d.setHours(d.getHours() + 1);
+  const pad = n => String(n).padStart(2,'0');
+  const local = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  document.getElementById('sched-start').value = local;
+  document.getElementById('sched-channel').textContent =
+    `${CHANNEL?.name || CHANNEL_ID}`;
+  document.getElementById('sched-status').textContent = '';
+  _schedModal.classList.add('show');
+});
+document.getElementById('sched-cancel')?.addEventListener('click', () =>
+  _schedModal && _schedModal.classList.remove('show'));
+document.getElementById('sched-go')?.addEventListener('click', async () => {
+  const localVal = document.getElementById('sched-start').value;
+  const dur      = parseInt(document.getElementById('sched-duration').value, 10);
+  const pre      = parseInt(document.getElementById('sched-pre').value, 10) || 0;
+  const post     = parseInt(document.getElementById('sched-post').value, 10) || 0;
+  const st = document.getElementById('sched-status');
+  if (!localVal || !dur || dur < 1) { st.textContent = '⚠ Invalid input.'; return; }
+  // datetime-local is local time without TZ — convert to UTC ISO.
+  const utc = new Date(localVal).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  st.textContent = 'Scheduling…';
+  try {
+    const r = await api('/api/iptv/schedule', {
+      method:'POST',
+      body: JSON.stringify({
+        channel_id: CHANNEL_ID,
+        start_at: utc,
+        duration_min: dur,
+        padding_pre: pre,
+        padding_post: post,
+      }),
+    });
+    st.innerHTML = `✓ Scheduled #${r.id} for ${escapeHtml(utc)}.`;
+    setTimeout(() => _schedModal.classList.remove('show'), 1800);
+  } catch (e) { st.textContent = '✗ ' + e.message; }
+});
+
+// ── Chromecast / RemotePlayback hookup ──
+//
+// Cast SDK lazy-loads; once available we ask if any device on the LAN
+// can play this URL. If yes, show the Cast button. On click, hand the
+// stream URL to the receiver (works for HLS m3u8 + plain MP4; DASH
+// needs a custom receiver app we don't host).
+(function _initCast() {
+  // Only relevant on https origins served from a real domain — the cast
+  // sender refuses to initialise on bare localhost / IP.
+  if (location.protocol !== 'https:') return;
+  const ctx = window.cast?.framework?.CastContext;
+  function activate() {
+    const btn = document.getElementById('cast-btn');
+    if (!btn) return;
+    btn.style.display = '';
+    btn.addEventListener('click', () => {
+      try {
+        const session = cast.framework.CastContext.getInstance().getCurrentSession();
+        const url = CHANNEL?.url;
+        if (!url) { toast('No stream URL yet.', 2500); return; }
+        if (session) {
+          const media = new chrome.cast.media.MediaInfo(url,
+            url.includes('.m3u8') ? 'application/x-mpegURL' : 'video/mp4');
+          const request = new chrome.cast.media.LoadRequest(media);
+          session.loadMedia(request)
+            .then(() => { btn.classList.add('casting'); toast('Casting…', 2500); })
+            .catch(e => toast('Cast load failed: ' + e, 3500));
+        } else {
+          cast.framework.CastContext.getInstance().requestSession()
+            .then(() => btn.click())   // re-attempt with the new session
+            .catch(e => toast('No cast device found.', 2500));
+        }
+      } catch (e) { toast('Cast SDK error: ' + e.message, 3000); }
+    });
+  }
+  // The Cast SDK exposes itself via a global callback when ready.
+  window['__onGCastApiAvailable'] = function (isAvailable) {
+    if (!isAvailable) return;
+    cast.framework.CastContext.getInstance().setOptions({
+      receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+      autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
+    });
+    activate();
+  };
+  // Inject the sender SDK script.
+  const s = document.createElement('script');
+  s.src = 'https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1';
+  s.async = true;
+  document.head.appendChild(s);
+})();
+
+// ── Mobile gestures on the inline video ──
+//
+// Vertical swipe = volume (±0.05 per 6vh dragged).
+// Horizontal swipe = ±10s seek (HLS live edge is unseekable; harmless).
+// Double-tap left/right edge of the player = ±10s seek (Netflix-style).
+(function _initGestures() {
+  const v = document.getElementById('inline-video');
+  if (!v) return;
+  let t0 = null, startX = 0, startY = 0, startVol = 1, mode = null;
+  const VOL_SCALE = 0.005;   // volume delta per pixel dragged
+  const SEEK_SCALE = 0.1;    // seconds per pixel dragged
+  v.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0]; t0 = Date.now();
+    startX = t.clientX; startY = t.clientY; startVol = v.volume;
+    mode = null;
+  }, { passive:true });
+  v.addEventListener('touchmove', e => {
+    if (e.touches.length !== 1 || t0 === null) return;
+    const t = e.touches[0];
+    const dx = t.clientX - startX, dy = t.clientY - startY;
+    if (mode === null) {
+      if (Math.abs(dx) > 12 || Math.abs(dy) > 12)
+        mode = Math.abs(dy) > Math.abs(dx) ? 'vol' : 'seek';
+    }
+    if (mode === 'vol') {
+      v.volume = Math.min(1, Math.max(0, startVol - dy * VOL_SCALE));
+    } else if (mode === 'seek' && !isNaN(v.duration) && isFinite(v.duration)) {
+      const next = Math.min(v.duration, Math.max(0, v.currentTime + dx * SEEK_SCALE));
+      v.currentTime = next;
+    }
+  }, { passive:true });
+  v.addEventListener('touchend', () => { t0 = null; mode = null; });
+  // Double-tap-to-seek edges.
+  let lastTap = 0, lastTapX = 0;
+  v.addEventListener('touchend', e => {
+    const now = Date.now();
+    const rect = v.getBoundingClientRect();
+    const x = (e.changedTouches[0]?.clientX ?? 0) - rect.left;
+    if (now - lastTap < 280 && Math.abs(x - lastTapX) < 40) {
+      if (!isNaN(v.duration) && isFinite(v.duration)) {
+        const left = x < rect.width / 2;
+        v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + (left ? -10 : 10)));
+        toast(left ? '⏪ -10s' : '⏩ +10s', 1000);
+      }
+    }
+    lastTap = now; lastTapX = x;
+  });
+})();
+
+// ── Play-history beacon — fires when a stream actually starts ──
+let _beaconFired = false;
+async function _maybeFirePlayBeacon() {
+  if (_beaconFired) return;
+  _beaconFired = true;
+  try {
+    const src = (SOURCES && SOURCES[CURRENT_SOURCE_IDX]) || null;
+    await api(`/api/iptv/channels/${encodeURIComponent(CHANNEL_ID)}/played`, {
+      method:'POST',
+      body: JSON.stringify({ source_id: src ? src.id : null }),
+    });
+  } catch (_) { /* shrug */ }
+}
+document.getElementById('inline-video')?.addEventListener('playing',
+  _maybeFirePlayBeacon, { once: true });
+document.getElementById('play-vlc')?.addEventListener('click',
+  _maybeFirePlayBeacon);
 
 loadChannel();
 </script>

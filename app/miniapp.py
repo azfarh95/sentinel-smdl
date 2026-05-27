@@ -1482,6 +1482,7 @@ button.warn { background: #ff9500; color: #fff; }
 <div class=tabbar>
   <div class=tab onclick="goto('downloads')"><div class=icon>📥</div><div>Downloads</div></div>
   <div class="tab active" onclick="goto('watchlist')"><div class=icon>👁</div><div>Watchlist</div></div>
+  <div class=tab onclick="location.href='/iptv'"><div class=icon>📺</div><div>Live TV</div></div>
   <div class="tab admin-only" id=tab-scraper onclick="goto('scraper')"><div class=icon>🤖</div><div>Scraper</div></div>
   <div class=tab onclick="goto('settings')"><div class=icon>⚙️</div><div>Settings</div></div>
   <div class="tab admin-only" id=tab-admin onclick="goto('admin')"><div class=icon>🛡</div><div>Admin</div></div>
@@ -1524,7 +1525,11 @@ function duration(s) { if (s<60) return s+'s'; const m = Math.floor(s/60); const
 function goto(page) {
   current = page;
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-'+page));
-  const order = ['downloads','watchlist','scraper','settings','admin'];
+  // '_iptv' is a placeholder so the visual-index of subsequent tabs matches
+  // the DOM after inserting the Live TV link. goto() is never called with
+  // '_iptv' (the tab navigates away on click), so the Live TV tab simply
+  // stays inactive on this page — which is fine.
+  const order = ['downloads','watchlist','_iptv','scraper','settings','admin'];
   document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', order[i] === page));
   if (page === 'downloads') loadDownloads();
   else if (page === 'watchlist') loadWatchlist();

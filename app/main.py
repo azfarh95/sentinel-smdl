@@ -9,6 +9,8 @@ from fastapi import FastAPI
 from . import database as db
 from . import file_serve
 from . import interceptor  # noqa: F401 — triggers plugin auto-load at startup
+from . import iptv
+from . import iptv_routes
 from . import miniapp
 from . import profile_monitor
 from . import sticker_routes
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db()
+    await iptv.init_iptv_schema()
     # First-boot: default-block adult cam platforms so they don't appear in
     # non-owner UX. Owner can flip them back on in Admin → Sites.
     try:
@@ -121,6 +124,7 @@ app = FastAPI(title="SM-DL — Social Media Downloader", lifespan=lifespan)
 app.include_router(file_serve.router)
 app.include_router(miniapp.router)
 app.include_router(sticker_routes.router)
+app.include_router(iptv_routes.router)
 
 
 @app.get("/health")

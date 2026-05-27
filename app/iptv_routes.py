@@ -27,6 +27,7 @@ WebKit-based platforms that grok HLS natively.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -40,6 +41,7 @@ import aiosqlite
 
 from . import database as _db
 from . import iptv as _iptv
+from . import iptv_dedup as _dedup
 from . import miniapp as _mini   # reuse _verify + require_scope
 
 logger = logging.getLogger(__name__)
@@ -243,6 +245,130 @@ async def iptv_channel_get(channel_id: str, request: Request):
     if not ch:
         raise HTTPException(status_code=404, detail="channel not found")
     return ch.to_dict()
+
+
+# ── iptv-aggregator-v2 Phase 1 endpoints ────────────────────────────
+
+
+@router.get("/api/iptv/v2/channels")
+async def iptv_v2_channels(
+    request: Request,
+    country: str | None = None,
+    category: str | None = None,
+    is_curated: int | None = None,
+    q: str | None = None,
+    limit: int = 300,
+):
+    """List LOGICAL channels (deduplicated). The new grid endpoint.
+    Each row aggregates source counts + alive-count via the SQL view
+    `v_channels_with_status`. Phase 1 ships this alongside the legacy
+    /api/iptv/channels; Phase 2 flips the UI."""
+    await _verify_iptv(request)
+    where = []
+    params: list = []
+    if country:
+        where.append("country = ?")
+        params.append(country.upper())
+    if category:
+        where.append("categories LIKE ?")
+        params.append(f"%{category.lower()}%")
+    if is_curated is not None:
+        where.append("is_curated = ?")
+        params.append(1 if is_curated else 0)
+    if q:
+        needle = q.strip().lower()
+        if needle:
+            where.append("(LOWER(name) LIKE ? OR LOWER(id) LIKE ?)")
+            params.append(f"%{needle}%")
+            params.append(f"%{needle}%")
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    sql = f"""
+        SELECT id, name, country, languages, categories, logo, aliases,
+               is_curated, source_count, alive_count_srcs, last_alive_at
+          FROM v_channels_with_status
+        {where_sql}
+         ORDER BY is_curated DESC, name ASC
+         LIMIT ?
+    """
+    params.append(int(limit))
+    import aiosqlite
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(sql, params)
+        rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        # Normalise: rename SQL alias_count_srcs → alive_count for the
+        # frontend; parse aliases JSON.
+        d["alive_count"] = int(d.pop("alive_count_srcs") or 0)
+        d["source_count"] = int(d.get("source_count") or 0)
+        try:
+            d["aliases"] = json.loads(d.get("aliases") or "[]")
+        except Exception:
+            d["aliases"] = []
+        d["categories"] = [c for c in (d.get("categories") or "").split(",") if c]
+        out.append(d)
+    return {"channels": out, "total_returned": len(out)}
+
+
+@router.get("/api/iptv/channels/{channel_id}/sources")
+async def iptv_channel_sources(channel_id: str, request: Request):
+    """List all source rows backing a logical channel — for the source
+    picker dropdown on the play page (Phase 2 UI)."""
+    await _verify_iptv(request)
+    sources = await _dedup.list_sources_for_channel(channel_id)
+    if not sources:
+        raise HTTPException(status_code=404, detail="no sources for channel")
+    return {"channel_id": channel_id, "sources": sources}
+
+
+@router.get("/api/iptv/channels/{channel_id}/play")
+async def iptv_channel_play(channel_id: str, request: Request):
+    """Server-side "best alive source" picker. Returns the chosen
+    source URL + a list of alternates so the client can failover."""
+    await _verify_iptv(request)
+    pick = await _dedup.pick_best_source(channel_id)
+    if not pick:
+        raise HTTPException(status_code=404, detail="no playable source for channel")
+    return {"channel_id": channel_id, **pick}
+
+
+@router.post("/api/iptv/sources/{source_id}/report_failure")
+async def iptv_report_source_failure(source_id: str, request: Request):
+    """Client-reported failure — demote a source after the player
+    couldn't play it. Mark dead so the next /play call skips it; the
+    auto-probe loop re-checks within 12 h."""
+    await _verify_iptv(request)
+    ch = await _iptv.get_channel(source_id)
+    if not ch:
+        raise HTTPException(status_code=404, detail="source not found")
+    import aiosqlite
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE iptv_channels SET status = 'dead', "
+            "last_error = 'client-reported failure', last_check_at = ? "
+            "WHERE id = ?",
+            (_iptv._iso_now(), source_id),
+        )
+        await conn.commit()
+    return {"ok": True, "source_id": source_id, "status": "dead"}
+
+
+@router.post("/api/iptv/dedup/run")
+async def iptv_dedup_run(request: Request):
+    """Manually re-run the dedup pipeline. Owner-only — beta users
+    shouldn't trigger schema-mutating jobs. Cheap (~1 sec on 12k
+    rows) but not idempotent against in-flight refreshes; serialise
+    your own dedup + refresh calls."""
+    payload = await _verify_iptv(request)
+    # Extra check: dedup is sensitive — only the owner runs it.
+    _mini.require_scope(payload, "*")
+    try:
+        return await _dedup.run_dedup()
+    except Exception as exc:
+        logger.exception("dedup pipeline crashed")
+        raise HTTPException(status_code=500, detail=f"dedup failed: {exc}")
 
 
 @router.get("/api/iptv/channels/{channel_id}/resolve_url")

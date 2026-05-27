@@ -1,0 +1,98 @@
+# iptv-aggregator-v2 — curated channel groupings.
+#
+# Each top-level key is a logical channel id (lowercase kebab-case).
+# Sources listed under it are merged into that channel regardless of
+# what the auto-dedup pipeline would have done. priority_overrides
+# lets you bump a specific source above the default for THIS channel
+# (e.g. prefer YouTube for CNA because the cloudfront one is flaky).
+#
+# Spec: docs/iptv-aggregator-v2.md §5.3
+#
+# Empty file is fine — auto-dedup handles the bulk via tvg-id family
+# + (name slug + country) bucketing. Curated entries are for:
+#   • High-traffic channels where auto-dedup misses
+#   • Cases where you want a specific source priority order
+#   • Splits of false-positively-merged channels (in v3)
+#
+# Start with the most-watched news channels.
+
+channels:
+
+  cna:
+    name:    "Channel News Asia"
+    country: SG
+    aliases: ["CNA", "Channel News Asia", "CNA (1080p)", "Channel News Asia HD"]
+    categories: [news]
+    sources:
+      - "iptv-org:CNA.sg"
+      - "iptv-org-sg:CNA.sg"
+      - "youtube-live:cna"
+    priority_overrides:
+      "youtube-live:cna":    10   # geo-block-free, signed URLs
+      "iptv-org:CNA.sg":      8   # cloudfront, occasionally throttled
+      "iptv-org-sg:CNA.sg":   9   # curated SG list — usually best
+
+  bbc-news:
+    name:    "BBC News"
+    country: GB
+    aliases: ["BBC News", "BBC News HD"]
+    categories: [news]
+    sources:
+      - "youtube-live:bbc-news"
+
+  al-jazeera:
+    name:    "Al Jazeera English"
+    country: QA
+    aliases: ["Al Jazeera English", "Al Jazeera"]
+    categories: [news]
+    sources:
+      - "youtube-live:al-jazeera-en"
+
+  france24-en:
+    name:    "France 24 English"
+    country: FR
+    aliases: ["France 24 English", "France 24"]
+    categories: [news]
+    sources:
+      - "youtube-live:france-24-en"
+
+  dw-news:
+    name:    "DW News"
+    country: DE
+    aliases: ["DW News", "Deutsche Welle", "DW (English)"]
+    categories: [news]
+    sources:
+      - "youtube-live:dw-news"
+
+  nhk-world:
+    name:    "NHK World-Japan"
+    country: JP
+    aliases: ["NHK World-Japan", "NHK World HD", "NHK World"]
+    categories: [news]
+    sources:
+      - "youtube-live:nhk-world"
+      - "youtube-live:nhk-bs1"
+
+  astro-awani:
+    name:    "Astro Awani"
+    country: MY
+    aliases: ["Astro Awani", "Awani"]
+    categories: [news]
+    sources:
+      - "youtube-live:astro-awani"
+
+  kompastv:
+    name:    "Kompas TV"
+    country: ID
+    aliases: ["KompasTV", "Kompas TV"]
+    categories: [news]
+    sources:
+      - "youtube-live:kompastv"
+
+  bloomberg:
+    name:    "Bloomberg Television"
+    country: US
+    aliases: ["Bloomberg Television", "Bloomberg TV"]
+    categories: [news, business]
+    sources:
+      - "youtube-live:bloomberg-tv"

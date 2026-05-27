@@ -1,0 +1,40 @@
+# iptv-aggregator-v2 — built-in source priorities.
+#
+# Higher value = preferred when picking the alive source for a
+# logical channel. Per-channel overrides go in data/channel_aliases.yaml.
+#
+# Tier rationale:
+#   10  global CDN, geo-block-free, signed URLs
+#   9   per-country curated (smaller, higher-quality subset)
+#   7   global comprehensive (large, mixed quality)
+#   6   regional curated with EPG
+#   5   community-curated
+#   4   regional public broadcasters
+#   3   uncategorised
+#   1   radio (deprioritised for TV-grid queries)
+#
+# Spec: docs/iptv-aggregator-v2.md §6.1
+
+defaults:
+  youtube-live:        10
+  iptv-org-sg:          9
+  iptv-org-my:          9
+  iptv-org-id:          9
+  iptv-org-th:          9
+  iptv-org-jp:          9
+  iptv-org-kr:          9
+  iptv-org-us:          9
+  iptv-org-gb:          9
+  iptv-org-de:          9
+  iptv-org-fr:          9
+  iptv-org-it:          9
+  iptv-org:             7
+  openiptvitaly:        6
+  free-tv:              5
+  mjh-sky-fast:         5
+  mjh-au:               4
+  mjh-nz:               4
+  fanmingming:          4
+  yuechan:              4
+  mjh-other:            3
+  mjh-radio:            1

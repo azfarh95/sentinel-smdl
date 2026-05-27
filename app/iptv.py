@@ -117,7 +117,10 @@ EPG_SOURCES: dict[str, str] = {
 
 
 async def init_iptv_schema() -> None:
-    """Idempotent — call from the app lifespan after db.init_db()."""
+    """Idempotent — call from the app lifespan after db.init_db().
+    Phase 1 of iptv-aggregator-v2 adds logical_channels + channel_id
+    FK + priority column + a SQL view aggregating source health per
+    logical channel."""
     async with aiosqlite.connect(db.DB_PATH) as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS iptv_channels (
@@ -145,11 +148,58 @@ async def init_iptv_schema() -> None:
             "ALTER TABLE iptv_channels ADD COLUMN source TEXT NOT NULL DEFAULT 'iptv-org'",
             "ALTER TABLE iptv_channels ADD COLUMN probe_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE iptv_channels ADD COLUMN alive_count INTEGER NOT NULL DEFAULT 0",
+            # iptv-aggregator-v2 Phase 1 — logical channel FK + per-source
+            # priority. NULL channel_id = not-yet-deduplicated; run_dedup()
+            # populates it. Priority is a copy of the source-default
+            # (data/source_priorities.yaml) with per-channel curated YAML
+            # overrides applied last.
+            "ALTER TABLE iptv_channels ADD COLUMN channel_id TEXT",
+            "ALTER TABLE iptv_channels ADD COLUMN priority INTEGER NOT NULL DEFAULT 5",
         ):
             try:
                 await conn.execute(sql)
             except Exception:
                 pass
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS logical_channels (
+                id            TEXT PRIMARY KEY,
+                name          TEXT NOT NULL,
+                country       TEXT,
+                languages     TEXT,
+                categories    TEXT,
+                logo          TEXT,
+                aliases       TEXT,                      -- json array
+                is_curated    INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_lc_country ON logical_channels(country)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_lc_curated ON logical_channels(is_curated)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_iptv_channel_id
+                ON iptv_channels(channel_id)
+        """)
+        # Persistent view powering the grid query. Cheap recompute on
+        # demand (~50 ms for ~6k logical channels with LEFT JOIN).
+        await conn.execute("DROP VIEW IF EXISTS v_channels_with_status")
+        await conn.execute("""
+            CREATE VIEW v_channels_with_status AS
+            SELECT
+                lc.id, lc.name, lc.country, lc.languages, lc.categories,
+                lc.logo, lc.aliases, lc.is_curated, lc.updated_at,
+                COUNT(cs.id) AS source_count,
+                SUM(CASE WHEN cs.status = 'alive' THEN 1 ELSE 0 END) AS alive_count_srcs,
+                MAX(CASE WHEN cs.status = 'alive' THEN cs.last_check_at END) AS last_alive_at,
+                MAX(cs.last_check_at) AS last_check_at_any
+            FROM logical_channels lc
+            LEFT JOIN iptv_channels cs ON cs.channel_id = lc.id
+            GROUP BY lc.id
+        """)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_iptv_country
                 ON iptv_channels(country)
@@ -574,7 +624,13 @@ async def refresh_from_m3u(
             # word). If group is a 2-3 char string that looks like a code,
             # fall through; if it's longer treat it as a category instead.
             country = (it.get("country") or "").upper() or None
-            if not country and group and len(group) <= 3 and group.isalpha():
+            # ISO 3166-1 alpha-2 is exactly 2 ASCII letters. The
+            # earlier looser check (`len(group) <= 3 and group.isalpha()`)
+            # accepted Chinese "国际" — Python's str.isalpha returns
+            # True for non-ASCII letters too — which then leaked into
+            # the country column.
+            if (not country and group and len(group) == 2
+                    and group.isascii() and group.isalpha()):
                 country = group.upper()
             category = group.lower() if (group and country != group.upper()) else None
             tvg_id = it.get("tvg_id") or ""
@@ -1084,6 +1140,15 @@ async def refresh_all_sources() -> list[dict]:
             out.append(await refresh_iptv_org_country(cc))
         except Exception as exc:
             out.append({"ok": False, "source": _country_source_id(cc), "error": str(exc)})
+    # iptv-aggregator-v2 Phase 1 — run the dedup pipeline after the
+    # catalogue is up to date so logical_channels reflects the freshly
+    # ingested source rows.
+    try:
+        from . import iptv_dedup
+        out.append({"ok": True, "source": "_dedup", **(await iptv_dedup.run_dedup())})
+    except Exception as exc:
+        logger.exception("dedup pipeline crashed")
+        out.append({"ok": False, "source": "_dedup", "error": str(exc)})
     return out
 
 

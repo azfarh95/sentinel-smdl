@@ -1,0 +1,12 @@
+{
+  "name": "sentinel-smdl-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tauri wrap of the SMDL Mini App for Windows / macOS / Linux",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  }
+}

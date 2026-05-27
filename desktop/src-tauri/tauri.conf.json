@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Sentinel SMDL",
+  "version": "0.1.0",
+  "identifier": "xyz.az-sentinel.smdl",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Sentinel SMDL",
+        "url": "https://media.az-sentinel.xyz/iptv",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 720,
+        "minHeight": 540,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": ["default"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "Sentinel SMDL desktop — Live TV + downloads + stickers in one window.",
+    "longDescription": "Native desktop wrap of the Sentinel SMDL Mini App. Owner-only; reuses the session cookie set under .az-sentinel.xyz so once you've activated the suite anywhere, this app picks the auth up automatically.",
+    "publisher": "Azfar",
+    "category": "Entertainment",
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "displayLanguageSelector": false,
+        "languages": ["English"]
+      }
+    }
+  }
+}

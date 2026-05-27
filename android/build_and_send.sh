@@ -73,8 +73,22 @@ if [[ -d "$SENTINEL_APPS_DIR" ]]; then
     SHA=$(sha256sum "$DEST_DIR/app.apk" | awk '{print $1}')
     echo "==> published to sentinel-apps: $DEST_DIR/app.apk (${SIZE}B, sha256=${SHA:0:16}…)"
     # Stamp the manifest's `latest` + the first versions[] entry to match.
-    # Quick jq-free patch via python (already on PATH for Sentinel hosts).
-    python -c "
+    # Find host Python — Git-Bash on Windows exposes the launcher as
+    # `py` (Python Launcher); some setups also have `python` or
+    # `python.exe`. We try them in order and bail with a warning if
+    # none are found (APK still publishes; only the manifest update
+    # is skipped).
+    PY_BIN=""
+    for candidate in python python.exe py py.exe python3 python3.exe; do
+      if command -v "$candidate" >/dev/null 2>&1; then
+        PY_BIN="$candidate"
+        break
+      fi
+    done
+    if [[ -z "$PY_BIN" ]]; then
+      echo "WARN: no host python found; APK published but manifest.json not updated" >&2
+    else
+      "$PY_BIN" -c "
 import json, datetime, pathlib
 mp = pathlib.Path(r'$SENTINEL_APPS_DIR/manifest.json')
 m = json.loads(mp.read_text(encoding='utf-8'))
@@ -98,6 +112,7 @@ m['updated_at'] = datetime.datetime.utcnow().isoformat() + 'Z'
 mp.write_text(json.dumps(m, indent=2, ensure_ascii=False), encoding='utf-8')
 print('==> manifest updated:', mp)
 "
+    fi
   else
     echo "WARN: could not read versionName from build.gradle.kts — skipping publish" >&2
   fi

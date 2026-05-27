@@ -129,18 +129,28 @@ class MainActivity : AppCompatActivity() {
             setAcceptThirdPartyCookies(web, true)
         }
 
-        // Optional fullscreen on Android 11+ (looks more like a "real" app).
+        // Edge-to-edge under the status bar (cleaner look) but RESPECT
+        // the navigation-bar inset so pages with bottom-pinned UI
+        // (SMDL /app's tab bar) don't get clipped under the system
+        // nav. We pad the WebView itself with the bottom inset rather
+        // than letting the page handle env(safe-area-inset-bottom) —
+        // SMDL's older pages predate the safe-area CSS and would need
+        // touching otherwise.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.setDecorFitsSystemWindows(false)
             window.insetsController?.let {
                 it.hide(WindowInsets.Type.statusBars())
             }
+            web.setOnApplyWindowInsetsListener { v, insets ->
+                val navBars = insets.getInsets(WindowInsets.Type.navigationBars())
+                v.setPadding(0, 0, 0, navBars.bottom)
+                insets
+            }
         } else {
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility =
                 View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_FULLSCREEN
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
         }
 
         if (savedInstanceState == null) {

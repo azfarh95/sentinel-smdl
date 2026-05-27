@@ -484,6 +484,17 @@ _BROWSE_HTML = r"""<!doctype html>
       display:flex; flex-direction:column; gap:6px; min-height:130px;
     }
     .card:active { transform: scale(.97); border-color:#3390ec; }
+    .card { position:relative; }
+    .card .star-btn {
+      position:absolute; top:6px; right:6px; width:28px; height:28px;
+      display:flex; align-items:center; justify-content:center;
+      background:rgba(13,15,20,.7); border:0; border-radius:14px;
+      cursor:pointer; padding:0; font-size:14px; line-height:1;
+      color:#5a5a5a; transition: color .12s ease, background .12s ease;
+      backdrop-filter:blur(4px); z-index:1;
+    }
+    .card .star-btn.on { color:#ffd60a; }
+    .card .star-btn:hover { background:rgba(13,15,20,.9); }
     .card .logo-wrap {
       aspect-ratio:1/1; background:#0d0f14; border-radius:8px;
       display:flex; align-items:center; justify-content:center; overflow:hidden;
@@ -570,8 +581,18 @@ _BROWSE_HTML = r"""<!doctype html>
   </div>
   <div class="actions-row">
     <button class="ghost" id="alive-only-btn">✓ Alive only: off</button>
+    <button class="ghost" id="favorites-only-btn">⭐ Favorites: off</button>
   </div>
   <div class="actions-row" id="country-quick-row"></div>
+
+  <!-- Drawer-search: filters the chip lists below (countries, sources,
+       categories). Distinct from the top-bar search which filters the
+       channel grid. -->
+  <div style="padding:8px 14px 0;">
+    <input id="drawer-filter" type="search" placeholder="Filter lists (country, source, …)"
+      style="width:100%; padding:8px 10px; border-radius:8px; border:1px solid #2a2f3a;
+             background:#15181f; color:#fff; font-size:12px;">
+  </div>
 
   <!-- Probe knobs (collapsible) — defaults work; only open if tuning. -->
   <details class="probe-tune" style="margin:8px 14px 0; font-size:11px; color:var(--tg-theme-hint-color,#8a8f99);">
@@ -640,7 +661,28 @@ if (tg) { tg.ready(); tg.expand(); }
 const initData = tg?.initData || '';
 
 const STATE_KEY = 'smdl_iptv_filters_v1';
-const _defaultState = { country: null, category: null, source: null, status: null, q: '' };
+const FAV_KEY = 'smdl_iptv_favorites_v1';
+const _defaultState = {
+  country: null, category: null, source: null,
+  status: null, q: '', favorites_only: false,
+};
+
+// ── Favorites — Set of channel ids, persisted to localStorage ──────
+let _favorites = (() => {
+  try {
+    const arr = JSON.parse(localStorage.getItem(FAV_KEY) || '[]');
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch { return new Set(); }
+})();
+function _saveFavorites() {
+  try { localStorage.setItem(FAV_KEY, JSON.stringify([..._favorites])); } catch {}
+}
+function isFavorite(cid) { return _favorites.has(cid); }
+function toggleFavorite(cid) {
+  if (_favorites.has(cid)) _favorites.delete(cid);
+  else _favorites.add(cid);
+  _saveFavorites();
+}
 // Hydrate from localStorage so filters survive across page reloads
 // (e.g. tap a channel → land on /iptv/play/... → hit Back → drawer
 // still shows the country chip you'd picked).
@@ -869,7 +911,10 @@ async function loadChannels() {
   if (state.source) params.set('source', state.source);
   if (state.status) params.set('status', state.status);
   if (state.q) params.set('q', state.q);
-  params.set('limit', '300');
+  // favorites_only needs a wider fetch since the filter happens client-
+  // side — a favorite outside the first 300 by (country,name) order
+  // would be invisible at the default limit.
+  params.set('limit', state.favorites_only ? '20000' : '300');
   let data;
   try {
     data = await api('/api/iptv/channels?' + params.toString());
@@ -877,12 +922,19 @@ async function loadChannels() {
     grid.innerHTML = `<div class="empty">Error: ${escapeHtml(e.message)}</div>`;
     return;
   }
-  const channels = data.channels || [];
+  let channels = data.channels || [];
+  // Favorites-only is purely a client-side filter — the server doesn't
+  // know which channels you've starred. Apply after the fetch.
+  if (state.favorites_only) {
+    channels = channels.filter(c => isFavorite(c.id));
+  }
   document.getElementById('result-h').textContent =
-    `Channels · ${channels.length}${channels.length >= 300 ? '+' : ''}`;
+    `Channels · ${channels.length}${channels.length >= 300 ? '+' : ''}${state.favorites_only ? ' ⭐' : ''}`;
   if (!channels.length) {
-    grid.innerHTML = `<div class="empty">No channels match.<br>
-      Try <strong>Refresh catalogue</strong> if this is your first visit.</div>`;
+    grid.innerHTML = state.favorites_only
+      ? `<div class="empty">No favorites yet. Tap the ☆ on any channel card to star it.</div>`
+      : `<div class="empty">No channels match.<br>
+         Try <strong>Refresh catalogue</strong> if this is your first visit.</div>`;
     return;
   }
   grid.innerHTML = '';
@@ -896,17 +948,30 @@ async function loadChannels() {
     const kind   = streamTypeOf(ch.url);
     const origin = originOf(ch.url);
     const isGeo  = /\[Geo[- ]?blocked\]/i.test(ch.name || '');
+    const fav    = isFavorite(ch.id);
     const badges = [];
     if (kind !== 'other') badges.push(`<span class="b ${kind}">${kind.toUpperCase()}</span>`);
     if (origin.kind === 'official') badges.push(`<span class="b official">CDN</span>`);
     else if (origin.kind === 'restream') badges.push(`<span class="b restream">Re-stream</span>`);
     if (isGeo) badges.push(`<span class="b geo">geo</span>`);
     card.innerHTML = `
+      <button class="star-btn ${fav ? 'on' : ''}" aria-label="favorite">${fav ? '★' : '☆'}</button>
       <div class="logo-wrap">${logoHtml}</div>
       <div class="name">${escapeHtml(ch.name)}</div>
       <div class="meta">${flag(ch.country||'')} ${escapeHtml(ch.country||'?')} · ${escapeHtml((ch.categories||[]).slice(0,1).join(''))}</div>
       <div class="badges">${badges.join('')}</div>
     `;
+    const starBtn = card.querySelector('.star-btn');
+    starBtn.addEventListener('click', (e) => {
+      e.stopPropagation();  // don't bubble to card → navigate
+      e.preventDefault();
+      toggleFavorite(ch.id);
+      const on = isFavorite(ch.id);
+      starBtn.textContent = on ? '★' : '☆';
+      starBtn.classList.toggle('on', on);
+      // If we're in "favorites only" view, un-starring removes the card.
+      if (state.favorites_only && !on) card.style.display = 'none';
+    });
     card.addEventListener('click', () => location.href = `/iptv/play/${encodeURIComponent(ch.id)}`);
     grid.appendChild(card);
   }
@@ -964,6 +1029,29 @@ document.getElementById('alive-only-btn')?.addEventListener('click', (e) => {
   e.currentTarget.textContent = `✓ Alive only: ${state.status === 'alive' ? 'on' : 'off'}`;
   _persistState();
   loadChannels();
+});
+
+document.getElementById('favorites-only-btn')?.addEventListener('click', (e) => {
+  state.favorites_only = !state.favorites_only;
+  e.currentTarget.textContent = `⭐ Favorites: ${state.favorites_only ? 'on' : 'off'}`;
+  _persistState();
+  loadChannels();
+});
+
+// Drawer-search — filters the chip lists (country, source, category)
+// by substring match. Non-matching chips hidden with display:none.
+// Empty search = show everything.
+document.getElementById('drawer-filter')?.addEventListener('input', (e) => {
+  const q = (e.target.value || '').toLowerCase().trim();
+  for (const sel of ['#country-chips', '#source-chips', '#category-chips']) {
+    document.querySelectorAll(`${sel} .chip`).forEach(c => {
+      if (!q || c.textContent.toLowerCase().includes(q)) {
+        c.style.display = '';
+      } else {
+        c.style.display = 'none';
+      }
+    });
+  }
 });
 
 // Live-update probe-tune slider labels as user drags.
@@ -1078,6 +1166,8 @@ function escapeAttr(s) { return escapeHtml(s); }
   if (s && state.q) s.value = state.q;
   const ab = document.getElementById('alive-only-btn');
   if (ab) ab.textContent = `✓ Alive only: ${state.status === 'alive' ? 'on' : 'off'}`;
+  const fb = document.getElementById('favorites-only-btn');
+  if (fb) fb.textContent = `⭐ Favorites: ${state.favorites_only ? 'on' : 'off'}`;
 })();
 loadFilters();
 loadChannels();

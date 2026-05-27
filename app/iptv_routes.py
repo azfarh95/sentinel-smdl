@@ -255,6 +255,7 @@ async def iptv_v2_channels(
     request: Request,
     country: str | None = None,
     category: str | None = None,
+    source: str | None = None,
     is_curated: int | None = None,
     q: str | None = None,
     limit: int = 300,
@@ -275,6 +276,16 @@ async def iptv_v2_channels(
     if is_curated is not None:
         where.append("is_curated = ?")
         params.append(1 if is_curated else 0)
+    if source:
+        # "Show logical channels where AT LEAST ONE source has source=X".
+        # EXISTS subquery against iptv_channels — uses idx_iptv_source +
+        # idx_iptv_channel_id so it stays cheap even on full catalogue.
+        where.append(
+            "EXISTS (SELECT 1 FROM iptv_channels cs "
+            "         WHERE cs.channel_id = v_channels_with_status.id "
+            "           AND cs.source = ?)"
+        )
+        params.append(source)
     if q:
         needle = q.strip().lower()
         if needle:
@@ -1170,6 +1181,7 @@ async function loadChannels() {
   const params = new URLSearchParams();
   if (state.country) params.set('country', state.country);
   if (state.category) params.set('category', state.category);
+  if (state.source) params.set('source', state.source);    // Phase 3 — fixed
   if (state.q) params.set('q', state.q);
   // favorites_only needs a wider fetch since the filter happens client-
   // side — a favorite outside the first 300 by (country,name) order
@@ -1184,14 +1196,9 @@ async function loadChannels() {
     grid.innerHTML = `<div class="empty">Error: ${escapeHtml(e.message)}</div>`;
     return;
   }
-  // Source / status filters happen client-side on v2 since the view
-  // aggregates over sources. (Most users won't notice; the source
-  // chip filter still exists for source-level debugging.)
-  if (state.source) {
-    // Best-effort: hide channels whose only sources are NOT the
-    // selected one. Requires the source list — skipped here, simpler
-    // to leave server filtering for v2 in a later iteration.
-  }
+  // Alive-only filter happens client-side — the v2 endpoint doesn't
+  // have a status= param (logical channels don't have a status — only
+  // their underlying sources do).
   if (state.status === 'alive') {
     data.channels = (data.channels || []).filter(c => (c.alive_count || 0) > 0);
   }

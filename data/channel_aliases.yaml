@@ -96,3 +96,231 @@ channels:
     categories: [news, business]
     sources:
       - "youtube-live:bloomberg-tv"
+
+  # ── Phase 3 expansion ───────────────────────────────────────────
+  # Curated channels covering the top news / business / public-
+  # broadcaster slots per region the owner actually watches. Adding
+  # an entry here gives the channel: a stable id, a dedup-immune
+  # grouping (curated wins over auto-merge), and explicit source
+  # priority overrides.
+  #
+  # Channels listed below reference YouTube source IDs from
+  # data/youtube_live.yaml — those are the most reliable across geo.
+  # iptv-org tvg-id sources are added where they exist in the
+  # current catalogue (verified at curation time).
+
+  # ── United States ──────────────────────────────────────────────
+  abc-news:
+    name:    "ABC News Live"
+    country: US
+    aliases: ["ABC News Live", "ABC News"]
+    categories: [news]
+    sources:
+      - "youtube-live:abc-news-live"
+
+  nbc-news:
+    name:    "NBC News NOW"
+    country: US
+    aliases: ["NBC News NOW", "NBC News"]
+    categories: [news]
+    sources:
+      - "youtube-live:nbc-news-now"
+
+  cbs-news:
+    name:    "CBS News"
+    country: US
+    aliases: ["CBS News"]
+    categories: [news]
+    sources:
+      - "youtube-live:cbs-news"
+
+  cnbc:
+    name:    "CNBC"
+    country: US
+    aliases: ["CNBC", "CNBC Television"]
+    categories: [news, business]
+    sources:
+      - "youtube-live:cnbc-live"
+
+  reuters:
+    name:    "Reuters"
+    country: US
+    aliases: ["Reuters"]
+    categories: [news]
+    sources:
+      - "youtube-live:reuters"
+
+  pbs-newshour:
+    name:    "PBS NewsHour"
+    country: US
+    aliases: ["PBS NewsHour"]
+    categories: [news]
+    sources:
+      - "youtube-live:pbs-newshour"
+
+  # ── United Kingdom / Europe ────────────────────────────────────
+  sky-news:
+    name:    "Sky News"
+    country: GB
+    aliases: ["Sky News"]
+    categories: [news]
+    sources:
+      - "youtube-live:sky-news"
+
+  euronews:
+    name:    "Euronews"
+    country: FR
+    aliases: ["Euronews"]
+    categories: [news]
+    sources:
+      - "youtube-live:euronews-en"
+
+  trt-world:
+    name:    "TRT World"
+    country: TR
+    aliases: ["TRT World"]
+    categories: [news]
+    sources:
+      - "youtube-live:tlt-eu"
+
+  africanews:
+    name:    "Africanews"
+    country: FR
+    aliases: ["Africanews"]
+    categories: [news]
+    sources:
+      - "youtube-live:africanews"
+
+  # ── Asia ───────────────────────────────────────────────────────
+  cgtn:
+    name:    "CGTN"
+    country: CN
+    aliases: ["CGTN"]
+    categories: [news]
+    sources:
+      - "youtube-live:cgtn"
+
+  arirang:
+    name:    "Arirang TV"
+    country: KR
+    aliases: ["Arirang TV"]
+    categories: [news]
+    sources:
+      - "youtube-live:arirang-tv"
+
+  yonhap:
+    name:    "Yonhap News TV"
+    country: KR
+    aliases: ["Yonhap News TV"]
+    categories: [news]
+    sources:
+      - "youtube-live:yonhap"
+
+  # ── Singapore (Mediacorp linear) ───────────────────────────────
+  # Mediacorp's CDN entries in iptv-org are on viloud.tv (community
+  # re-stream); curated entry groups them under one logical channel
+  # so the play page shows the available options.
+  channel-5-sg:
+    name:    "Channel 5"
+    country: SG
+    aliases: ["Channel 5", "MediaCorp Channel 5"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:Channel5.sg"
+      - "iptv-org-sg:Channel5.sg"
+
+  channel-8-sg:
+    name:    "Channel 8"
+    country: SG
+    aliases: ["Channel 8", "MediaCorp Channel 8"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:Channel8.sg"
+      - "iptv-org-sg:Channel8.sg"
+
+  channel-u-sg:
+    name:    "Channel U"
+    country: SG
+    aliases: ["Channel U", "MediaCorp Channel U"]
+    categories: [entertainment]
+    sources:
+      - "iptv-org:ChannelU.sg"
+      - "iptv-org-sg:ChannelU.sg"
+
+  # ── Malaysia ───────────────────────────────────────────────────
+  tv3-malaysia:
+    name:    "TV3 Malaysia"
+    country: MY
+    aliases: ["TV3", "TV3 Malaysia", "Buletin TV3"]
+    categories: [news, general]
+    sources:
+      - "youtube-live:tv3-malaysia"
+
+  rtm-tv1:
+    name:    "RTM TV1"
+    country: MY
+    aliases: ["RTM TV1", "TV1"]
+    categories: [general]
+    sources:
+      - "iptv-org:RTM1.my"
+      - "iptv-org-my:RTM1.my"
+
+  rtm-tv2:
+    name:    "RTM TV2"
+    country: MY
+    aliases: ["RTM TV2", "TV2"]
+    categories: [general]
+    sources:
+      - "iptv-org:RTM2.my"
+      - "iptv-org-my:RTM2.my"
+      - "youtube-live:rtm-news"
+
+  bernama-tv:
+    name:    "BERNAMA TV"
+    country: MY
+    aliases: ["BERNAMA TV", "Bernama News Channel"]
+    categories: [news]
+    sources:
+      - "youtube-live:bernama-tv"
+
+  # ── Indonesia ──────────────────────────────────────────────────
+  metro-tv-id:
+    name:    "Metro TV"
+    country: ID
+    aliases: ["Metro TV"]
+    categories: [news]
+    sources:
+      - "youtube-live:metro-tv"
+
+  cnn-indonesia:
+    name:    "CNN Indonesia"
+    country: ID
+    aliases: ["CNN Indonesia"]
+    categories: [news]
+    sources:
+      - "youtube-live:cnn-indonesia"
+
+  tvone-id:
+    name:    "tvOne"
+    country: ID
+    aliases: ["tvOne", "tvOne News"]
+    categories: [news]
+    sources:
+      - "youtube-live:tvone-news"
+
+  beritasatu:
+    name:    "BeritaSatu"
+    country: ID
+    aliases: ["BeritaSatu", "Berita Satu"]
+    categories: [news]
+    sources:
+      - "youtube-live:beritasatu"
+
+  # NOTE: previously planned curated entries for AU broadcasters
+  # (ABC TV, SBS, Channel 10, Seven), NZ (TVNZ 1, Three NZ), and
+  # Italian Rai 1/2/3 were dropped from this Phase 3 pass because
+  # the auto-dedup pipeline already creates reasonable logical
+  # channels for them via (slug + country) bucketing. We can add
+  # curated entries later if we want hand-picked source priorities
+  # or aliases — but it requires knowing the exact source-row IDs
+  # to pin (TBD; need to inspect the catalogue first).

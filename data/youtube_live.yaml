@@ -1,0 +1,212 @@
+# Curated YouTube 24/7 live news streams — exposed in the IPTV browser
+# as a "youtube-live" source. URLs are resolved on-demand via yt-dlp
+# (channel URL → current m3u8 manifest) and cached for 30 min.
+#
+# Why YouTube? Their CDN is globally served — these channels play from
+# any country without the geo-blocking that hits broadcaster CDNs
+# (cloudfront, amagi, viloud). Real bypass for MY/ID news content
+# without needing a VPS or residential proxy.
+#
+# To add a channel: find a 24/7 livestream on YouTube, grab the @handle,
+# add an entry below. yt-dlp resolves https://youtube.com/@<handle>/live
+# at play time.
+channels:
+
+  # ── Singapore / SE Asia ─────────────────────────────────────────
+  - id: cna
+    name: Channel News Asia
+    handle: channelnewsasia
+    country: SG
+    categories: [news]
+    logo: https://yt3.googleusercontent.com/ytc/AIdro_kf4-XQz7Sjpz9rJOdMlAQrW1u1xKzFi0YCKbZIaO72WqY=s176
+
+  - id: cna-asia-tonight
+    name: CNA Asia Tonight
+    handle: channelnewsasia
+    country: SG
+    categories: [news]
+    # Same handle as cna — variants for different content shows. yt-dlp
+    # resolves to whichever live stream is currently active.
+
+  # ── Malaysia ────────────────────────────────────────────────────
+  - id: astro-awani
+    name: Astro Awani
+    handle: astroawani
+    country: MY
+    categories: [news]
+    logo: https://yt3.googleusercontent.com/4MIeRiHrZSh-Z2_g_4Apk1aZ-rdQqHL_gjV6yvL3KjEH8mF8gPYBYBVLp8qy8XfgM=s176
+
+  - id: tv3-malaysia
+    name: TV3 Malaysia (Buletin)
+    handle: tv3msia
+    country: MY
+    categories: [news]
+
+  - id: bernama-tv
+    name: BERNAMA TV
+    handle: bernamatv
+    country: MY
+    categories: [news]
+
+  - id: rtm-news
+    name: RTM Berita (TV2)
+    handle: rtmkl
+    country: MY
+    categories: [news]
+
+  # ── Indonesia ───────────────────────────────────────────────────
+  - id: kompastv
+    name: KompasTV
+    handle: KOMPASTVNEWS
+    country: ID
+    categories: [news]
+    logo: https://yt3.googleusercontent.com/ytc/AIdro_mFRl6vRfvZTk0eWNl0c1pcOl3Wn7-GHpJqMxIBO0BfqBQ=s176
+
+  - id: metro-tv
+    name: Metro TV
+    handle: metrotvnews
+    country: ID
+    categories: [news]
+
+  - id: cnn-indonesia
+    name: CNN Indonesia
+    handle: CNNIndonesia
+    country: ID
+    categories: [news]
+
+  - id: tvone-news
+    name: tvOne News
+    handle: tvOneNews
+    country: ID
+    categories: [news]
+
+  - id: beritasatu
+    name: BeritaSatu
+    handle: beritasatu
+    country: ID
+    categories: [news]
+
+  # ── International English ───────────────────────────────────────
+  - id: bbc-news
+    name: BBC News
+    handle: BBCNews
+    country: GB
+    categories: [news]
+    logo: https://yt3.googleusercontent.com/Bnu_AdEX0PrAhTjqAcAfd3DZyjLRcm0HJjY0Ipxr3WkRagL3ZdsBQTagDsy6sxIBcJjV6gQ=s176
+
+  - id: al-jazeera-en
+    name: Al Jazeera English
+    handle: aljazeeraenglish
+    country: QA
+    categories: [news]
+
+  - id: france-24-en
+    name: France 24 English
+    handle: France24English
+    country: FR
+    categories: [news]
+
+  - id: dw-news
+    name: DW News (Deutsche Welle)
+    handle: dwnews
+    country: DE
+    categories: [news]
+
+  - id: nhk-world
+    name: NHK World-Japan
+    handle: nhkworldjapan
+    country: JP
+    categories: [news]
+
+  - id: sky-news
+    name: Sky News
+    handle: skynews
+    country: GB
+    categories: [news]
+
+  - id: euronews-en
+    name: Euronews
+    handle: euronews
+    country: FR
+    categories: [news]
+
+  - id: africanews
+    name: Africanews
+    handle: africanews
+    country: FR
+    categories: [news]
+
+  - id: tlt-eu
+    name: TRT World
+    handle: trtworld
+    country: TR
+    categories: [news]
+
+  - id: cgtn
+    name: CGTN
+    handle: CGTN
+    country: CN
+    categories: [news]
+
+  - id: nhk-bs1
+    name: NHK World HD
+    handle: NHKWORLD
+    country: JP
+    categories: [news]
+
+  # ── United States ───────────────────────────────────────────────
+  - id: bloomberg-tv
+    name: Bloomberg Television
+    handle: markets
+    country: US
+    categories: [news, business]
+    logo: https://yt3.googleusercontent.com/0yQXMcGNd_K3-bo7B7yQK0LWWzcLcGCl_OqLZgFqj-Tj6QIqHfMS-x1RUjlqsFy7t0p9F-Gi=s176
+
+  - id: abc-news-live
+    name: ABC News Live
+    handle: ABCNews
+    country: US
+    categories: [news]
+
+  - id: nbc-news-now
+    name: NBC News NOW
+    handle: NBCNews
+    country: US
+    categories: [news]
+
+  - id: cbs-news
+    name: CBS News
+    handle: CBSNews
+    country: US
+    categories: [news]
+
+  - id: cnbc-live
+    name: CNBC Television
+    handle: CNBCtelevision
+    country: US
+    categories: [news, business]
+
+  - id: reuters
+    name: Reuters
+    handle: Reuters
+    country: US
+    categories: [news]
+
+  - id: pbs-newshour
+    name: PBS NewsHour
+    handle: PBSNewsHour
+    country: US
+    categories: [news]
+
+  # ── Korean / Japanese ───────────────────────────────────────────
+  - id: arirang-tv
+    name: Arirang TV
+    handle: ArirangTV
+    country: KR
+    categories: [news]
+
+  - id: yonhap
+    name: Yonhap News TV
+    handle: yonhapnewstv
+    country: KR
+    categories: [news]

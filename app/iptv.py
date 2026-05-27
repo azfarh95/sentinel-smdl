@@ -348,6 +348,11 @@ SOURCES: dict[str, dict] = {
         "url":  "https://raw.githubusercontent.com/xN1ckuz/OpenIPTVItaly/main/OpenIPTVItaly.m3u",
         "kind": "m3u",
     },
+    "youtube-live": {
+        "name": "YouTube Live (24/7 news streams, geo-block-free via YouTube CDN)",
+        "url":  "data/youtube_live.yaml",
+        "kind": "yaml",  # different refresh path — see refresh_from_youtube_yaml
+    },
 }
 
 
@@ -1003,6 +1008,58 @@ async def refresh_iptv_org_country(
     }
 
 
+async def refresh_from_youtube_yaml() -> dict:
+    """Read data/youtube_live.yaml and upsert each entry as a
+    source='youtube-live' channel. URL is stored as the @handle live
+    page (https://youtube.com/@<handle>/live) — actual HLS manifest
+    is resolved at play time via /api/iptv/channels/<id>/resolve_url.
+    Cheap to refresh — no HTTP fetches, just YAML re-parse."""
+    from . import iptv_youtube
+    t0 = time.time()
+    channels = iptv_youtube.load_youtube_channels()
+    now_iso = _iso_now()
+    upserted = 0
+    skipped = 0
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        for ch in channels:
+            cid = (ch.get("id") or "").strip().lower()
+            handle = (ch.get("handle") or "").strip()
+            name = (ch.get("name") or "").strip()
+            if not cid or not handle or not name:
+                skipped += 1
+                continue
+            row_id = f"youtube-live:{cid}"
+            url = iptv_youtube._channel_url_for(handle)
+            country = (ch.get("country") or "").upper() or None
+            cats = ch.get("categories") or []
+            categories = ",".join(c.lower() for c in cats if c) or None
+            logo = ch.get("logo") or None
+            await conn.execute("""
+                INSERT INTO iptv_channels (
+                    id, name, country, languages, categories, url, logo,
+                    is_nsfw, alive, status, last_check_at, last_error, last_seen_at, source
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, 0, NULL, 'unprobed', NULL, NULL, ?, 'youtube-live')
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    country = excluded.country,
+                    categories = excluded.categories,
+                    url = excluded.url,
+                    logo = excluded.logo,
+                    last_seen_at = excluded.last_seen_at,
+                    source = excluded.source
+            """, (row_id, name, country, categories, url, logo, now_iso))
+            upserted += 1
+        await conn.commit()
+    return {
+        "ok": True,
+        "source": "youtube-live",
+        "channels_fetched": len(channels),
+        "upserted": upserted,
+        "skipped": skipped,
+        "duration_ms": int((time.time() - t0) * 1000),
+    }
+
+
 async def refresh_all_sources() -> list[dict]:
     """Run every registered source's refresh, plus the SG/MY/ID quick
     country slices. Returns per-source summaries."""
@@ -1018,6 +1075,10 @@ async def refresh_all_sources() -> list[dict]:
             out.append(await refresh_from_m3u(sid))
         except Exception as exc:
             out.append({"ok": False, "source": sid, "error": str(exc)})
+    try:
+        out.append(await refresh_from_youtube_yaml())
+    except Exception as exc:
+        out.append({"ok": False, "source": "youtube-live", "error": str(exc)})
     for cc in IPTV_ORG_COUNTRY_QUICK:
         try:
             out.append(await refresh_iptv_org_country(cc))

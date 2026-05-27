@@ -69,6 +69,8 @@ async def iptv_refresh(body: RefreshBody, request: Request):
             summaries = [await _iptv.refresh_from_iptv_org(
                 country=body.country, include_nsfw=body.include_nsfw,
             )]
+        elif body.source == "youtube-live":
+            summaries = [await _iptv.refresh_from_youtube_yaml()]
         else:
             summaries = [await _iptv.refresh_from_m3u(body.source)]
     except KeyError as exc:
@@ -231,6 +233,33 @@ async def iptv_channel_get(channel_id: str, request: Request):
     if not ch:
         raise HTTPException(status_code=404, detail="channel not found")
     return ch.to_dict()
+
+
+@router.get("/api/iptv/channels/{channel_id}/resolve_url")
+async def iptv_channel_resolve_url(channel_id: str, request: Request):
+    """Return a freshly-resolved playable URL for the channel.
+
+    For static-URL sources (iptv-org, free-tv, mjh, …) this just
+    passes through the stored URL — cheap, ~1ms.
+
+    For source='youtube-live' it invokes yt-dlp on the @handle page
+    to get the current m3u8 manifest (YouTube live URLs are signed
+    and rotate; can't store them statically). Results cached in-memory
+    for 30 min so rapid taps don't fan out to multiple yt-dlp procs."""
+    await _mini._verify(request)
+    ch = await _iptv.get_channel(channel_id)
+    if not ch or not ch.url:
+        raise HTTPException(status_code=404, detail="channel not found / no URL")
+    if ch.source != "youtube-live":
+        return {"url": ch.url, "resolved": False, "source": ch.source}
+    from . import iptv_youtube
+    try:
+        url = await iptv_youtube.resolve_live_url(ch.url)
+    except Exception as exc:
+        logger.warning("youtube resolve %s failed: %s", channel_id, exc)
+        raise HTTPException(status_code=502, detail=f"resolve failed: {exc}")
+    return {"url": url, "resolved": True, "source": ch.source,
+            "original": ch.url}
 
 
 class ProbeAllBody(BaseModel):
@@ -653,6 +682,7 @@ const SOURCE_LABELS = {
   'iptv-org-sg':    '🇸🇬 SG curated',
   'iptv-org-my':    '🇲🇾 MY curated',
   'iptv-org-id':    '🇮🇩 ID curated',
+  'youtube-live':   '📺 YouTube Live',
 };
 
 // Friendly flag for any country-slice source the server returns.
@@ -1314,19 +1344,18 @@ function isApk() {
   return /SMDL-IPTV\//.test(navigator.userAgent || '');
 }
 
-document.getElementById('play-vlc')?.addEventListener('click', () => {
+document.getElementById('play-vlc')?.addEventListener('click', async () => {
   if (!CHANNEL?.url) return toast('No URL');
+  // YouTube-live needs the resolved m3u8 too — VLC can't deep-link into
+  // youtube.com/@handle/live.
+  const url = await resolveStreamUrl();
+  if (!url) return;
   if (isApk()) {
-    // The APK's webViewClient.shouldOverrideUrlLoading sees the .m3u8 /
-    // .mpd / .ts URL and fires an Intent.ACTION_VIEW with the right
-    // MIME, preferring VLC > MX Player > chooser. Without this APK
-    // path, tg.openLink would route through the system browser which
-    // tries to render .mpd and falls back to downloading.
-    window.location.href = CHANNEL.url;
+    window.location.href = url;
   } else if (tg?.openLink) {
-    tg.openLink(CHANNEL.url, { try_instant_view: false });
+    tg.openLink(url, { try_instant_view: false });
   } else {
-    window.open(CHANNEL.url, '_blank');
+    window.open(url, '_blank');
   }
 });
 
@@ -1379,11 +1408,41 @@ function loadScript(src, globalCheck) {
   });
 }
 
+// For YouTube-live channels the stored URL is the @handle landing page;
+// we need to resolve it to a fresh m3u8 before playback. Cached server-
+// side for 30 min so repeat plays don't re-spawn yt-dlp.
+async function resolveStreamUrl() {
+  if (!CHANNEL) return null;
+  if (CHANNEL.source !== 'youtube-live') return CHANNEL.url;
+  toast('Resolving YouTube live stream…', 2500);
+  try {
+    const r = await api(`/api/iptv/channels/${encodeURIComponent(CHANNEL_ID)}/resolve_url`);
+    return r.url || null;
+  } catch (e) {
+    toast('Resolve failed: ' + e.message, 4000);
+    return null;
+  }
+}
+
 async function playInline() {
   if (!CHANNEL?.url) return toast('No URL');
+  const url = await resolveStreamUrl();
+  if (!url) return;
   const v = document.getElementById('inline-video');
   v.style.display = 'block';
-  const kind = streamTypeOf(CHANNEL.url);
+  const kind = streamTypeOf(url);
+  // Override CHANNEL.url for the rest of this handler so the existing
+  // hls.js / dash.js / native branches use the resolved URL.
+  const origUrl = CHANNEL.url;
+  CHANNEL.url = url;
+  try {
+    await _playInlineCore(kind, v);
+  } finally {
+    CHANNEL.url = origUrl;
+  }
+}
+
+async function _playInlineCore(kind, v) {
 
   if (kind === 'hls') {
     // Safari/WebKit play HLS natively; everywhere else needs hls.js.

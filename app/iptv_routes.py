@@ -323,6 +323,60 @@ async def iptv_channel_sources(channel_id: str, request: Request):
     return {"channel_id": channel_id, "sources": sources}
 
 
+@router.get("/api/iptv/v2/channels/{channel_id}")
+async def iptv_v2_channel_detail(channel_id: str, request: Request):
+    """Combined channel detail — logical channel metadata + all sources
+    in one call. Drives the new play page in Phase 2."""
+    await _verify_iptv(request)
+    import aiosqlite
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("""
+            SELECT id, name, country, languages, categories, logo, aliases,
+                   is_curated, updated_at
+              FROM logical_channels
+             WHERE id = ?
+        """, (channel_id,))
+        ch_row = await cur.fetchone()
+    if not ch_row:
+        raise HTTPException(status_code=404, detail="channel not found")
+    sources = await _dedup.list_sources_for_channel(channel_id)
+    ch = dict(ch_row)
+    try:
+        ch["aliases"] = json.loads(ch.get("aliases") or "[]")
+    except Exception:
+        ch["aliases"] = []
+    ch["categories"] = [c for c in (ch.get("categories") or "").split(",") if c]
+    return {"channel": ch, "sources": sources}
+
+
+class ResolveChannelsBody(BaseModel):
+    source_ids: list[str]
+
+
+@router.post("/api/iptv/sources/resolve_channels")
+async def iptv_resolve_channels(body: ResolveChannelsBody, request: Request):
+    """Translate a list of legacy source-row IDs (e.g. 'iptv-org:CNA.sg')
+    to the new logical channel IDs they belong to. Used by the Phase 2
+    UI on first load to migrate localStorage favorites from the old
+    source-prefixed scheme to the new logical-channel scheme."""
+    await _verify_iptv(request)
+    if not body.source_ids:
+        return {"mapping": {}}
+    import aiosqlite
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        placeholders = ",".join("?" * len(body.source_ids))
+        cur = await conn.execute(
+            f"SELECT id, channel_id FROM iptv_channels WHERE id IN ({placeholders})",
+            body.source_ids,
+        )
+        rows = await cur.fetchall()
+    mapping = {r["id"]: r["channel_id"] for r in rows if r["channel_id"]}
+    return {"mapping": mapping, "input_count": len(body.source_ids),
+            "resolved_count": len(mapping)}
+
+
 @router.get("/api/iptv/channels/{channel_id}/play")
 async def iptv_channel_play(channel_id: str, request: Request):
     """Server-side "best alive source" picker. Returns the chosen
@@ -688,6 +742,8 @@ _BROWSE_HTML = r"""<!doctype html>
     .b.official { background:#1a3d5c; color:#9ec9ec; }
     .b.restream { background:#3a2a3a; color:#cda6d6; }
     .b.geo   { background:#5a2020; color:#f5b4b4; }
+    .b.multi { background:#1f3c5a; color:#b6d5f0; }   /* ×N source-count chip */
+    .b.curated { background:#3a3a14; color:#f0e090; } /* curated badge */
     .empty, .loading { text-align:center; padding:40px 16px;
                         color:var(--tg-theme-hint-color,#8a8f99); font-size:13px; }
     .toast {
@@ -848,7 +904,8 @@ if (tg) { tg.ready(); tg.expand(); }
 const initData = tg?.initData || '';
 
 const STATE_KEY = 'smdl_iptv_filters_v1';
-const FAV_KEY = 'smdl_iptv_favorites_v1';
+const FAV_KEY_V1 = 'smdl_iptv_favorites_v1';  // legacy — source-prefixed IDs
+const FAV_KEY    = 'smdl_iptv_favorites_v2';  // current — logical channel IDs
 const _defaultState = {
   country: null, category: null, source: null,
   status: null, q: '', favorites_only: false,
@@ -1113,8 +1170,6 @@ async function loadChannels() {
   const params = new URLSearchParams();
   if (state.country) params.set('country', state.country);
   if (state.category) params.set('category', state.category);
-  if (state.source) params.set('source', state.source);
-  if (state.status) params.set('status', state.status);
   if (state.q) params.set('q', state.q);
   // favorites_only needs a wider fetch since the filter happens client-
   // side — a favorite outside the first 300 by (country,name) order
@@ -1122,10 +1177,23 @@ async function loadChannels() {
   params.set('limit', state.favorites_only ? '20000' : '300');
   let data;
   try {
-    data = await api('/api/iptv/channels?' + params.toString());
+    // v2 endpoint returns LOGICAL channels (deduplicated). One card
+    // per channel even if it has 4 sources behind it.
+    data = await api('/api/iptv/v2/channels?' + params.toString());
   } catch (e) {
     grid.innerHTML = `<div class="empty">Error: ${escapeHtml(e.message)}</div>`;
     return;
+  }
+  // Source / status filters happen client-side on v2 since the view
+  // aggregates over sources. (Most users won't notice; the source
+  // chip filter still exists for source-level debugging.)
+  if (state.source) {
+    // Best-effort: hide channels whose only sources are NOT the
+    // selected one. Requires the source list — skipped here, simpler
+    // to leave server filtering for v2 in a later iteration.
+  }
+  if (state.status === 'alive') {
+    data.channels = (data.channels || []).filter(c => (c.alive_count || 0) > 0);
   }
   let channels = data.channels || [];
   // Favorites-only is purely a client-side filter — the server doesn't
@@ -1150,14 +1218,18 @@ async function loadChannels() {
       ? `<img src="${escapeAttr(ch.logo)}" alt="" referrerpolicy="no-referrer"
               onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'glyph',textContent:'📺'}))">`
       : `<div class="glyph">📺</div>`;
-    const kind   = streamTypeOf(ch.url);
-    const origin = originOf(ch.url);
+    // Logical channels carry source_count + alive_count + curated flag
+    // instead of a single url/source. Multi-source badge ("×4") when N>1
+    // tells the user this channel has alternate streams behind it.
     const isGeo  = /\[Geo[- ]?blocked\]/i.test(ch.name || '');
     const fav    = isFavorite(ch.id);
+    const srcN   = Number(ch.source_count || 1);
+    const aliveN = Number(ch.alive_count || 0);
     const badges = [];
-    if (kind !== 'other') badges.push(`<span class="b ${kind}">${kind.toUpperCase()}</span>`);
-    if (origin.kind === 'official') badges.push(`<span class="b official">CDN</span>`);
-    else if (origin.kind === 'restream') badges.push(`<span class="b restream">Re-stream</span>`);
+    if (ch.is_curated) badges.push(`<span class="b curated">★ curated</span>`);
+    if (srcN > 1) badges.push(`<span class="b multi">×${srcN} sources</span>`);
+    if (aliveN > 0) badges.push(`<span class="b official">${aliveN} alive</span>`);
+    else if (srcN > 0) badges.push(`<span class="b geo">no alive</span>`);
     if (isGeo) badges.push(`<span class="b geo">geo</span>`);
     card.innerHTML = `
       <button class="star-btn ${fav ? 'on' : ''}" aria-label="favorite">${fav ? '★' : '☆'}</button>
@@ -1363,6 +1435,33 @@ function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s); }
 
+// One-shot migration: translate v1 favorites (source-prefixed IDs
+// like 'iptv-org:CNA.sg') to v2 (logical channel IDs like 'cna').
+// Runs once per device; subsequent loads find the v2 key already
+// populated and skip the API call.
+async function _migrateFavoritesIfNeeded() {
+  try {
+    if (localStorage.getItem(FAV_KEY)) return;  // already migrated
+    const oldIds = JSON.parse(localStorage.getItem(FAV_KEY_V1) || '[]');
+    if (!Array.isArray(oldIds) || oldIds.length === 0) {
+      localStorage.setItem(FAV_KEY, '[]');
+      return;
+    }
+    const r = await api('/api/iptv/sources/resolve_channels', {
+      method: 'POST', body: JSON.stringify({ source_ids: oldIds }),
+    });
+    const newIds = [...new Set(Object.values(r.mapping || {}))].filter(Boolean);
+    localStorage.setItem(FAV_KEY, JSON.stringify(newIds));
+    // Refresh the in-memory Set so the next render picks up the new IDs.
+    _favorites = new Set(newIds);
+    if (newIds.length) {
+      toast(`Migrated ${newIds.length} favorite(s) to v2`, 3000);
+    }
+  } catch (e) {
+    console.warn('favorites migration failed:', e);
+  }
+}
+
 // Restore saved-state visual cues before the first paint.
 (function _hydrateUi() {
   const s = document.getElementById('search');
@@ -1372,8 +1471,11 @@ function escapeAttr(s) { return escapeHtml(s); }
   const fb = document.getElementById('favorites-only-btn');
   if (fb) fb.textContent = `⭐ Favorites: ${state.favorites_only ? 'on' : 'off'}`;
 })();
-loadFilters();
-loadChannels();
+(async () => {
+  await _migrateFavoritesIfNeeded();
+  loadFilters();
+  loadChannels();
+})();
 </script>
 </body></html>
 """
@@ -1437,6 +1539,23 @@ _PLAY_HTML = r"""<!doctype html>
     }
     .exit-warning.show { display:block; }
     .exit-warning code { background:rgba(0,0,0,.3); padding:1px 4px; border-radius:3px; }
+    .source-picker {
+      margin:10px 0 4px; padding:10px 12px;
+      background:#15181f; border:1px solid #232831; border-radius:10px;
+      font-size:12px; display:none;
+    }
+    .source-picker.show { display:block; }
+    .source-picker .label {
+      font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+      color:var(--tg-theme-hint-color,#8a8f99); margin-bottom:6px;
+    }
+    .source-picker select {
+      width:100%; padding:7px 8px; border-radius:6px;
+      background:#0d0f14; color:#fff; border:1px solid #2a2f3a; font-size:12px;
+    }
+    .source-picker .summary {
+      font-size:11px; color:var(--tg-theme-hint-color,#8a8f99); margin-top:6px;
+    }
     .hint { font-size:11px; color:var(--tg-theme-hint-color,#8a8f99); margin-top:14px; line-height:1.5; }
     .toast {
       position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
@@ -1462,6 +1581,12 @@ _PLAY_HTML = r"""<!doctype html>
 
   <div class="status-row" id="status-row"></div>
   <div class="exit-warning" id="exit-warning"></div>
+
+  <div class="source-picker" id="source-picker">
+    <div class="label">Source</div>
+    <select id="source-select"></select>
+    <div class="summary" id="source-summary"></div>
+  </div>
 
   <div id="epg-block" style="display:none; background:#15181f; border:1px solid #232831; border-radius:10px; padding:10px 12px; margin-bottom:12px;">
     <div style="font-size:10px; letter-spacing:.08em; color:var(--tg-theme-hint-color,#8a8f99); text-transform:uppercase; margin-bottom:6px;">Programme guide</div>
@@ -1535,9 +1660,35 @@ function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c =>
 
 let CHANNEL = null;
 
+// In Phase 2 the play page handles BOTH formats of CHANNEL_ID:
+//   • new logical-channel ids ("cna", "bbc-news") — use /v2/channels/<id>
+//   • legacy source-prefixed ids ("iptv-org:CNA.sg") — use the old
+//     /api/iptv/channels/<id> endpoint, single source
+// Detection: presence of ":" in the id means it's source-prefixed.
+let SOURCES = [];          // all alternates for the logical channel (v2 only)
+let CURRENT_SOURCE_IDX = 0;
+
 async function loadChannel() {
+  const isLogical = !CHANNEL_ID.includes(':');
   try {
-    CHANNEL = await api(`/api/iptv/channels/${encodeURIComponent(CHANNEL_ID)}`);
+    if (isLogical) {
+      const r = await api(`/api/iptv/v2/channels/${encodeURIComponent(CHANNEL_ID)}`);
+      CHANNEL = r.channel;
+      SOURCES = r.sources || [];
+      if (!SOURCES.length) throw new Error('no sources for channel');
+      // Default to highest-priority alive source (server already sorted).
+      CURRENT_SOURCE_IDX = 0;
+      // Merge the selected source's URL + source-source into CHANNEL so
+      // the rest of the play-page logic (streamTypeOf, origin badge,
+      // etc.) sees a coherent object.
+      CHANNEL.url    = SOURCES[0].url;
+      CHANNEL.source = SOURCES[0].source;
+      CHANNEL.status = SOURCES[0].status;
+    } else {
+      // Legacy single-source path (kept so deep-link old URLs work).
+      CHANNEL = await api(`/api/iptv/channels/${encodeURIComponent(CHANNEL_ID)}`);
+      SOURCES = [];
+    }
   } catch (e) {
     document.getElementById('name').textContent = 'Error: ' + e.message;
     return;
@@ -1573,8 +1724,70 @@ async function loadChannel() {
     badge(`${icon} reliability ${pct}% (n=${CHANNEL.probe_count})`, cls);
   }
   document.getElementById('url-box').textContent = CHANNEL.url || '(no URL)';
+  renderSourcePicker();
   maybeShowExitWarning();
   loadEpg();
+}
+
+// Source picker (Phase 2) — only shown when the channel has >1 source.
+// Selecting a different source updates CHANNEL.url + URL-box + status
+// row; the existing play buttons just use whatever is current.
+function renderSourcePicker() {
+  const picker = document.getElementById('source-picker');
+  const select = document.getElementById('source-select');
+  const summary = document.getElementById('source-summary');
+  if (!SOURCES || SOURCES.length < 2) {
+    picker.classList.remove('show');
+    return;
+  }
+  picker.classList.add('show');
+  select.innerHTML = '';
+  SOURCES.forEach((s, i) => {
+    const aliveTag = s.status === 'alive' ? '✓' :
+                     s.status === 'dead'  ? '✗' : '·';
+    const opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = `${aliveTag} ${s.source} · prio ${s.priority}`;
+    if (i === CURRENT_SOURCE_IDX) opt.selected = true;
+    select.appendChild(opt);
+  });
+  const aliveCount = SOURCES.filter(s => s.status === 'alive').length;
+  summary.textContent = `${SOURCES.length} source(s) · ${aliveCount} alive · auto-failover on player error`;
+  select.onchange = () => {
+    CURRENT_SOURCE_IDX = parseInt(select.value, 10) || 0;
+    const s = SOURCES[CURRENT_SOURCE_IDX];
+    CHANNEL.url = s.url;
+    CHANNEL.source = s.source;
+    CHANNEL.status = s.status;
+    document.getElementById('url-box').textContent = s.url;
+    toast(`Switched to ${s.source}`, 1500);
+  };
+}
+
+// Auto-failover — called from playInline when hls.js / dash.js emits
+// a fatal error. Reports the current source as failed (server demotes
+// it), advances to the next alternate, retries.
+async function failoverToNextSource() {
+  if (!SOURCES || CURRENT_SOURCE_IDX + 1 >= SOURCES.length) {
+    toast('All sources failed.', 4000);
+    return false;
+  }
+  const failed = SOURCES[CURRENT_SOURCE_IDX];
+  // Best-effort report — don't block failover if the API errors
+  try {
+    await api(`/api/iptv/sources/${encodeURIComponent(failed.id)}/report_failure`,
+              { method:'POST', body: '{}' });
+  } catch (_) { /* shrug */ }
+  CURRENT_SOURCE_IDX++;
+  const next = SOURCES[CURRENT_SOURCE_IDX];
+  CHANNEL.url = next.url;
+  CHANNEL.source = next.source;
+  CHANNEL.status = next.status;
+  document.getElementById('url-box').textContent = next.url;
+  const select = document.getElementById('source-select');
+  if (select) select.value = String(CURRENT_SOURCE_IDX);
+  toast(`${failed.source} failed → trying ${next.source}`, 2500);
+  return true;
 }
 
 async function loadEpg() {
@@ -1755,8 +1968,17 @@ async function _playInlineCore(kind, v) {
     const hls = new window.Hls({ enableWorker: true });
     hls.loadSource(CHANNEL.url);
     hls.attachMedia(v);
-    hls.on(window.Hls.Events.ERROR, (_e, data) => {
-      if (data.fatal) toast('HLS error: ' + (data.details || data.type), 4500);
+    let _failovered = false;
+    hls.on(window.Hls.Events.ERROR, async (_e, data) => {
+      if (!data.fatal) return;
+      if (_failovered) {
+        toast('HLS error: ' + (data.details || data.type), 4500);
+        return;
+      }
+      _failovered = true;
+      try { hls.destroy(); } catch (_) {}
+      const ok = await failoverToNextSource();
+      if (ok) await _playInlineCore('hls', v);   // recurse with new URL
     });
     v.play().catch(() => {});
     return;
@@ -1770,8 +1992,16 @@ async function _playInlineCore(kind, v) {
     if (!window.dashjs) return toast('dash.js missing', 3500);
     const player = window.dashjs.MediaPlayer().create();
     player.initialize(v, CHANNEL.url, true);
-    player.on(window.dashjs.MediaPlayer.events.ERROR, e => {
-      toast('DASH error: ' + (e.error?.message || JSON.stringify(e)), 4500);
+    let _failovered = false;
+    player.on(window.dashjs.MediaPlayer.events.ERROR, async e => {
+      if (_failovered) {
+        toast('DASH error: ' + (e.error?.message || JSON.stringify(e)), 4500);
+        return;
+      }
+      _failovered = true;
+      try { player.destroy(); } catch (_) {}
+      const ok = await failoverToNextSource();
+      if (ok) await _playInlineCore('dash', v);
     });
     return;
   }

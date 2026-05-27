@@ -420,6 +420,101 @@ async def iptv_report_source_failure(source_id: str, request: Request):
     return {"ok": True, "source_id": source_id, "status": "dead"}
 
 
+class CurateBody(BaseModel):
+    name:       str | None = None        # override (default = current name)
+    country:    str | None = None        # override (default = current country)
+    categories: list[str] | None = None  # override (default = current cats)
+    aliases:    list[str] | None = None  # extra aliases to add
+    extra_source_ids: list[str] | None = None  # add sources beyond current
+    priority_overrides: dict[str, int] | None = None
+
+
+@router.post("/api/iptv/channels/{channel_id}/curate")
+async def iptv_curate_channel(channel_id: str, body: CurateBody, request: Request):
+    """Add the logical channel to data/channel_aliases.yaml (curated
+    overrides). Owner-only. Idempotent — re-curating an already-curated
+    channel updates its entry. Body is mostly optional: if omitted,
+    we infer everything from the current logical_channel + its sources.
+
+    After the YAML mutation, dedup runs synchronously so the new
+    curated state takes effect immediately (no container restart)."""
+    payload = await _verify_iptv(request)
+    _mini.require_scope(payload, "*")   # owner-only — beta users can't edit YAML
+
+    # Look up the current logical channel + its sources
+    import aiosqlite
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT id, name, country, categories, logo, aliases, is_curated "
+            "  FROM logical_channels WHERE id = ?", (channel_id,))
+        ch = await cur.fetchone()
+    if not ch:
+        raise HTTPException(status_code=404, detail="channel not found")
+    sources = await _dedup.list_sources_for_channel(channel_id)
+    if not sources:
+        raise HTTPException(status_code=400, detail="channel has no sources to pin")
+
+    # Build the YAML entry — body wins over current state where set.
+    cur_aliases = []
+    try:
+        cur_aliases = json.loads(ch["aliases"] or "[]")
+    except Exception:
+        pass
+    name       = (body.name or ch["name"] or channel_id).strip()
+    country    = ((body.country or ch["country"] or "") or "").upper() or None
+    categories = body.categories
+    if categories is None:
+        categories = [c for c in (ch["categories"] or "").split(",") if c]
+    new_aliases = list({a for a in (cur_aliases + (body.aliases or [])) if a})
+    if name not in new_aliases:
+        new_aliases.insert(0, name)
+    src_ids = [s["id"] for s in sources]
+    for sid in (body.extra_source_ids or []):
+        if sid not in src_ids:
+            src_ids.append(sid)
+    prio = body.priority_overrides or {}
+
+    # Read existing YAML — preserve commenting + key ordering by using
+    # ruamel.yaml if available, else PyYAML (which strips comments). We
+    # only commit to PyYAML since it's already a deployed dep.
+    import yaml
+    from pathlib import Path
+    yaml_path = Path("/app/data/channel_aliases.yaml")
+    try:
+        text = yaml_path.read_text(encoding="utf-8")
+        data = yaml.safe_load(text) or {"channels": {}}
+    except FileNotFoundError:
+        data = {"channels": {}}
+    if "channels" not in data:
+        data["channels"] = {}
+    entry: dict = {
+        "name":    name,
+        "country": country,
+        "aliases": new_aliases,
+        "categories": categories or [],
+        "sources": src_ids,
+    }
+    if prio:
+        entry["priority_overrides"] = {k: int(v) for k, v in prio.items()}
+    data["channels"][channel_id] = entry
+
+    # Write back. The PyYAML default order isn't guaranteed but
+    # `sort_keys=False` preserves dict insertion order (Python 3.7+).
+    new_text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True,
+                               default_flow_style=False)
+    yaml_path.write_text(new_text, encoding="utf-8")
+
+    # Re-run dedup so the curated status takes effect immediately.
+    summary = await _dedup.run_dedup()
+    return {
+        "ok": True,
+        "channel_id": channel_id,
+        "curated_entry": entry,
+        "dedup_summary": summary,
+    }
+
+
 @router.post("/api/iptv/dedup/run")
 async def iptv_dedup_run(request: Request):
     """Manually re-run the dedup pipeline. Owner-only — beta users
@@ -1606,6 +1701,7 @@ _PLAY_HTML = r"""<!doctype html>
     <button class="ghost" id="play-vlc">📤 Open in VLC / external player</button>
     <button class="ghost" id="copy-url">📋 Copy stream URL</button>
     <button class="ghost" id="probe-btn">🩺 Probe stream health</button>
+    <button class="ghost" id="curate-btn" style="display:none">★ Curate this channel</button>
     <button class="warn" id="record-btn">⏺ Record 5 min</button>
   </div>
 
@@ -1733,6 +1829,7 @@ async function loadChannel() {
   }
   document.getElementById('url-box').textContent = CHANNEL.url || '(no URL)';
   renderSourcePicker();
+  _refreshCurateButton();
   maybeShowExitWarning();
   loadEpg();
 }
@@ -2045,6 +2142,45 @@ document.getElementById('probe-btn').addEventListener('click', async () => {
     toast('Probe failed: ' + e.message, 3500);
   } finally {
     btn.disabled = false; btn.textContent = '🩺 Probe stream health';
+  }
+});
+
+// ── ★ Curate this channel (owner-only) ──────────────────────────
+// Visible only on logical-channel pages (not legacy source-prefixed
+// IDs). Toggles depending on current curated state. The endpoint
+// returns 403 for beta users; the catch surfaces a friendly toast.
+function _refreshCurateButton() {
+  const btn = document.getElementById('curate-btn');
+  if (!btn) return;
+  const isLogical = !CHANNEL_ID.includes(':');
+  if (!isLogical) { btn.style.display = 'none'; return; }
+  btn.style.display = '';
+  const alreadyCurated = !!(CHANNEL && CHANNEL.is_curated);
+  btn.textContent = alreadyCurated
+    ? '★ Re-save curated entry'
+    : '★ Curate this channel';
+}
+
+document.getElementById('curate-btn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('curate-btn');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = '★ Saving…';
+  try {
+    const r = await api(`/api/iptv/channels/${encodeURIComponent(CHANNEL_ID)}/curate`, {
+      method: 'POST', body: JSON.stringify({}),
+    });
+    const entry = r.curated_entry || {};
+    toast(`★ Curated: ${entry.name || CHANNEL_ID} (${(entry.sources||[]).length} sources)`, 4500);
+    // Reload channel detail so the badges reflect curated=true
+    await loadChannel();
+  } catch (e) {
+    if (/403/.test(e.message)) {
+      toast('Owner-only — beta users can\\'t edit the curated YAML', 4000);
+    } else {
+      toast('Curate failed: ' + e.message, 4000);
+    }
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
   }
 });
 

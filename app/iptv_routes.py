@@ -569,13 +569,34 @@ const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 const initData = tg?.initData || '';
 
-const state = {
-  country: null,
-  category: null,
-  source: null,
-  status: null,    // null=any, 'alive'=only alive-probed
-  q: '',
-};
+const STATE_KEY = 'smdl_iptv_filters_v1';
+const _defaultState = { country: null, category: null, source: null, status: null, q: '' };
+// Hydrate from localStorage so filters survive across page reloads
+// (e.g. tap a channel → land on /iptv/play/... → hit Back → drawer
+// still shows the country chip you'd picked).
+const state = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STATE_KEY) || 'null');
+    return saved ? Object.assign({}, _defaultState, saved) : Object.assign({}, _defaultState);
+  } catch { return Object.assign({}, _defaultState); }
+})();
+function _persistState() {
+  try { localStorage.setItem(STATE_KEY, JSON.stringify(state)); } catch {}
+}
+
+// Country display-name + sort helpers. Modern Intl.DisplayNames maps
+// "SG" → "Singapore", "US" → "United States", etc. — used for both the
+// chip label and the alphabetical ordering. Falls back to the raw code
+// if the runtime doesn't support it (very old WebView).
+const _COUNTRY_DN = (() => {
+  try { return new Intl.DisplayNames(['en'], { type: 'region' }); }
+  catch { return null; }
+})();
+function countryName(code) {
+  if (!code) return '';
+  try { return _COUNTRY_DN ? (_COUNTRY_DN.of(code.toUpperCase()) || code) : code; }
+  catch { return code; }
+}
 
 const SOURCE_LABELS = {
   'iptv-org':       'iptv-org',
@@ -733,9 +754,16 @@ async function loadFilters() {
   const cc = document.getElementById('country-chips');
   cc.innerHTML = '';
   cc.appendChild(makeChip('All', null, state.country === null, 'country'));
-  for (const c of countries.slice(0, 60)) {
-    cc.appendChild(makeChip(`${flag(c.code)} ${c.code} (${c.count})`,
-                              c.code, state.country === c.code, 'country'));
+  // Sort by full display name (Singapore, United States, ...) rather
+  // than by channel count — easier to find a specific country in a
+  // 100+ entry list. Top entries used to be 🇺🇸 US (1462) → useless if
+  // you actually want 🇸🇬 SG. Counts stay on the chip for context.
+  const sortedCountries = countries.slice().sort((a, b) =>
+    countryName(a.code).localeCompare(countryName(b.code)));
+  for (const c of sortedCountries) {
+    const name = countryName(c.code);
+    const label = `${flag(c.code)} ${name === c.code ? c.code : name + ' · ' + c.code} (${c.count})`;
+    cc.appendChild(makeChip(label, c.code, state.country === c.code, 'country'));
   }
   const catc = document.getElementById('category-chips');
   catc.innerHTML = '';
@@ -752,6 +780,7 @@ function makeChip(label, value, active, kind) {
   el.textContent = label;
   el.addEventListener('click', () => {
     state[kind] = value;
+    _persistState();
     loadChannels();
     document.querySelectorAll(`#${kind}-chips .chip`).forEach(c => c.classList.remove('active'));
     el.classList.add('active');
@@ -814,6 +843,7 @@ async function loadChannels() {
 
 document.getElementById('search')?.addEventListener('input', (e) => {
   state.q = e.target.value;
+  _persistState();
   clearTimeout(window.__qt);
   window.__qt = setTimeout(loadChannels, 200);
 });
@@ -861,6 +891,7 @@ document.getElementById('refresh-top-btn')?.addEventListener('click', () => {
 document.getElementById('alive-only-btn')?.addEventListener('click', (e) => {
   state.status = state.status === 'alive' ? null : 'alive';
   e.currentTarget.textContent = `✓ Alive only: ${state.status === 'alive' ? 'on' : 'off'}`;
+  _persistState();
   loadChannels();
 });
 
@@ -942,6 +973,13 @@ function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s); }
 
+// Restore saved-state visual cues before the first paint.
+(function _hydrateUi() {
+  const s = document.getElementById('search');
+  if (s && state.q) s.value = state.q;
+  const ab = document.getElementById('alive-only-btn');
+  if (ab) ab.textContent = `✓ Alive only: ${state.status === 'alive' ? 'on' : 'off'}`;
+})();
 loadFilters();
 loadChannels();
 </script>

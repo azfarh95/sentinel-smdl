@@ -59,29 +59,37 @@ class IptvChannel:
     last_check_at: str | None
     last_error: str | None
     source: str         # 'iptv-org' | 'free-tv' | 'mjh-all' — which catalogue
+    probe_count: int    # cumulative count of probes — drives reliability %
+    alive_count: int    # cumulative count of probes that returned alive
 
     @classmethod
     def from_row(cls, r: aiosqlite.Row) -> "IptvChannel":
-        # `logo` + `source` are added by later migrations; tolerate older
-        # rows where one or both are missing.
-        try:
-            logo = r["logo"]
-        except (IndexError, KeyError):
-            logo = None
-        try:
-            source = r["source"] or "iptv-org"
-        except (IndexError, KeyError):
-            source = "iptv-org"
+        # `logo` + `source` + probe stats are added by later migrations;
+        # tolerate older rows where some are missing.
+        def _opt(name, default):
+            try: v = r[name]
+            except (IndexError, KeyError): return default
+            return v if v is not None else default
         return cls(
             id=r["id"], name=r["name"], country=r["country"],
             languages=r["languages"], categories=r["categories"],
-            url=r["url"], logo=logo, is_nsfw=bool(r["is_nsfw"]),
+            url=r["url"], logo=_opt("logo", None), is_nsfw=bool(r["is_nsfw"]),
             alive=(None if r["alive"] is None else bool(r["alive"])),
             status=r["status"], last_check_at=r["last_check_at"],
-            last_error=r["last_error"], source=source,
+            last_error=r["last_error"], source=_opt("source", "iptv-org"),
+            probe_count=int(_opt("probe_count", 0)),
+            alive_count=int(_opt("alive_count", 0)),
         )
 
+    def reliability(self) -> float | None:
+        """Fraction of historical probes that returned alive. None when
+        we don't have enough samples to be meaningful (n < 3)."""
+        if self.probe_count < 3:
+            return None
+        return self.alive_count / self.probe_count
+
     def to_dict(self) -> dict:
+        rel = self.reliability()
         return {
             "id": self.id, "name": self.name, "country": self.country,
             "languages": (self.languages or "").split(",") if self.languages else [],
@@ -89,6 +97,8 @@ class IptvChannel:
             "url": self.url, "logo": self.logo, "is_nsfw": self.is_nsfw, "alive": self.alive,
             "status": self.status, "last_check_at": self.last_check_at,
             "last_error": self.last_error, "source": self.source,
+            "probe_count": self.probe_count, "alive_count": self.alive_count,
+            "reliability": rel,
         }
 
 
@@ -126,12 +136,15 @@ async def init_iptv_schema() -> None:
                 last_seen_at  TEXT NOT NULL
             )
         """)
-        # Migrations: add `logo` + `source` columns to pre-existing installs.
-        # SQLite ALTER is cheap when the column is missing; otherwise swallow
-        # the "duplicate column name" error.
+        # Migrations: add `logo`, `source`, and reliability-tracking
+        # columns to pre-existing installs. SQLite ALTER is cheap when
+        # the column is missing; otherwise swallow the "duplicate column
+        # name" error.
         for sql in (
             "ALTER TABLE iptv_channels ADD COLUMN logo TEXT",
             "ALTER TABLE iptv_channels ADD COLUMN source TEXT NOT NULL DEFAULT 'iptv-org'",
+            "ALTER TABLE iptv_channels ADD COLUMN probe_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE iptv_channels ADD COLUMN alive_count INTEGER NOT NULL DEFAULT 0",
         ):
             try:
                 await conn.execute(sql)
@@ -1000,9 +1013,18 @@ _probe_all_state: dict = {
     "checked": 0,
     "alive": 0,
     "dead": 0,
+    "skipped_fresh": 0,
     "last_channel": "",
     "scope": "",
+    # Per-source breakdown: {source_id → {checked, alive, dead, total}}.
+    # Initialised from the in-scope channel set at sweep start.
+    "by_source": {},
 }
+
+
+def _source_of_cid(channel_id: str) -> str:
+    """Channel ids are `<source>:<slug>` — strip the slug to get the source."""
+    return channel_id.split(":", 1)[0] if ":" in channel_id else channel_id
 
 
 def probe_all_status() -> dict:
@@ -1037,9 +1059,20 @@ def _is_probe_fresh(channel: "IptvChannel", window_hours: int) -> bool:
         return False
 
 
+_PROBE_UPDATE_SQL = (
+    "UPDATE iptv_channels "
+    "   SET status=?, last_check_at=?, last_error=?, alive=?, "
+    "       probe_count = probe_count + 1, "
+    "       alive_count = alive_count + ? "
+    " WHERE id=?"
+)
+
+
 async def _probe_db_writer(queue: asyncio.Queue) -> int:
     """Consumes probe results from the queue and batch-writes them.
-    Exits when it sees the sentinel None. Returns total rows written."""
+    Exits when it sees the sentinel None. Returns total rows written.
+    Each row also increments probe_count + alive_count atomically — the
+    reliability fraction (alive/probe) is derived per channel."""
     written = 0
     batch: list[tuple] = []
     async with aiosqlite.connect(db.DB_PATH) as conn:
@@ -1047,12 +1080,10 @@ async def _probe_db_writer(queue: asyncio.Queue) -> int:
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=2.0)
             except asyncio.TimeoutError:
-                item = "FLUSH"   # sentinel for "no new items, just flush"
-            if item is None:    # caller signalled "done"
+                item = "FLUSH"
+            if item is None:
                 if batch:
-                    await conn.executemany(
-                        "UPDATE iptv_channels SET status=?, last_check_at=?, "
-                        "last_error=?, alive=? WHERE id=?", batch)
+                    await conn.executemany(_PROBE_UPDATE_SQL, batch)
                     await conn.commit()
                     written += len(batch)
                 return written
@@ -1060,9 +1091,7 @@ async def _probe_db_writer(queue: asyncio.Queue) -> int:
                 batch.append(item)
             if len(batch) >= PROBE_DB_BATCH_SIZE or item == "FLUSH":
                 if batch:
-                    await conn.executemany(
-                        "UPDATE iptv_channels SET status=?, last_check_at=?, "
-                        "last_error=?, alive=? WHERE id=?", batch)
+                    await conn.executemany(_PROBE_UPDATE_SQL, batch)
                     await conn.commit()
                     written += len(batch)
                     batch.clear()
@@ -1092,6 +1121,14 @@ async def _probe_all_worker(
             chans = all_chans
             skipped = 0
 
+        # Initialise per-source totals from the in-scope set so the UI
+        # can render a progress row per source bucket from t=0.
+        by_source: dict[str, dict] = {}
+        for c in chans:
+            sid = _source_of_cid(c.id)
+            b = by_source.setdefault(sid, {"checked": 0, "alive": 0, "dead": 0, "total": 0})
+            b["total"] += 1
+
         _probe_all_state.update({
             "running": True,
             "started_at": _iso_now(),
@@ -1102,6 +1139,7 @@ async def _probe_all_worker(
             "skipped_fresh": skipped,
             "last_channel": "",
             "scope": f"source={source or 'all'} country={country or 'all'} force={force_recheck}",
+            "by_source": by_source,
         })
         if not chans:
             return
@@ -1132,9 +1170,19 @@ async def _probe_all_worker(
                 else:
                     _probe_all_state["dead"] += 1
                 _probe_all_state["checked"] += 1
+                # Per-source breakdown (added in batch 2 for the UI display).
+                src_bucket = _probe_all_state["by_source"].setdefault(
+                    _source_of_cid(cid),
+                    {"checked": 0, "alive": 0, "dead": 0, "total": 0},
+                )
+                src_bucket["checked"] += 1
+                if status == "alive":
+                    src_bucket["alive"] += 1
+                else:
+                    src_bucket["dead"] += 1
+                alive_inc = 1 if status == "alive" else 0
                 await write_queue.put(
-                    (status, _iso_now(), err,
-                     1 if status == "alive" else 0, cid)
+                    (status, _iso_now(), err, alive_inc, alive_inc, cid)
                 )
 
         try:
@@ -1289,13 +1337,11 @@ async def probe_channel(channel_id: str, timeout_s: float = 7.0) -> IptvChannel:
         raise KeyError(f"channel {channel_id} not found or has no URL")
     status, err = await _probe_url_only(ch.url, timeout_s=timeout_s)
     now = _iso_now()
+    alive_inc = 1 if status == "alive" else 0
     async with aiosqlite.connect(db.DB_PATH) as conn:
         await conn.execute(
-            """UPDATE iptv_channels
-                   SET status = ?, last_check_at = ?, last_error = ?,
-                       alive = ?
-                 WHERE id = ?""",
-            (status, now, err, 1 if status == "alive" else 0, channel_id),
+            _PROBE_UPDATE_SQL,
+            (status, now, err, alive_inc, alive_inc, channel_id),
         )
         await conn.commit()
     refreshed = await get_channel(channel_id)

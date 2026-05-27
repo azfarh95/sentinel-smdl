@@ -927,18 +927,32 @@ document.getElementById('probe-all-btn')?.addEventListener('click', async () => 
     _probeTimer = setInterval(async () => {
       try {
         const s = await api('/api/iptv/probe_all/status');
+        const skipNote = s.skipped_fresh ? ` · skipped ${s.skipped_fresh} fresh` : '';
+        const byLines = (() => {
+          const bs = s.by_source || {};
+          const rows = Object.entries(bs)
+            .sort((a,b) => (b[1].total - a[1].total))
+            .slice(0, 8)
+            .map(([sid, b]) => {
+              const pct = b.total ? Math.floor(100 * b.checked / b.total) : 0;
+              return `<div style="opacity:.85">${escapeHtml(sourceLabel(sid))}: ${b.checked}/${b.total} (${pct}%) · ✓${b.alive} ✗${b.dead}</div>`;
+            }).join('');
+          return rows ? `<div style="margin-top:6px; font-size:10px; line-height:1.6">${rows}</div>` : '';
+        })();
         if (!s.running && s.checked >= s.total && s.total > 0) {
-          statusEl.textContent = `Sweep complete · ${s.alive} alive · ${s.dead} dead (${s.scope})`;
+          statusEl.innerHTML = `Sweep complete · ${s.alive} alive · ${s.dead} dead${skipNote}` + byLines;
           clearInterval(_probeTimer); _probeTimer = null;
           btn.disabled = false; btn.textContent = orig;
           loadChannels();
         } else if (!s.running && s.total === 0) {
-          statusEl.textContent = 'No channels in scope to probe.';
+          statusEl.innerHTML = `No channels needed re-probing${skipNote ? ' (' + skipNote.trim() + ')' : ''}.`;
           clearInterval(_probeTimer); _probeTimer = null;
           btn.disabled = false; btn.textContent = orig;
         } else {
           const pct = s.total ? Math.floor(100 * s.checked / s.total) : 0;
-          statusEl.textContent = `Probing… ${s.checked}/${s.total} (${pct}%) · alive ${s.alive} · dead ${s.dead} · last: ${s.last_channel || '—'}`;
+          statusEl.innerHTML =
+            `Probing… ${s.checked}/${s.total} (${pct}%) · alive ${s.alive} · dead ${s.dead}${skipNote} · last: ${escapeHtml(s.last_channel || '—')}` +
+            byLines;
         }
       } catch (_e) { /* keep polling */ }
     }, 1200);
@@ -1182,6 +1196,14 @@ async function loadChannel() {
   if (CHANNEL.alive === false) badge('iptv-org: offline', 'dead');
   if (CHANNEL.last_check_at) badge('checked ' + CHANNEL.last_check_at.slice(0,16));
   if (CHANNEL.is_nsfw) badge('NSFW', 'dead');
+  // Historical reliability (alive_count / probe_count over time).
+  // Only meaningful once we have ≥3 samples; null hides the badge.
+  if (CHANNEL.reliability !== null && CHANNEL.reliability !== undefined) {
+    const pct = Math.round(CHANNEL.reliability * 100);
+    const cls = pct >= 90 ? 'alive' : (pct >= 50 ? '' : 'dead');
+    const icon = pct >= 90 ? '🔥' : (pct >= 50 ? '⚡' : '⚠');
+    badge(`${icon} reliability ${pct}% (n=${CHANNEL.probe_count})`, cls);
+  }
   document.getElementById('url-box').textContent = CHANNEL.url || '(no URL)';
   maybeShowExitWarning();
   loadEpg();

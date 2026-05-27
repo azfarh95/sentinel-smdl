@@ -756,11 +756,8 @@ document.getElementById('refresh-btn').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('filter-sg-btn').addEventListener('click', () => {
-  state.country = 'SG';
-  loadFilters();
-  loadChannels();
-});
+// (filter-sg-btn was removed in the probe-all / alive-only refactor —
+// the SG country chip + 🇸🇬 Refresh SG button below cover the same UX.)
 
 // "Alive only" filter — toggles state.status between null and 'alive'.
 // Only meaningful after a probe-all sweep has populated `status`.

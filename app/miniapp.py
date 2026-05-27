@@ -190,6 +190,9 @@ def _issue_apk_cookie() -> str:
 
 
 def _verify_apk_cookie(val: str) -> bool:
+    """Legacy v1 cookie check — kept for backwards compat with anything
+    still calling it directly. New code should use _parse_session_cookie
+    (which handles both v1 and v2 via the auth_v2 helper)."""
     if not val or not OWNER_AUTH_TOKEN:
         return False
     try:
@@ -203,14 +206,34 @@ def _verify_apk_cookie(val: str) -> bool:
         return False
 
 
-def _owner_payload_from_cookie() -> dict:
-    """Synthesise the payload that downstream guards expect, treating the
-    cookie-bearer as the owner. Mirrors the shape of a real initData payload."""
+def _parse_session_cookie(val: str) -> dict | None:
+    """Return the v2 auth_v2-parsed payload if the cookie is valid + not
+    expired, else None. Handles BOTH v1 (legacy owner-only, scopes=['*'])
+    and v2 (scoped beta users). Per auth-perms-v2 §6."""
+    if not val or not OWNER_AUTH_TOKEN:
+        return None
+    try:
+        from .auth_v2 import parse_session_cookie
+        payload = parse_session_cookie(val, OWNER_AUTH_TOKEN)
+    except Exception:
+        return None
+    if payload.get("expired"):
+        return None
+    return payload
+
+
+def _owner_payload_from_cookie(session: dict | None = None) -> dict:
+    """Synthesise the FastAPI-route payload that downstream guards expect.
+    Mirrors the shape of a real initData payload (user.id) and additionally
+    embeds the parsed session (auth_v2) at payload['session'] so per-route
+    require_scope() checks can read it without re-parsing the cookie."""
     owner = _cfg_get("owner_chat_id")
     if owner is None:
-        # Fall back to env (OWNER_CHAT_ID) if config file hasn't loaded yet.
         owner = os.environ.get("OWNER_CHAT_ID", "")
-    return {"user": {"id": int(owner)} if owner else {}}
+    out: dict = {"user": {"id": int(owner)} if owner else {}}
+    if session is not None:
+        out["session"] = session
+    return out
 
 
 async def _verify(request: Request) -> dict:
@@ -218,15 +241,21 @@ async def _verify(request: Request) -> dict:
     routes must call _require_owner(payload) themselves on top of this.
 
     Auth precedence:
-      1. Cookie `sentinel_apk_session` (signed with OWNER_AUTH_TOKEN) — APK path
+      1. Cookie `sentinel_apk_session` (v1 owner or v2 scoped) — APK path
       2. `X-Init-Data` header (Telegram WebApp) — Mini App path
-    """
-    # Path 1 — APK cookie (covers Suite APK opening this domain directly).
-    if _verify_apk_cookie(request.cookies.get(COOKIE_NAME, "")):
-        payload = _owner_payload_from_cookie()
+
+    Returns a payload dict with `user.id` plus (for cookie-auth paths) a
+    `session` field carrying the parsed v1/v2 cookie — used by
+    require_scope() to enforce per-route permissions."""
+    # Path 1 — session cookie (v1 owner OR v2 scoped beta user).
+    cookie_val = request.cookies.get(COOKIE_NAME, "")
+    session = _parse_session_cookie(cookie_val)
+    if session is not None:
+        payload = _owner_payload_from_cookie(session)
         if payload["user"].get("id"):
             return payload
-        # If owner_chat_id isn't configured we can't synthesise — fall through.
+        # If owner_chat_id isn't configured we can't synthesise the
+        # Telegram-style user.id — fall through to initData path.
 
     # Path 2 — Telegram initData (Mini App opened from inside Telegram).
     # bot.py reads SMDL_BOT_TOKEN — keep this in sync. Fall back to the
@@ -242,7 +271,22 @@ async def _verify(request: Request) -> dict:
     init_data = request.headers.get("x-init-data") or ""
     payload = _validate_init_data(init_data, bot_token)
     await _check_access(payload)
+    # initData auth implies owner — synthesise a wildcard session so
+    # require_scope() lets everything through.
+    payload["session"] = {
+        "version": "initdata", "user_id": "owner",
+        "scopes": ["*"], "jti": "", "iat": 0, "expired": False,
+    }
     return payload
+
+
+def require_scope(payload: dict, scope: str) -> None:
+    """Per-route scope enforcement. Raises HTTPException(403) if the
+    payload's session doesn't grant the required scope. No-op for
+    payloads with the wildcard '*' (owner cookie, initData)."""
+    from .auth_v2 import require_scope as _rs
+    session = payload.get("session") or {"scopes": ["*"]}
+    _rs(session, scope)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

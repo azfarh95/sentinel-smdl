@@ -40,11 +40,21 @@ import aiosqlite
 
 from . import database as _db
 from . import iptv as _iptv
-from . import miniapp as _mini   # reuse _verify
+from . import miniapp as _mini   # reuse _verify + require_scope
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# All IPTV routes require the same scope. Owner cookie + initData both
+# carry the wildcard '*' scope, so this is a no-op for owner access;
+# beta users without 'smdl.iptv' in their scopes_b64 get HTTP 403 here.
+# Per spec docs/auth-perms-v2.md §6.
+async def _verify_iptv(request: Request) -> dict:
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.iptv")
+    return payload
 
 
 # ── JSON ────────────────────────────────────────────────────────────
@@ -60,7 +70,7 @@ class RefreshBody(BaseModel):
 async def iptv_refresh(body: RefreshBody, request: Request):
     """Refresh one source (if body.source is set) or all sources (if not).
     Returns a per-source summary list."""
-    await _mini._verify(request)
+    await _verify_iptv(request)
     summaries: list[dict] = []
     try:
         if body.source is None:
@@ -102,7 +112,7 @@ async def iptv_sources(request: Request):
     count=0 are skipped (e.g. mjh-all, which is fetch-only — its rows
     fan out to mjh-radio/au/nz/sky-fast/other). Anything not in static
     SOURCES gets a synthesised friendly name."""
-    await _mini._verify(request)
+    await _verify_iptv(request)
     counts = await _iptv.source_counts()
     out = []
     seen: set[str] = set()
@@ -138,7 +148,7 @@ class RefreshCountryBody(BaseModel):
 @router.post("/api/iptv/refresh_country")
 async def iptv_refresh_country(body: RefreshCountryBody, request: Request):
     """Refresh ONE iptv-org per-country slice (cheap, sub-second)."""
-    await _mini._verify(request)
+    await _verify_iptv(request)
     try:
         summary = await _iptv.refresh_iptv_org_country(body.country)
     except KeyError:
@@ -153,7 +163,7 @@ async def iptv_refresh_country(body: RefreshCountryBody, request: Request):
 
 @router.get("/api/iptv/countries")
 async def iptv_countries(request: Request):
-    await _mini._verify(request)
+    await _verify_iptv(request)
     async with aiosqlite.connect(_db.DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
         cur = await conn.execute("""
@@ -173,7 +183,7 @@ async def iptv_countries(request: Request):
 
 @router.get("/api/iptv/categories")
 async def iptv_categories(request: Request):
-    await _mini._verify(request)
+    await _verify_iptv(request)
     # categories is a comma-joined column — explode in Python (sqlite doesn't
     # have STRING_SPLIT). With ~7k rows this is fine.
     async with aiosqlite.connect(_db.DB_PATH) as conn:
@@ -199,7 +209,7 @@ async def iptv_channels(
     q: str | None = None,
     limit: int = 200,
 ):
-    await _mini._verify(request)
+    await _verify_iptv(request)
     chans = await _iptv.list_channels(
         country=country, status=status, category=category,
         source=source, q=q, limit=int(limit),
@@ -213,7 +223,7 @@ async def iptv_whereami(request: Request):
     Cloudflare's CF-IPCountry / CF-Connecting-IP headers when present.
     Falls back to the raw client.host when called directly (e.g. local
     LAN). Drives the per-channel "exit mismatch" warning."""
-    await _mini._verify(request)
+    await _verify_iptv(request)
     cf_country = request.headers.get("cf-ipcountry") or None
     cf_ip      = request.headers.get("cf-connecting-ip") or None
     client_ip  = request.client.host if request.client else None
@@ -228,7 +238,7 @@ async def iptv_whereami(request: Request):
 async def iptv_channel_get(channel_id: str, request: Request):
     """Direct lookup by primary key — the play page uses this so it
     doesn't fight the (country, name) ORDER BY + LIMIT clause."""
-    await _mini._verify(request)
+    await _verify_iptv(request)
     ch = await _iptv.get_channel(channel_id)
     if not ch:
         raise HTTPException(status_code=404, detail="channel not found")
@@ -246,7 +256,7 @@ async def iptv_channel_resolve_url(channel_id: str, request: Request):
     to get the current m3u8 manifest (YouTube live URLs are signed
     and rotate; can't store them statically). Results cached in-memory
     for 30 min so rapid taps don't fan out to multiple yt-dlp procs."""
-    await _mini._verify(request)
+    await _verify_iptv(request)
     ch = await _iptv.get_channel(channel_id)
     if not ch or not ch.url:
         raise HTTPException(status_code=404, detail="channel not found / no URL")
@@ -275,7 +285,7 @@ class ProbeAllBody(BaseModel):
 async def iptv_probe_all(body: ProbeAllBody, request: Request):
     """Kick off a background sweep that probes every channel in scope.
     Returns immediately; poll /api/iptv/probe_all/status for progress."""
-    await _mini._verify(request)
+    await _verify_iptv(request)
     return _iptv.start_probe_all(
         source=body.source, country=body.country,
         concurrency=max(1, min(int(body.concurrency or 32), 128)),
@@ -287,7 +297,7 @@ async def iptv_probe_all(body: ProbeAllBody, request: Request):
 
 @router.get("/api/iptv/probe_all/status")
 async def iptv_probe_all_status(request: Request):
-    await _mini._verify(request)
+    await _verify_iptv(request)
     return _iptv.probe_all_status()
 
 
@@ -295,7 +305,7 @@ async def iptv_probe_all_status(request: Request):
 async def iptv_channel_epg(channel_id: str, request: Request, n: int = 3):
     """Return now + next-N programmes for the channel.  Derives the
     tvg_id from the channel id by stripping the `<source>:` prefix."""
-    await _mini._verify(request)
+    await _verify_iptv(request)
     tvg = channel_id.split(":", 1)[-1] if ":" in channel_id else channel_id
     progs = await _iptv.get_now_next(tvg, lookahead_count=max(1, min(int(n or 3), 20)))
     return {"tvg_id": tvg, "programmes": progs}
@@ -309,7 +319,7 @@ class EpgRefreshBody(BaseModel):
 async def iptv_epg_refresh(body: EpgRefreshBody, request: Request):
     """Refresh one or all EPG feeds — separate from channel refresh
     because EPG fetches are heavier (multi-MB XMLTV gz)."""
-    await _mini._verify(request)
+    await _verify_iptv(request)
     try:
         if body.source is None:
             summaries = await _iptv.refresh_all_epg()
@@ -325,7 +335,7 @@ async def iptv_epg_refresh(body: EpgRefreshBody, request: Request):
 
 @router.post("/api/iptv/channels/{channel_id}/probe")
 async def iptv_probe(channel_id: str, request: Request):
-    await _mini._verify(request)
+    await _verify_iptv(request)
     try:
         ch = await _iptv.probe_channel(channel_id)
     except KeyError:
@@ -342,7 +352,7 @@ async def iptv_record(channel_id: str, body: RecordBody, request: Request):
     """Queue an ffmpeg recording of the channel. Returns immediately;
     job lands in iptv_recordings table + the file appears in
     /downloads/iptv/. Poll GET /api/iptv/recordings for status."""
-    await _mini._verify(request)
+    await _verify_iptv(request)
     try:
         result = await _iptv.start_iptv_recording(
             channel_id, duration_min=body.duration_min or 5,
@@ -358,7 +368,7 @@ async def iptv_record(channel_id: str, body: RecordBody, request: Request):
 @router.get("/api/iptv/recordings")
 async def iptv_recordings(request: Request, limit: int = 50):
     """List queued + in-progress + finished IPTV recordings."""
-    await _mini._verify(request)
+    await _verify_iptv(request)
     return {"recordings": await _iptv.list_iptv_recordings(limit=limit)}
 
 

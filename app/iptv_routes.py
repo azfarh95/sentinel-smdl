@@ -3004,7 +3004,7 @@ document.getElementById('curate-btn')?.addEventListener('click', async () => {
     await loadChannel();
   } catch (e) {
     if (/403/.test(e.message)) {
-      toast('Owner-only — beta users can\\'t edit the curated YAML', 4000);
+      toast("Owner-only — beta users can't edit the curated YAML", 4000);
     } else {
       toast('Curate failed: ' + e.message, 4000);
     }

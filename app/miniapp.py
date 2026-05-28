@@ -2527,7 +2527,23 @@ function api(path, opts = {}) {
       'Content-Type': 'application/json',
       ...(opts.headers || {}),
     },
-  }).then(r => r.ok ? r.json() : r.json().then(j => Promise.reject(j.detail || j.error || ('HTTP '+r.status))));
+  }).then(async r => {
+    if (r.ok) return r.json();
+    // Error path: body may be JSON (FastAPI {"detail":...}), plain text
+    // (uvicorn "Internal Server Error"), or HTML (proxy error page). Read
+    // as text first so a non-JSON 5xx never raises SyntaxError at the
+    // call site — that used to surface as "SyntaxError: Unexpected token
+    // 'I', \"Internal S\"... is not valid JSON" at the top of the page.
+    const txt = await r.text();
+    let msg = 'HTTP ' + r.status;
+    try {
+      const j = JSON.parse(txt);
+      msg = j.detail || j.error || msg;
+    } catch {
+      if (txt) msg += ': ' + txt.slice(0, 120).replace(/\s+/g, ' ').trim();
+    }
+    return Promise.reject(msg);
+  });
 }
 
 function showOk(t) { const m = document.getElementById('msg'); m.className = 'msg ok'; m.textContent = t; setTimeout(()=>m.className='', 3500); }

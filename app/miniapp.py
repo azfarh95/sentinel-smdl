@@ -2269,6 +2269,26 @@ button.warn { background: #ff9500; color: #fff; }
     padding: 2px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.4px; }
 .user-row .owner-badge { background: rgba(52,199,89,0.15); color: var(--success);
     padding: 2px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.4px; }
+/* Profile Scraper — compact one-line row (replaces stacked layout, #33) */
+.scraper-row { display: flex; align-items: center; gap: 8px; padding: 6px 0;
+    border-top: 1px solid var(--separator); min-height: 36px; }
+.scraper-row:first-child { border-top: 0; }
+.scraper-row .uname { font-weight: 600; font-size: 14px; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scraper-row .chips { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.scraper-row .chip { background: var(--separator); color: var(--muted); border-radius: 10px;
+    padding: 1px 7px; font-size: 10px; font-weight: 600; letter-spacing: 0.2px; line-height: 1.5;
+    white-space: nowrap; }
+.scraper-row .chip.due { background: rgba(41,151,255,0.15); color: var(--button); }
+.scraper-row .chip.warn { background: rgba(255,149,0,0.18); color: #ff9500; }
+.scraper-row .chip.err { background: rgba(255,69,58,0.18); color: var(--destructive); }
+.scraper-row .actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.scraper-row .actions .icon-btn { background: transparent; color: var(--muted);
+    border: 1px solid var(--separator); padding: 4px 7px; font-size: 13px; line-height: 1;
+    border-radius: 6px; min-width: 30px; }
+.scraper-row .actions .icon-btn:hover { color: var(--button); border-color: var(--button); }
+.scraper-row .actions .icon-btn.primary { color: var(--success); border-color: var(--success); }
+.scraper-row .actions .icon-btn.danger { color: var(--destructive); border-color: var(--destructive); }
 .site-toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 8px 0; border-bottom: 1px solid var(--separator); }
 .site-toggle:last-child { border-bottom: 0; }
@@ -3732,41 +3752,40 @@ async function loadScraper() {
       (profByPlat[plat] || (profByPlat[plat] = [])).push(p);
     }
     const renderProfile = (p) => {
+      // Compact single-line row (#33). URL hidden in title= tooltip; error
+      // in title= on the warning chip. Counters become pills.
       const enabled = !!p.enabled;
       const dotColor = enabled ? (p.failure_count > 0 ? '#ff9500' : 'var(--success)') : 'var(--muted)';
       const uname = p.username || p.label || p.url;
-      let next = '';
+      let dueChip = '';
       if (p.next_probe_at) {
-        const npa = new Date(p.next_probe_at).getTime();
-        const mins = Math.floor((npa - Date.now()) / 60000);
-        if (mins < 0)        next = '· due now';
-        else if (mins < 60)  next = `· next ~${mins}m`;
-        else if (mins < 1440) next = `· next ~${Math.floor(mins/60)}h`;
-        else                  next = `· next ~${Math.floor(mins/1440)}d`;
+        const mins = Math.floor((new Date(p.next_probe_at).getTime() - Date.now()) / 60000);
+        let label;
+        if (mins < 0)         label = 'due now';
+        else if (mins < 60)   label = `${mins}m`;
+        else if (mins < 1440) label = `${Math.floor(mins/60)}h`;
+        else                  label = `${Math.floor(mins/1440)}d`;
+        dueChip = `<span class="chip due" title="Next probe">${label}</span>`;
       }
-      const failTag = p.failure_count > 0 ? `· ⚠${p.failure_count}` : '';
-      const lastErr = (p.failure_count > 0 && p.last_error)
-        ? `<div class=meta style="color:var(--destructive);margin-top:2px">${esc(String(p.last_error).slice(0,140))}</div>`
+      const pulledChip = `<span class="chip" title="Posts pulled so far">${p.downloaded_count || 0}↓</span>`;
+      const failChip = p.failure_count > 0
+        ? `<span class="chip err" title="${esc(String(p.last_error || '').slice(0, 220))}">⚠${p.failure_count}</span>`
         : '';
+      const u = JSON.stringify(p.url);
+      const pauseBtn = enabled
+        ? `<button class="icon-btn" title="Pause" onclick='scraperPause(${u})'>⏸</button>`
+        : `<button class="icon-btn primary" title="Resume" onclick='scraperResume(${u})'>▶</button>`;
       return `
-      <div class="user-row" style="padding:10px 0;border-top:1px solid var(--separator)">
-        <div class=grow>
-          <div class=name>
-            <span class=dot style="background:${dotColor}"></span>
-            @${esc(uname)}
-          </div>
-          <div class=meta>${p.downloaded_count || 0} pulled ${next} ${failTag}</div>
-          <div class="meta url">${esc(p.url)}</div>
-          ${lastErr}
-        </div>
-        <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
-          <button class="small sec" onclick='scraperProbeNow(${JSON.stringify(p.url)})'>🔄 Probe</button>
-          <button class="small sec" onclick='scraperBackfill(${JSON.stringify(p.url)})'>📦 Backfill</button>
-          ${enabled
-            ? `<button class="small sec" onclick='scraperPause(${JSON.stringify(p.url)})'>⏸ Pause</button>`
-            : `<button class="small" onclick='scraperResume(${JSON.stringify(p.url)})'>▶ Resume</button>`}
-          <button class="small danger" onclick='scraperRemove(${JSON.stringify(p.url)})'>🗑</button>
-        </div>
+      <div class="scraper-row" title="${esc(p.url)}">
+        <span class="dot" style="background:${dotColor};margin-right:0"></span>
+        <span class="uname">@${esc(uname)}</span>
+        <span class="chips">${pulledChip}${dueChip}${failChip}</span>
+        <span class="actions">
+          <button class="icon-btn" title="Probe now" onclick='scraperProbeNow(${u})'>🔄</button>
+          <button class="icon-btn" title="Backfill from oldest" onclick='scraperBackfill(${u})'>📦</button>
+          ${pauseBtn}
+          <button class="icon-btn danger" title="Remove" onclick='scraperRemove(${u})'>🗑</button>
+        </span>
       </div>`;
     };
     const igRows  = (profByPlat.instagram || []).map(renderProfile).join('');

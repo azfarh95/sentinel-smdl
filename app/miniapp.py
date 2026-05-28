@@ -3940,7 +3940,7 @@ async function saveAdminModeReason() {
 }
 
 async function banUser(chat_id) {
-  if (!confirm('Revoke this user\'s access? They will lose all SMDL access.')) return;
+  if (!confirm("Revoke this user's access? They will lose all SMDL access.")) return;
   const reason = prompt('Reason (optional, internal):') || '';
   try {
     await api('/api/miniapp/admin/users/ban', {

@@ -1408,14 +1408,38 @@ HTML = """<!doctype html>
   --success: #34c759;
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-body { margin: 0; padding: 0; font: 15px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
-       background: var(--bg); color: var(--fg); padding-bottom: 70px; min-height: 100vh; }
-.tabbar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--section);
-          border-top: 1px solid var(--separator); display: flex; height: 58px; z-index: 10; }
-.tab { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
-       color: var(--muted); cursor: pointer; font-size: 11px; gap: 2px; user-select: none; }
-.tab.active { color: var(--button); }
-.tab .icon { font-size: 20px; line-height: 1; }
+body { margin: 0; padding: 0 0 0 56px; font: 15px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+       background: var(--bg); color: var(--fg); min-height: 100vh; }
+/* Left sidebar (was bottom tabbar). 56px wide; icon + tiny label per entry;
+   Settings pinned at the bottom via flex spacer. */
+.sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 56px;
+           background: var(--section); border-right: 1px solid var(--separator);
+           display: flex; flex-direction: column; z-index: 10; padding: 8px 0; }
+.sidebar-spacer { flex: 1; }
+.sidebar-divider { height: 1px; background: var(--separator); margin: 6px 8px; }
+.sidebar-item { display: flex; flex-direction: column; align-items: center;
+                padding: 9px 4px; color: var(--muted); cursor: pointer;
+                user-select: none; border-left: 3px solid transparent;
+                text-align: center; gap: 3px; transition: background 0.12s; }
+.sidebar-item:hover { background: rgba(255,255,255,0.03); }
+.sidebar-item.active { color: var(--button); border-left-color: var(--button);
+                       background: rgba(41,151,255,0.10); }
+.sidebar-item .icon { font-size: 20px; line-height: 1; }
+.sidebar-item .label { font-size: 9.5px; line-height: 1.05; letter-spacing: 0.1px; }
+/* Home tile grid — landing page for the Mini App. 2 cols on phones. */
+.home-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 6px; }
+.home-tile { background: var(--section); border-radius: 12px; padding: 16px 12px;
+             cursor: pointer; border: 1px solid var(--separator); position: relative;
+             text-align: left; transition: transform 0.1s, background 0.12s;
+             color: var(--fg); }
+.home-tile:active { transform: scale(0.98); background: rgba(255,255,255,0.04); }
+.home-tile .ico { font-size: 30px; line-height: 1; margin-bottom: 8px; }
+.home-tile .name { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.home-tile .desc { font-size: 11px; color: var(--muted); line-height: 1.3; }
+.sidebar-item.admin-only { display: none; }
+.sidebar-item.admin-only.show { display: flex; }
+.home-tile.admin-only { display: none; }
+.home-tile.admin-only.show { display: block; }
 .page { display: none; padding: 12px; }
 .page.active { display: block; }
 .subtabs { display: flex; gap: 6px; margin: 0 0 14px; overflow-x: auto;
@@ -1478,8 +1502,6 @@ input:focus { outline: none; border-color: var(--button); }
 .btn-row { display: flex; gap: 8px; margin: 14px 0; }
 .btn-row button { flex: 1; }
 button.warn { background: #ff9500; color: #fff; }
-.tab.admin-only { display: none; }
-.tab.admin-only.show { display: flex; }
 .lockdown-banner { background: rgba(255,69,58,0.18); color: var(--destructive); padding: 10px 12px;
     border-radius: 8px; margin: 10px 0; font-weight: 600; font-size: 13px; }
 .lockdown-banner .reason { font-weight: 400; font-size: 12px; margin-top: 4px; opacity: 0.85; }
@@ -1523,12 +1545,43 @@ button.warn { background: #ff9500; color: #fff; }
 <div id=app>
   <div id=msg></div>
 
+  <div class="page active" id=page-home>
+    <h1>Sentinel Media DL</h1>
+    <div class=home-tiles>
+      <div class=home-tile onclick="goto('downloads')">
+        <div class=ico>📥</div>
+        <div class=name>Downloads</div>
+        <div class=desc>Recent yt-dlp / gallery-dl jobs · file delivery links</div>
+      </div>
+      <div class=home-tile onclick="goto('watchlist')">
+        <div class=ico>👁</div>
+        <div class=name>Watchlist</div>
+        <div class=desc>Auto-record streams from twitch · youtube · kick</div>
+      </div>
+      <div class=home-tile onclick="location.href='/iptv'">
+        <div class=ico>📺</div>
+        <div class=name>Live TV</div>
+        <div class=desc>11k+ public channels · EPG · scheduled DVR</div>
+      </div>
+      <div class="home-tile admin-only" id=tile-scraper onclick="goto('scraper')">
+        <div class=ico>🤖</div>
+        <div class=name>Scraper</div>
+        <div class=desc>Profile monitoring · age-gated platforms</div>
+      </div>
+      <div class="home-tile admin-only" id=tile-admin onclick="goto('admin')">
+        <div class=ico>🛡</div>
+        <div class=name>Admin</div>
+        <div class=desc>Beta users · site blocklist · admin lockdown</div>
+      </div>
+    </div>
+  </div>
+
   <div class=page id=page-downloads>
     <h1>Recent Downloads</h1>
     <div id=downloads-list><div class=empty><span class=spin></span> Loading…</div></div>
   </div>
 
-  <div class="page active" id=page-watchlist>
+  <div class=page id=page-watchlist>
     <h1>Stream Watchlist</h1>
     <div class=card>
       <div class=field>Streamer / channel URL</div>
@@ -1562,20 +1615,37 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
 </div>
 
-<div class=tabbar>
-  <div class=tab onclick="goto('downloads')"><div class=icon>📥</div><div>Downloads</div></div>
-  <div class="tab active" onclick="goto('watchlist')"><div class=icon>👁</div><div>Watchlist</div></div>
-  <div class=tab onclick="location.href='/iptv'"><div class=icon>📺</div><div>Live TV</div></div>
-  <div class="tab admin-only" id=tab-scraper onclick="goto('scraper')"><div class=icon>🤖</div><div>Scraper</div></div>
-  <div class=tab onclick="goto('settings')"><div class=icon>⚙️</div><div>Settings</div></div>
-  <div class="tab admin-only" id=tab-admin onclick="goto('admin')"><div class=icon>🛡</div><div>Admin</div></div>
+<div class=sidebar>
+  <div class="sidebar-item active" id=nav-home onclick="goto('home')">
+    <div class=icon>🏠</div><div class=label>Home</div>
+  </div>
+  <div class=sidebar-item id=nav-downloads onclick="goto('downloads')">
+    <div class=icon>📥</div><div class=label>DL</div>
+  </div>
+  <div class=sidebar-item id=nav-watchlist onclick="goto('watchlist')">
+    <div class=icon>👁</div><div class=label>Watch</div>
+  </div>
+  <div class=sidebar-item id=nav-live onclick="location.href='/iptv'">
+    <div class=icon>📺</div><div class=label>Live TV</div>
+  </div>
+  <div class="sidebar-item admin-only" id=tab-scraper onclick="goto('scraper')">
+    <div class=icon>🤖</div><div class=label>Scrape</div>
+  </div>
+  <div class="sidebar-item admin-only" id=tab-admin onclick="goto('admin')">
+    <div class=icon>🛡</div><div class=label>Admin</div>
+  </div>
+  <div class=sidebar-spacer></div>
+  <div class=sidebar-divider></div>
+  <div class=sidebar-item id=nav-settings onclick="goto('settings')">
+    <div class=icon>⚙️</div><div class=label>Settings</div>
+  </div>
 </div>
 
 <script>
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 const initData = tg?.initData || '';
-let current = 'watchlist';
+let current = 'home';
 let watchlistTimer = null;
 
 function api(path, opts = {}) {
@@ -1608,12 +1678,16 @@ function duration(s) { if (s<60) return s+'s'; const m = Math.floor(s/60); const
 function goto(page) {
   current = page;
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-'+page));
-  // '_iptv' is a placeholder so the visual-index of subsequent tabs matches
-  // the DOM after inserting the Live TV link. goto() is never called with
-  // '_iptv' (the tab navigates away on click), so the Live TV tab simply
-  // stays inactive on this page — which is fine.
-  const order = ['downloads','watchlist','_iptv','scraper','settings','admin'];
-  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', order[i] === page));
+  // Mark the sidebar entry active. Map page name → element id; 'live'
+  // never lands here because it navigates away via location.href, so
+  // we never light up nav-live from this function.
+  const navMap = {
+    home: 'nav-home', downloads: 'nav-downloads', watchlist: 'nav-watchlist',
+    scraper: 'tab-scraper', admin: 'tab-admin', settings: 'nav-settings',
+  };
+  const targetId = navMap[page];
+  document.querySelectorAll('.sidebar-item').forEach(el =>
+    el.classList.toggle('active', el.id === targetId));
   if (page === 'downloads') loadDownloads();
   else if (page === 'watchlist') loadWatchlist();
   else if (page === 'scraper') loadScraper();
@@ -2089,11 +2163,13 @@ async function bootstrapWhoami() {
   try {
     const j = await api('/api/miniapp/whoami');
     isOwner = !!j.is_owner;
-    const tabA = document.getElementById('tab-admin');
-    if (tabA) tabA.classList.toggle('show', isOwner);
-    const tabS = document.getElementById('tab-scraper');
-    if (tabS) tabS.classList.toggle('show', isOwner);
-  } catch(e) { /* owner-flag is best-effort; tab stays hidden on failure */ }
+    // Toggle the sidebar entries AND the home tiles together so owner-only
+    // surfaces appear in both places at once.
+    ['tab-admin', 'tab-scraper', 'tile-admin', 'tile-scraper'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle('show', isOwner);
+    });
+  } catch(e) { /* owner-flag is best-effort; admin surfaces stay hidden on failure */ }
 }
 
 async function loadAdmin() {

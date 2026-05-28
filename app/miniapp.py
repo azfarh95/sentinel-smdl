@@ -1697,6 +1697,44 @@ button.warn { background: #ff9500; color: #fff; }
 .file-row .grow { flex: 1; min-width: 0; }
 .file-row .file-name { font-size: 14px; word-break: break-all; }
 .file-row .file-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+/* View-mode selector for Files page */
+.files-view-select { background: var(--section); border: 1px solid var(--separator);
+                     color: var(--fg); padding: 6px 8px; border-radius: 6px;
+                     font-size: 12px; cursor: pointer; }
+/* Tile view modes */
+.files-grid-sm { display: grid;
+                 grid-template-columns: repeat(auto-fill, minmax(82px, 1fr));
+                 gap: 6px; }
+.files-grid-md { display: grid;
+                 grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+                 gap: 8px; }
+.file-tile { background: var(--section); border-radius: 8px; cursor: pointer;
+             overflow: hidden; display: flex; flex-direction: column;
+             aspect-ratio: 1 / 1; border: 1px solid var(--separator);
+             transition: transform 0.1s; }
+.file-tile:active { transform: scale(0.97); }
+.file-tile .thumb { flex: 1; display: flex; align-items: center;
+                    justify-content: center; background: var(--bg);
+                    overflow: hidden; min-height: 0; }
+.file-tile .thumb img { width: 100%; height: 100%; object-fit: cover; }
+.file-tile .thumb .emoji { font-size: 32px; }
+.files-grid-sm .file-tile .thumb .emoji { font-size: 22px; }
+.file-tile .label { font-size: 10px; padding: 4px 6px; color: var(--fg);
+                    text-align: center; line-height: 1.2; white-space: nowrap;
+                    overflow: hidden; text-overflow: ellipsis;
+                    border-top: 1px solid var(--separator); }
+.files-grid-sm .file-tile .label { font-size: 9px; padding: 3px 4px; }
+.file-folder-tile { display: flex; flex-direction: column; align-items: center;
+                    justify-content: center; background: var(--section);
+                    border-radius: 8px; cursor: pointer; aspect-ratio: 1 / 1;
+                    border: 1px solid var(--separator); padding: 6px;
+                    transition: transform 0.1s; text-align: center; }
+.file-folder-tile:active { transform: scale(0.97); }
+.file-folder-tile .emoji { font-size: 32px; line-height: 1; }
+.files-grid-sm .file-folder-tile .emoji { font-size: 22px; }
+.file-folder-tile .label { font-size: 10px; margin-top: 4px; color: var(--fg);
+                           white-space: nowrap; overflow: hidden;
+                           text-overflow: ellipsis; max-width: 100%; }
 /* Inline file preview modal — opens when the user taps a media file in
    the Files browser. Videos / images / audio play right here without
    bouncing to an external browser. */
@@ -1769,6 +1807,11 @@ button.warn { background: #ff9500; color: #fff; }
   <div class=page id=page-files>
     <div class=page-header>
       <h1>Files</h1>
+      <select id=files-view class=files-view-select onchange="setFilesView(this.value)">
+        <option value=list>List</option>
+        <option value=small>Small tiles</option>
+        <option value=medium>Medium tiles</option>
+      </select>
       <button class="small sec" onclick="loadFiles(filesCwd)" title="Refresh">🔄</button>
     </div>
     <div id=files-crumbs class=files-crumbs></div>
@@ -1856,6 +1899,60 @@ if (tg) { tg.ready(); tg.expand(); }
 const initData = tg?.initData || '';
 let current = 'home';
 
+// ── Page history stack ─────────────────────────────────────────────────
+// Maintains a back-navigation trail for the device back button (Android)
+// and Telegram's BackButton chrome. On every goto() we push the page
+// we're LEAVING; the back button pops it. Home is the implicit floor —
+// when the stack empties, BackButton hides so the next device-back
+// closes the Mini App.
+const _pageHistory = [];
+const _MAX_HISTORY = 25;
+let _suppressHistory = false;   // set during back-pop so we don't re-push
+
+function pushHistory(fromPage) {
+  if (_suppressHistory) return;
+  if (!fromPage) return;
+  // De-dup: don't push the same page twice in a row
+  if (_pageHistory[_pageHistory.length - 1] === fromPage) return;
+  _pageHistory.push(fromPage);
+  if (_pageHistory.length > _MAX_HISTORY) _pageHistory.shift();
+  updateBackButton();
+}
+
+function popHistory() {
+  // If the file-preview modal is open, back closes it first — don't
+  // pop the page stack until the user is back at the Files page.
+  const modal = document.getElementById('preview-modal');
+  if (modal && modal.classList.contains('open')) {
+    closePreview();
+    return;
+  }
+  // Inside the Files page in a subfolder, back walks UP one folder
+  // before leaving the page entirely. Mirrors normal file-manager UX.
+  if (current === 'files' && filesCwd) {
+    const parts = filesCwd.split('/').filter(Boolean);
+    parts.pop();
+    const parent = parts.join('/');
+    loadFiles(parent);
+    return;
+  }
+  if (!_pageHistory.length) return;
+  const prev = _pageHistory.pop();
+  _suppressHistory = true;
+  try { goto(prev); } finally { _suppressHistory = false; }
+  updateBackButton();
+}
+
+function updateBackButton() {
+  if (!tg || !tg.BackButton) return;
+  if (_pageHistory.length > 0) tg.BackButton.show();
+  else                          tg.BackButton.hide();
+}
+
+if (tg && tg.BackButton) {
+  try { tg.BackButton.onClick(popHistory); } catch(e) { /* older TG client */ }
+}
+
 // Sidebar collapse preference — persisted across sessions in localStorage.
 // Default = expanded (false). Restored on page load so the layout doesn't
 // flicker between expanded and collapsed states.
@@ -1902,6 +1999,7 @@ function bytes(n) { if (!n) return '0 B'; const u = ['B','KB','MB','GB']; let i 
 function duration(s) { if (s<60) return s+'s'; const m = Math.floor(s/60); const sec = s%60; if (m<60) return m+'m '+sec+'s'; return Math.floor(m/60)+'h '+(m%60)+'m'; }
 
 function goto(page) {
+  if (page !== current) pushHistory(current);
   current = page;
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-'+page));
   // Mark the sidebar entry active. Map page name → element id; 'live'
@@ -1973,6 +2071,18 @@ async function clearDownloadHistory() {
 
 // ── Files browser (SFTP-style /downloads access) ────────────────────────
 let filesCwd = '';
+let filesViewMode = 'list';
+try {
+  const saved = localStorage.getItem('smdl_files_view');
+  if (saved === 'small' || saved === 'medium' || saved === 'list') filesViewMode = saved;
+} catch {}
+
+function setFilesView(mode) {
+  if (!['list','small','medium'].includes(mode)) return;
+  filesViewMode = mode;
+  try { localStorage.setItem('smdl_files_view', mode); } catch {}
+  loadFiles(filesCwd);
+}
 
 function fmtSize(n) {
   if (!n) return '0 B';
@@ -2001,42 +2111,82 @@ async function loadFiles(path) {
       const safePath = c.path.replace(/'/g, "\\'");
       return `${sep}<a onclick="loadFiles('${safePath}')">${esc(c.name === '/' ? '📁 root' : c.name)}</a>`;
     }).join('');
-    // Rows: folders first, then files
-    const rows = [];
-    for (const d of j.folders) {
-      const safePath = d.path.replace(/'/g, "\\'");
-      rows.push(`
-        <div class=file-row onclick="loadFiles('${safePath}')">
-          <div class=file-ico>📂</div>
-          <div class=grow>
-            <div class=file-name>${esc(d.name)}/</div>
-            <div class=file-meta>${fmtDate(d.mtime)}</div>
-          </div>
-        </div>`);
-    }
-    for (const f of j.files) {
-      const ext = (f.name.split('.').pop() || '').toLowerCase();
-      const ico = ['mp4','mov','mkv','webm'].includes(ext) ? '🎬'
-                : ['jpg','jpeg','png','gif','webp','heic'].includes(ext) ? '🖼'
-                : ['mp3','m4a','aac','flac','wav','opus'].includes(ext) ? '🎵'
-                : ['zip','tar','gz','7z'].includes(ext) ? '📦'
-                : '📄';
-      const link = f.share_url
-        ? `onclick="openPreview('${encodeURIComponent(f.share_url)}', '${encodeURIComponent(f.name)}')"`
-        : `onclick="showErr('No share URL — SHARE_SECRET/PUBLIC_BASE_URL not configured')"`;
-      rows.push(`
-        <div class=file-row ${link}>
-          <div class=file-ico>${ico}</div>
-          <div class=grow>
-            <div class=file-name>${esc(f.name)}</div>
-            <div class=file-meta>${fmtSize(f.size)} · ${fmtDate(f.mtime)}</div>
-          </div>
-        </div>`);
-    }
-    if (rows.length === 0) {
+    // Sync the dropdown to the persisted state
+    const sel = document.getElementById('files-view');
+    if (sel) sel.value = filesViewMode;
+
+    // Kind classifier — used in both list and tile renderers
+    const kindOf = (name) => {
+      const ext = (name.split('.').pop() || '').toLowerCase();
+      if (['mp4','mov','mkv','webm','m4v'].includes(ext)) return {ico:'🎬', isImg:false};
+      if (['jpg','jpeg','png','gif','webp','heic','avif','bmp'].includes(ext)) return {ico:'🖼', isImg:true};
+      if (['mp3','m4a','aac','flac','wav','opus','ogg'].includes(ext)) return {ico:'🎵', isImg:false};
+      if (['zip','tar','gz','7z'].includes(ext)) return {ico:'📦', isImg:false};
+      return {ico:'📄', isImg:false};
+    };
+
+    const onClickFile = (f) => f.share_url
+      ? `openPreview('${encodeURIComponent(f.share_url)}', '${encodeURIComponent(f.name)}')`
+      : `showErr('No share URL — SHARE_SECRET/PUBLIC_BASE_URL not configured')`;
+
+    if (j.folders.length === 0 && j.files.length === 0) {
       listRoot.innerHTML = '<div class=empty>Folder is empty.</div>';
-    } else {
+      return;
+    }
+
+    if (filesViewMode === 'list') {
+      // Original list view (single column rows)
+      const rows = [];
+      for (const d of j.folders) {
+        const safePath = d.path.replace(/'/g, "\\'");
+        rows.push(`
+          <div class=file-row onclick="loadFiles('${safePath}')">
+            <div class=file-ico>📂</div>
+            <div class=grow>
+              <div class=file-name>${esc(d.name)}/</div>
+              <div class=file-meta>${fmtDate(d.mtime)}</div>
+            </div>
+          </div>`);
+      }
+      for (const f of j.files) {
+        const k = kindOf(f.name);
+        rows.push(`
+          <div class=file-row onclick="${onClickFile(f)}">
+            <div class=file-ico>${k.ico}</div>
+            <div class=grow>
+              <div class=file-name>${esc(f.name)}</div>
+              <div class=file-meta>${fmtSize(f.size)} · ${fmtDate(f.mtime)}</div>
+            </div>
+          </div>`);
+      }
       listRoot.innerHTML = rows.join('');
+    } else {
+      // Tile views — small or medium grid. Image files render as <img>;
+      // other kinds (video, audio, archive) render as a centered emoji.
+      // We don't try to thumbnail video here — would require lots of
+      // <video preload=metadata> which thrashes bandwidth on large folders.
+      const gridClass = filesViewMode === 'small' ? 'files-grid-sm' : 'files-grid-md';
+      const tiles = [];
+      for (const d of j.folders) {
+        const safePath = d.path.replace(/'/g, "\\'");
+        tiles.push(`
+          <div class=file-folder-tile onclick="loadFiles('${safePath}')">
+            <div class=emoji>📂</div>
+            <div class=label>${esc(d.name)}</div>
+          </div>`);
+      }
+      for (const f of j.files) {
+        const k = kindOf(f.name);
+        const thumb = (k.isImg && f.share_url)
+          ? `<img loading=lazy src="${f.share_url}" alt="${esc(f.name)}">`
+          : `<div class=emoji>${k.ico}</div>`;
+        tiles.push(`
+          <div class=file-tile onclick="${onClickFile(f)}">
+            <div class=thumb>${thumb}</div>
+            <div class=label title="${esc(f.name)}">${esc(f.name)}</div>
+          </div>`);
+      }
+      listRoot.innerHTML = `<div class="${gridClass}">${tiles.join('')}</div>`;
     }
   } catch(e) { showErr('Load files failed: '+e); }
 }

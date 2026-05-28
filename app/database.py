@@ -563,6 +563,20 @@ async def list_download_history(chat_id: int, limit: int = 50) -> list[dict]:
     return out
 
 
+async def clear_download_history(chat_id: int) -> int:
+    """Delete all download_history rows for this chat_id. Returns the number
+    of rows deleted. The global url_cache is untouched — it's a content
+    cache shared across users, not personal history."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "DELETE FROM download_history WHERE chat_id = ?",
+            (int(chat_id),),
+        ) as cur:
+            n = cur.rowcount or 0
+        await db.commit()
+        return n
+
+
 async def get_setting(key: str, default: str = "") -> str:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(

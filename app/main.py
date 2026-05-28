@@ -30,6 +30,18 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     await db.init_db()
     await iptv.init_iptv_schema()
+
+    # Theater P4 — queue table + background worker. The worker pops
+    # queued rows from stremio_jobs and runs resolve → stream → cache.
+    try:
+        from . import stremio_queue as _sq
+        from . import stremio_settings as _ss
+        await _sq.init_schema()
+        await _ss.init_schema()
+        _sq.start_worker()
+        logger.info("Theater queue worker started (max_concurrent=%d)", _sq.MAX_CONCURRENT)
+    except Exception as e:
+        logger.warning("Theater queue startup failed: %s", e)
     # First-boot: default-block adult cam platforms so they don't appear in
     # non-owner UX. Owner can flip them back on in Admin → Sites.
     try:

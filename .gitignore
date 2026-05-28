@@ -31,3 +31,6 @@ dist/
 *.swp
 .idea/
 .vscode/
+
+# Theater Svelte sub-app build output (emitted by stremio-ui/pnpm build)
+static/

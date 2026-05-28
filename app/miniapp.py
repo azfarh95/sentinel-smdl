@@ -1104,6 +1104,59 @@ async def files_list(request: Request, path: str = ""):
     }
 
 
+@router.get("/api/miniapp/files/thumb")
+async def files_thumb(request: Request, path: str):
+    """Cached thumbnail for image/video files under DOWNLOADS_DIR (#32).
+
+    Auth: same `_verify()` gate as /files/list (cookie or initData). The
+    browser sends the sentinel_apk_session cookie automatically when an
+    <img src=...> is same-origin, which is the common case in the TWA /
+    desktop wrapper / browser. Telegram Mini App context (no cookie + no
+    way to add X-Init-Data to <img>) falls back to the emoji icon on the
+    client side via the <img onerror>.
+
+    Strong ETag + 30-day Cache-Control so once a tile is on screen, the
+    browser doesn't re-fetch on every tab switch."""
+    from pathlib import Path as _Path
+    from fastapi.responses import FileResponse
+    from .file_serve import DOWNLOADS_DIR
+    from . import thumbnails as _thumbs
+
+    p = await _verify(request)
+    require_scope(p, "smdl.admin")
+    _require_owner(p)
+
+    root = _Path(DOWNLOADS_DIR).resolve()
+    rel = (path or "").strip("/").replace("\\", "/")
+    if not rel:
+        raise HTTPException(status_code=400, detail="path required")
+    abs_path = (root / rel).resolve()
+    try:
+        abs_path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid path")
+    if not abs_path.exists() or not abs_path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    if not _thumbs.can_thumb(abs_path):
+        raise HTTPException(status_code=415, detail="not thumbable")
+
+    cache_root = root / ".thumbnails"
+    thumb = await _thumbs.get_or_make_thumb(abs_path, cache_root)
+    if thumb is None:
+        raise HTTPException(status_code=415, detail="thumb generation failed")
+
+    etag = f'"{thumb.stem}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304)
+    return FileResponse(
+        thumb, media_type="image/jpeg",
+        headers={
+            "ETag":          etag,
+            "Cache-Control": "public, max-age=2592000",
+        },
+    )
+
+
 @router.get("/api/miniapp/downloads")
 async def downloads(request: Request, limit: int = 50):
     """Per-user download history.
@@ -2820,14 +2873,16 @@ async function loadFiles(path) {
     const sel = document.getElementById('files-view');
     if (sel) sel.value = filesViewMode;
 
-    // Kind classifier — used in both list and tile renderers
+    // Kind classifier — used in both list and tile renderers.
+    // thumbable=true → grid view requests a server-side thumbnail (#32)
+    // via /api/miniapp/files/thumb. Image AND video both qualify.
     const kindOf = (name) => {
       const ext = (name.split('.').pop() || '').toLowerCase();
-      if (['mp4','mov','mkv','webm','m4v'].includes(ext)) return {ico:'🎬', isImg:false};
-      if (['jpg','jpeg','png','gif','webp','heic','avif','bmp'].includes(ext)) return {ico:'🖼', isImg:true};
-      if (['mp3','m4a','aac','flac','wav','opus','ogg'].includes(ext)) return {ico:'🎵', isImg:false};
-      if (['zip','tar','gz','7z'].includes(ext)) return {ico:'📦', isImg:false};
-      return {ico:'📄', isImg:false};
+      if (['mp4','mov','mkv','webm','m4v','avi','ts','mts','m2ts'].includes(ext)) return {ico:'🎬', isImg:false, thumbable:true};
+      if (['jpg','jpeg','png','gif','webp','heic','heif','avif','bmp','tiff','tif'].includes(ext)) return {ico:'🖼', isImg:true, thumbable:true};
+      if (['mp3','m4a','aac','flac','wav','opus','ogg'].includes(ext)) return {ico:'🎵', isImg:false, thumbable:false};
+      if (['zip','tar','gz','7z'].includes(ext)) return {ico:'📦', isImg:false, thumbable:false};
+      return {ico:'📄', isImg:false, thumbable:false};
     };
 
     const onClickFile = (f) => f.share_url
@@ -2866,10 +2921,13 @@ async function loadFiles(path) {
       }
       listRoot.innerHTML = rows.join('');
     } else {
-      // Tile views — small or medium grid. Image files render as <img>;
-      // other kinds (video, audio, archive) render as a centered emoji.
-      // We don't try to thumbnail video here — would require lots of
-      // <video preload=metadata> which thrashes bandwidth on large folders.
+      // Tile views — small or medium grid. Image AND video files render as
+      // <img> via the server-side thumbnailer (#32) which generates JPEG
+      // thumbs lazily and serves them with a 30-day Cache-Control. Other
+      // kinds (audio, archive, doc) render as a centered emoji.
+      // On 4xx/5xx from the thumb endpoint, the <img onerror> falls back
+      // to the emoji icon so missing/corrupt files don't leave a broken-
+      // image placeholder.
       const gridClass = filesViewMode === 'small' ? 'files-grid-sm' : 'files-grid-md';
       const tiles = [];
       for (const d of j.folders) {
@@ -2882,8 +2940,10 @@ async function loadFiles(path) {
       }
       for (const f of j.files) {
         const k = kindOf(f.name);
-        const thumb = (k.isImg && f.share_url)
-          ? `<img loading=lazy src="${f.share_url}" alt="${esc(f.name)}">`
+        const thumb = k.thumbable
+          ? `<img loading=lazy alt="${esc(f.name)}"
+                 src="/api/miniapp/files/thumb?path=${encodeURIComponent(f.path)}"
+                 onerror="this.outerHTML='<div class=emoji>${k.ico}</div>'">`
           : `<div class=emoji>${k.ico}</div>`;
         tiles.push(`
           <div class=file-tile onclick="${onClickFile(f)}">

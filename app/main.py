@@ -80,43 +80,33 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         logger.warning("IPTV scheduled-DVR loop failed to start: %s", _e)
 
-    # Bot initialization is best-effort. A bad/missing token must NOT crash
-    # the FastAPI lifespan — keep the /health endpoint up so the operator
-    # can curl it, check container logs, and fix the token without
-    # container-crashloop noise. Same logic helps the fresh-install test
-    # spin up without a real BotFather token.
-    tg_app = None
-    polling_task = None
-    monitor_task = None
-    scraper_task = None
-    try:
-        tg_app = await build()
-        await tg_app.initialize()
-        await tg_app.start()
-        polling_task = asyncio.create_task(
-            tg_app.updater.start_polling(drop_pending_updates=True)
-        )
-        monitor_task = asyncio.create_task(stream_monitor.monitor_loop(tg_app))
-        scraper_task = asyncio.create_task(profile_monitor.scraper_loop(tg_app))
-
-        def _on_task_done(t: asyncio.Task):
-            if not t.cancelled() and t.exception():
-                logger.error("Background task crashed: %s", t.exception(), exc_info=t.exception())
-
-        polling_task.add_done_callback(_on_task_done)
-        monitor_task.add_done_callback(_on_task_done)
-        scraper_task.add_done_callback(_on_task_done)
-        logger.info("SM-DL bot polling started + stream monitor + profile scraper running")
-    except Exception as e:
-        logger.error(
-            "Bot startup failed (%s: %s). FastAPI continues running for "
-            "diagnostics — /health endpoint stays up, but Telegram features "
-            "are unavailable until the underlying issue is fixed.",
-            type(e).__name__, e,
-        )
+    # Bot initialization runs in a background task with exponential backoff
+    # so a transient network blip at startup (e.g. PIA VPN not yet up, DNS
+    # not yet resolving api.telegram.org) doesn't permanently kill the bot
+    # until the next container restart. The FastAPI lifespan completes
+    # immediately — /health stays up — and the bot retries until it
+    # connects. Real misconfigurations (bad token) eventually surface as
+    # 401 Unauthorized from Telegram, which we log but keep retrying for
+    # in case it's a transient credential reload; a hard exit would just
+    # hide the issue.
+    state: dict = {
+        "tg_app": None,
+        "polling_task": None,
+        "monitor_task": None,
+        "scraper_task": None,
+        "ready": False,
+        "last_error": None,
+    }
+    init_task = asyncio.create_task(_init_bot_with_retry(state))
+    app.state.bot_state = state
 
     yield
 
+    init_task.cancel()
+    polling_task = state.get("polling_task")
+    monitor_task = state.get("monitor_task")
+    scraper_task = state.get("scraper_task")
+    tg_app       = state.get("tg_app")
     if polling_task and not polling_task.done():
         polling_task.cancel()
     if monitor_task and not monitor_task.done():
@@ -133,6 +123,64 @@ async def lifespan(app: FastAPI):
     logger.info("SM-DL bot shut down")
 
 
+async def _init_bot_with_retry(state: dict) -> None:
+    """Build + start the Telegram bot. Retry with exponential backoff on
+    failure (2s, 4s, 8s, … capped at 60s). Loops forever until success or
+    the task is cancelled at shutdown.
+
+    Records progress on the shared `state` dict so the lifespan's shutdown
+    path can clean up whatever made it through. `state['ready']` flips True
+    once the bot is fully running; before that, /health/bot reports the
+    last error so the operator can see why.
+    """
+    delay = 2.0
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            tg_app = await build()
+            await tg_app.initialize()
+            await tg_app.start()
+            polling_task = asyncio.create_task(
+                tg_app.updater.start_polling(drop_pending_updates=True)
+            )
+            monitor_task = asyncio.create_task(stream_monitor.monitor_loop(tg_app))
+            scraper_task = asyncio.create_task(profile_monitor.scraper_loop(tg_app))
+
+            def _on_task_done(t: asyncio.Task):
+                if not t.cancelled() and t.exception():
+                    logger.error("Background task crashed: %s", t.exception(), exc_info=t.exception())
+
+            polling_task.add_done_callback(_on_task_done)
+            monitor_task.add_done_callback(_on_task_done)
+            scraper_task.add_done_callback(_on_task_done)
+
+            state["tg_app"] = tg_app
+            state["polling_task"] = polling_task
+            state["monitor_task"] = monitor_task
+            state["scraper_task"] = scraper_task
+            state["ready"] = True
+            state["last_error"] = None
+            if attempt == 1:
+                logger.info("SM-DL bot polling started + stream monitor + profile scraper running")
+            else:
+                logger.info("SM-DL bot polling started on attempt %d (after retries)", attempt)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            state["last_error"] = f"{type(e).__name__}: {e}"
+            logger.error(
+                "Bot startup attempt %d failed (%s: %s) — retrying in %.0fs",
+                attempt, type(e).__name__, e, delay,
+            )
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                raise
+            delay = min(delay * 2, 60.0)
+
+
 app = FastAPI(title="SM-DL — Social Media Downloader", lifespan=lifespan)
 app.include_router(file_serve.router)
 app.include_router(miniapp.router)
@@ -143,3 +191,17 @@ app.include_router(iptv_routes.router)
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "sm-dl"}
+
+
+@app.get("/health/bot")
+async def health_bot():
+    """Reports whether the Telegram bot polling actually came online.
+    Useful diagnostic when /health is OK but messages get no reply
+    (typically DNS to api.telegram.org failed at startup; the retry loop
+    will eventually recover, but the operator can spot it sooner here).
+    """
+    state = getattr(app.state, "bot_state", None) or {}
+    return {
+        "ready":      bool(state.get("ready")),
+        "last_error": state.get("last_error"),
+    }

@@ -88,9 +88,19 @@ if [[ -d "$SENTINEL_APPS_DIR" ]]; then
     if [[ -z "$PY_BIN" ]]; then
       echo "WARN: no host python found; APK published but manifest.json not updated" >&2
     else
+      # Path normalisation for Git-Bash → Windows Python. Python on Windows
+      # interprets `/c/Users/...` as a UNC-style path rooted at `\c\Users\...`
+      # and FileNotFoundError follows. cygpath -w converts it to `C:\Users\...`
+      # which pathlib.Path handles correctly via the raw-string literal below.
+      MANIFEST_PATH="$SENTINEL_APPS_DIR/manifest.json"
+      if command -v cygpath >/dev/null 2>&1; then
+        MANIFEST_PATH_PY="$(cygpath -w "$MANIFEST_PATH")"
+      else
+        MANIFEST_PATH_PY="$MANIFEST_PATH"
+      fi
       "$PY_BIN" -c "
 import json, datetime, pathlib
-mp = pathlib.Path(r'$SENTINEL_APPS_DIR/manifest.json')
+mp = pathlib.Path(r'$MANIFEST_PATH_PY')
 m = json.loads(mp.read_text(encoding='utf-8'))
 for app in m.get('apps', []):
     if app.get('id') != '$APP_ID': continue

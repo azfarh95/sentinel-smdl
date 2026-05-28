@@ -200,7 +200,18 @@ async def download(
                 if temp:
                     outtmpl = f"{out_dir}/%(title).80s.%(ext)s"
                 else:
-                    outtmpl = f"{out_dir}/%(extractor)s/%(uploader,uploader_id)s/%(title).80s.%(ext)s"
+                    # #34 — user-editable path template. Translates
+                    # {service}/{platform}/{uploader}/{title}.{ext} to
+                    # yt-dlp's %(...)s syntax. Falls back to the original
+                    # historical layout if compile fails or template is
+                    # blank.
+                    from .miniapp import compile_path_template, _cfg_get
+                    try:
+                        tpl = _cfg_get("download_path_template") or ""
+                        compiled = compile_path_template(tpl, service="ytdlp")
+                    except Exception:
+                        compiled = "%(extractor)s/%(uploader,uploader_id)s/%(title).80s.%(ext)s"
+                    outtmpl = f"{out_dir}/{compiled}"
 
                 final: dict = {"path": None, "prepared": None}
 

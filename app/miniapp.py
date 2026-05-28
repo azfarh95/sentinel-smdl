@@ -1548,7 +1548,47 @@ EDITABLE_SETTINGS = [
     {"key": "onedrive_delete_after_upload",
      "label": "Delete local file after successful OneDrive upload",
      "type": "bool", "admin": True},
+    # #34 — user-editable path template. Tokens: {service} {platform}
+    # {uploader} {title} {date} {ext}. Translated to yt-dlp's outtmpl
+    # format in downloader.py via path_template.compile_template().
+    # Default matches the historical hard-coded layout so existing files
+    # don't need re-pathing.
+    {"key": "download_path_template",
+     "label": "Download path template (tokens: {service} {platform} {uploader} {title} {date} {ext})",
+     "type": "string", "default": "{platform}/{uploader}/{title}.{ext}"},
 ]
+
+
+def compile_path_template(template: str, service: str = "ytdlp") -> str:
+    """Translate the user-friendly template into yt-dlp's outtmpl format.
+
+    Tokens (in `template`):  yt-dlp expansion:
+      {service}              → static service name (ytdlp / iptv / live)
+      {platform}             → %(extractor)s
+      {uploader}             → %(uploader,uploader_id)s
+      {title}                → %(title).80s
+      {date}                 → %(upload_date)s   (YYYYMMDD)
+      {ext}                  → %(ext)s
+
+    Anything that doesn't match a token passes through unchanged, so a
+    user can hard-code static segments like "Photos/" in their template.
+    Returns just the path portion (caller prepends out_dir + leading
+    slash).
+    """
+    if not template:
+        template = "{platform}/{uploader}/{title}.{ext}"
+    mapping = {
+        "{service}":  (service or "ytdlp").upper(),
+        "{platform}": "%(extractor)s",
+        "{uploader}": "%(uploader,uploader_id)s",
+        "{title}":    "%(title).80s",
+        "{date}":     "%(upload_date)s",
+        "{ext}":      "%(ext)s",
+    }
+    out = template
+    for k, v in mapping.items():
+        out = out.replace(k, v)
+    return out.lstrip("/")
 
 
 def _read_config_file() -> dict:
@@ -2371,6 +2411,27 @@ button.warn { background: #ff9500; color: #fff; }
     padding: 2px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.4px; }
 .user-row .owner-badge { background: rgba(52,199,89,0.15); color: var(--success);
     padding: 2px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.4px; }
+/* Settings tile layout (#34) — 2-up grid on wide viewports, stack on narrow.
+   OneDrive ‖ Downloads land side-by-side; General settings go full-width. */
+.set-grid { display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    align-items: start; }
+.set-tile { background: var(--card); border: 1px solid var(--separator);
+    border-radius: 10px; padding: 12px 14px; }
+.set-tile .head { display: flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 700; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 8px; }
+.set-tile.full { grid-column: 1 / -1; }
+.set-pt-preview { font-family: ui-monospace, monospace; font-size: 11px;
+    color: var(--muted); background: var(--bg); padding: 6px 8px;
+    border-radius: 6px; margin-top: 6px;
+    overflow-x: auto; white-space: nowrap; }
+.set-pt-tokens { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.set-pt-tokens .tok { background: var(--separator); color: var(--muted);
+    padding: 2px 8px; border-radius: 99px; font-size: 10px;
+    font-family: ui-monospace, monospace; cursor: pointer; }
+.set-pt-tokens .tok:hover { color: var(--button); }
+
 /* Watchlist tile grid (#30) — replaces full-width per-streamer cards */
 .wl-site-section { margin-bottom: 14px; }
 .wl-site-bar { display: flex; align-items: center; gap: 8px; padding: 8px 4px;
@@ -3499,26 +3560,78 @@ async function loadSettings() {
         </div>`;
     } catch(_e) { /* status fetch best-effort — non-owners get 403 */ }
 
-    root.innerHTML = `
-      ${fields}
-      <div class=restart-banner id=restart-banner>
-        ⚠ Some settings require a service restart to take effect.
-      </div>
-      <div class=btn-row>
-        <button onclick="saveSettings('set-')">💾 Save changes</button>
-      </div>
-
-      ${odHtml}
-
-      <div class=card>
-        <div class=field>Downloads folder (env var, container)</div>
+    // Path-template card (#34). Lives inside the Downloads tile.
+    const tplVal = esc(cfg.values.download_path_template || '{platform}/{uploader}/{title}.{ext}');
+    const downloadsTile = `
+      <div class=set-tile>
+        <div class=head>⬇ Downloads</div>
         <div class=meta><span class=url>${esc(cfg.paths.downloads_dir)}</span>
           ${cfg.paths.downloads_dir_writable ? '<span style="color:var(--success)">· writable</span>' : '<span style="color:var(--destructive)">· not writable</span>'}</div>
         ${diskHtml}
-        <div class=meta style="margin-top:6px">To change: edit <code>DOWNLOADS_DIR</code> in docker-compose and restart the container.</div>
+        <div class=field style="margin-top:10px">Path template</div>
+        <input id="set-download_path_template" value="${tplVal}" oninput="updatePathTemplatePreview()" placeholder="{platform}/{uploader}/{title}.{ext}">
+        <div class=set-pt-tokens>
+          <span class=tok onclick="insertPtToken('{service}')">{service}</span>
+          <span class=tok onclick="insertPtToken('{platform}')">{platform}</span>
+          <span class=tok onclick="insertPtToken('{uploader}')">{uploader}</span>
+          <span class=tok onclick="insertPtToken('{title}')">{title}</span>
+          <span class=tok onclick="insertPtToken('{date}')">{date}</span>
+          <span class=tok onclick="insertPtToken('{ext}')">{ext}</span>
+        </div>
+        <div class=set-pt-preview id=set-pt-preview></div>
+        <div class=meta style="margin-top:6px">Root path: edit <code>DOWNLOADS_DIR</code> in docker-compose and restart.</div>
+        <div class=meta style="font-size:10px;color:var(--muted);margin-top:4px">Restructure existing files to a new layout? Coming soon — for now, only NEW downloads use the updated template.</div>
+      </div>`;
+
+    const oneDriveTile = odHtml ? `<div class=set-tile>${odHtml.replace(/<div class=card>([\s\S]*?)<\/div>$/, '<div class=head>📁 OneDrive</div>$1')}</div>` : '';
+
+    root.innerHTML = `
+      <div class=set-tile class=full>
+        <div class=head>⚙ General</div>
+        ${fields}
+        <div class=restart-banner id=restart-banner>
+          ⚠ Some settings require a service restart to take effect.
+        </div>
+        <div class=btn-row style="margin-top:10px">
+          <button onclick="saveSettings('set-')">💾 Save changes</button>
+        </div>
+      </div>
+
+      <div class=set-grid>
+        ${oneDriveTile}
+        ${downloadsTile}
       </div>
     `;
+    updatePathTemplatePreview();
   } catch(e) { showErr('Load failed: '+e); }
+}
+
+function updatePathTemplatePreview() {
+  const el  = document.getElementById('set-download_path_template');
+  const out = document.getElementById('set-pt-preview');
+  if (!el || !out) return;
+  const tpl = el.value || '{platform}/{uploader}/{title}.{ext}';
+  // Client-side preview — must match compile_path_template() in miniapp.py
+  // semantics for the same inputs.
+  const sample = tpl
+    .replaceAll('{service}',  'YTDLP')
+    .replaceAll('{platform}', 'twitch')
+    .replaceAll('{uploader}', 'somestreamer')
+    .replaceAll('{title}',    'Best moments compilation')
+    .replaceAll('{date}',     '20260528')
+    .replaceAll('{ext}',      'mp4');
+  out.textContent = '/downloads/' + sample;
+}
+
+function insertPtToken(tok) {
+  const el = document.getElementById('set-download_path_template');
+  if (!el) return;
+  const start = el.selectionStart ?? el.value.length;
+  const end   = el.selectionEnd   ?? el.value.length;
+  el.value = el.value.slice(0, start) + tok + el.value.slice(end);
+  el.focus();
+  el.setSelectionRange(start + tok.length, start + tok.length);
+  updatePathTemplatePreview();
 }
 
 async function saveSettings(prefix) {

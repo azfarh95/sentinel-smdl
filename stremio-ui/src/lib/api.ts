@@ -103,6 +103,18 @@ export interface CacheEntry {
   last_played: string;
 }
 
+export interface EpisodeMeta {
+  /** Stremio addon content_id, e.g. "tt0903747:1:1" — feed into /streams */
+  id: string;
+  season: number;
+  episode: number;
+  title: string;
+  released: string | null;
+  overview: string | null;
+  thumbnail: string | null;
+  runtime: number | null;
+}
+
 // ── Endpoint wrappers ────────────────────────────────────────────────────────
 export const api = {
   account: () => get<RDAccount>("/api/miniapp/stremio/account"),
@@ -116,6 +128,12 @@ export const api = {
             quality: string = "1080p") =>
     get<{ streams: StreamEntry[] }>(
       `/api/miniapp/stremio/streams?imdb_id=${encodeURIComponent(imdb_id)}&type=${type}&quality=${quality}`,
+    ),
+
+  /** Series episodes for a tt-id. Returns S/E-sorted list. */
+  episodes: (imdb_id: string) =>
+    get<{ episodes: EpisodeMeta[] }>(
+      `/api/miniapp/stremio/episodes?imdb_id=${encodeURIComponent(imdb_id)}`,
     ),
 
   grab: (params: { infohash?: string; magnet?: string; title?: string;
@@ -149,4 +167,55 @@ export const api = {
   /** URL of a cached file (served range-aware by SMDL). */
   cachedFileUrl: (infohash: string) =>
     `/api/miniapp/stremio/file/${infohash}`,
+
+  // ── P7 settings + resume position ────────────────────────────────────
+  settings: {
+    get: () => get<{ settings: any }>("/api/miniapp/stremio/settings"),
+    set: (patch: Record<string, any>) =>
+      post<{ settings: any }>("/api/miniapp/stremio/settings", patch),
+  },
+  position: {
+    get: (imdb_id: string) =>
+      get<{ position: { position_seconds: number; duration_seconds: number | null;
+                          updated_at: string } | null }>(
+        `/api/miniapp/stremio/position/${encodeURIComponent(imdb_id)}`,
+      ),
+    save: (params: { imdb_id: string; position_seconds: number;
+                      duration_seconds?: number | null }) =>
+      post<{ ok: boolean }>("/api/miniapp/stremio/position", params),
+  },
+
+  // ── P6 Trakt ──────────────────────────────────────────────────────────
+  trakt: {
+    status: () =>
+      get<{ connected: boolean; expires_in_days?: number; scope?: string }>(
+        "/api/miniapp/stremio/trakt/status",
+      ),
+    connectStart: () =>
+      post<{ ok: boolean; error?: string; device_code: string;
+             user_code: string; verification_url: string;
+             expires_in: number; interval: number }>(
+        "/api/miniapp/stremio/trakt/connect/start", {},
+      ),
+    connectPoll: (device_code: string) =>
+      post<{ ok: boolean; status: "pending" | "connected" | "error";
+             error?: string }>(
+        "/api/miniapp/stremio/trakt/connect/poll", { device_code },
+      ),
+    disconnect: () =>
+      post<{ ok: boolean }>("/api/miniapp/stremio/trakt/disconnect", {}),
+    scrobble: (params: {
+      imdb_id: string; type?: "movie" | "series";
+      season?: number | null; episode?: number | null;
+      progress_pct?: number; event: "start" | "pause" | "stop";
+    }) =>
+      post<{ ok: boolean; error?: string }>(
+        "/api/miniapp/stremio/trakt/scrobble", params,
+      ),
+    watchlist: (type: "movies" | "shows" = "movies") =>
+      get<{ ok: boolean; error?: string;
+            items: Array<{ id: string; type: string; name: string; year: number | null }> }>(
+        `/api/miniapp/stremio/trakt/watchlist?type=${type}`,
+      ),
+  },
 };

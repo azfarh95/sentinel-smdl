@@ -8,16 +8,16 @@
    *  No router — single-component view state machine. The TG BackButton
    *  is wired to navigate Detail → Search; on Search it closes the app. */
   import { onMount } from "svelte";
-  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive } from "@lucide/svelte";
+  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive, Tv, Settings } from "@lucide/svelte";
   import { api, type MetaItem, type StreamEntry, type GrabFile, type RDAccount,
-            type StremioJob, type CacheEntry } from "$lib/api";
+            type StremioJob, type CacheEntry, type EpisodeMeta } from "$lib/api";
   import { fmtSize } from "$lib/utils";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "$lib/components/ui/card";
   import { Badge } from "$lib/components/ui/badge";
 
-  type View = "search" | "detail" | "grab" | "queue" | "library";
+  type View = "search" | "detail" | "grab" | "queue" | "library" | "settings";
 
   // ── State (Svelte 5 runes) ─────────────────────────────────────────────
   let view = $state<View>("search");
@@ -36,6 +36,12 @@
   let cache     = $state<CacheEntry[]>([]);
   let cacheDisk = $state<{ total: number; used: number; free: number; pct_used: number } | null>(null);
   let pollHandle: ReturnType<typeof setInterval> | null = null;
+
+  // ── P5 series state ───────────────────────────────────────────────────
+  let episodes    = $state<EpisodeMeta[]>([]);   // for the selected series
+  let episodesLoading = $state(false);
+  let activeSeason = $state<number>(1);
+  let pickedEpisode = $state<EpisodeMeta | null>(null);   // episode whose streams are shown
 
   // ── Boot: fetch RD account state (gives us premium badge) ──────────────
   onMount(async () => {
@@ -58,26 +64,68 @@
   $effect(() => updateBack());
 
   // ── Search ─────────────────────────────────────────────────────────────
+  // Cinemeta returns both movies and series for "top" catalog searches;
+  // we run BOTH queries and merge results so a series like Breaking Bad
+  // and a movie like Inception coexist in the result grid.
   async function doSearch() {
     const q = query.trim();
     if (!q) return;
     searching = true; lastError = null;
     try {
-      const r = await api.search(q, "movie");
-      results = r.results;
+      const [m, s] = await Promise.all([
+        api.search(q, "movie").catch(() => ({ results: [] as MetaItem[] })),
+        api.search(q, "series").catch(() => ({ results: [] as MetaItem[] })),
+      ]);
+      results = [...m.results, ...s.results].slice(0, 24);
     } catch (e) { lastError = String(e); }
     finally { searching = false; }
   }
 
   // ── Open detail ────────────────────────────────────────────────────────
+  // Movies: fetch streams immediately.
+  // Series: fetch the episode list first; streams come AFTER user picks
+  // a specific episode.
   async function openDetail(m: MetaItem) {
-    selected = m; streams = []; streamsLoading = true; view = "detail"; lastError = null;
+    selected = m; streams = []; episodes = []; pickedEpisode = null;
+    view = "detail"; lastError = null;
+    if (m.type === "series") {
+      episodesLoading = true;
+      try {
+        const r = await api.episodes(m.id);
+        episodes = r.episodes;
+        // Default to season 1, or the lowest available
+        activeSeason = episodes.length ? Math.min(...episodes.map(e => e.season)) : 1;
+      } catch (e) { lastError = String(e); }
+      finally { episodesLoading = false; }
+      return;
+    }
+    streamsLoading = true;
     try {
       const r = await api.streams(m.id, m.type, "1080p");
       streams = r.streams;
     } catch (e) { lastError = String(e); }
     finally { streamsLoading = false; }
   }
+
+  // ── Pick a specific episode (series) ───────────────────────────────────
+  async function pickEpisode(ep: EpisodeMeta) {
+    if (!selected) return;
+    pickedEpisode = ep; streams = []; streamsLoading = true; lastError = null;
+    try {
+      // ep.id is "tt0903747:1:1" — the Stremio addon stream content_id
+      const r = await api.streams(ep.id, "series", "1080p");
+      streams = r.streams;
+    } catch (e) { lastError = String(e); }
+    finally { streamsLoading = false; }
+  }
+
+  // ── Derived: seasons available in the current series ──────────────────
+  const seasons = $derived(
+    Array.from(new Set(episodes.map(e => e.season))).sort((a, b) => a - b),
+  );
+  const visibleEpisodes = $derived(
+    episodes.filter(e => e.season === activeSeason),
+  );
 
   // ── Grab → enqueue + poll until streamable or cached ──────────────────
   // The queue endpoint returns immediately with a job_id. We poll
@@ -88,10 +136,18 @@
   async function grab(s: StreamEntry) {
     if (!selected || !s.infohash) return;
     view = "grab"; lastError = null; activeJob = null;
+    // For series, the cache key is the episode-specific id (tt0903747:1:1)
+    // so re-grabs of a single episode hit the cache, not the series root.
+    // The display title gets the SxxExx suffix.
+    const isSeriesEpisode = selected.type === "series" && pickedEpisode;
+    const cacheId    = isSeriesEpisode ? pickedEpisode!.id     : selected.id;
+    const grabTitle  = isSeriesEpisode
+      ? `${selected.name} · S${String(pickedEpisode!.season).padStart(2, "0")}E${String(pickedEpisode!.episode).padStart(2, "0")} — ${pickedEpisode!.title}`
+      : selected.name;
     try {
       const r = await api.enqueue({
-        imdb_id: selected.id, type: selected.type,
-        title: selected.name, infohash: s.infohash,
+        imdb_id: cacheId, type: selected.type,
+        title: grabTitle, infohash: s.infohash,
         file_index: s.file_index ?? undefined,
         source_stream_title: s.title,
         quality: s.quality ?? undefined,
@@ -151,6 +207,81 @@
   }
 
   function fmtPct(p: number) { return Math.max(0, Math.min(100, p)).toFixed(0); }
+
+  // ── P7 settings + resume position ────────────────────────────────────
+  let settings = $state<any>(null);
+  let settingsLoading = $state(false);
+  let settingsSaving = $state(false);
+  let resumeOffer = $state<{ position_seconds: number; duration_seconds: number | null } | null>(null);
+
+  async function loadSettings() {
+    settingsLoading = true;
+    try { settings = (await api.settings.get()).settings; }
+    catch (e) { lastError = String(e); }
+    finally { settingsLoading = false; }
+  }
+  async function saveSettings(patch: Record<string, any>) {
+    settingsSaving = true;
+    try { settings = (await api.settings.set(patch)).settings; }
+    catch (e) { lastError = String(e); }
+    finally { settingsSaving = false; }
+  }
+  $effect(() => { if (view === "settings" && !settings) loadSettings(); });
+
+  // Resume offer: when entering player, check for saved position.
+  async function checkResume(imdb: string, vid: HTMLVideoElement) {
+    try {
+      const r = await api.position.get(imdb);
+      if (r.position && r.position.position_seconds > 30) {
+        resumeOffer = r.position;
+      }
+    } catch (_) {}
+  }
+  function acceptResume(vid: HTMLVideoElement) {
+    if (resumeOffer) {
+      vid.currentTime = resumeOffer.position_seconds;
+      vid.play().catch(() => {});
+    }
+    resumeOffer = null;
+  }
+  function declineResume() { resumeOffer = null; }
+
+  // Persist position on timeupdate (throttled to once per ~5s)
+  let lastSaveAt = 0;
+  function persistPosition(imdb: string, vid: HTMLVideoElement) {
+    const now = Date.now();
+    if (now - lastSaveAt < 5000) return;
+    lastSaveAt = now;
+    if (vid.currentTime < 5 || !isFinite(vid.duration)) return;
+    api.position.save({
+      imdb_id: imdb,
+      position_seconds: vid.currentTime,
+      duration_seconds: isFinite(vid.duration) ? vid.duration : null,
+    }).catch(() => {});
+  }
+
+  // ── P6 Trakt scrobble bridge ─────────────────────────────────────────
+  // Wire <video> play/pause/ended → /scrobble. Errors are intentionally
+  // silenced (Trakt outage shouldn't break playback).
+  let traktConnected = $state(false);
+  $effect(() => {
+    api.trakt.status().then(r => { traktConnected = !!r.connected; }).catch(() => {});
+  });
+  async function scrobble(event: "start" | "pause" | "stop", vid: HTMLVideoElement) {
+    if (!traktConnected || !activeJob || !selected) return;
+    const pct = vid.duration > 0 ? (vid.currentTime / vid.duration) * 100 : 0;
+    const ep = pickedEpisode;
+    try {
+      await api.trakt.scrobble({
+        imdb_id: ep?.id ?? selected.id,
+        type: selected.type,
+        season: ep?.season ?? null,
+        episode: ep?.episode ?? null,
+        progress_pct: pct,
+        event,
+      });
+    } catch (_) { /* silent */ }
+  }
 </script>
 
 <!-- ── Layout ─────────────────────────────────────────────────────────── -->
@@ -167,7 +298,7 @@
       <Film class="size-5 text-primary" />
     {/if}
     <h1 class="text-base font-semibold flex-1">
-      {view === "search" ? "Stremio" : selected?.name ?? "…"}
+      {view === "search" ? "Theater" : selected?.name ?? "…"}
     </h1>
     {#if account?.ok && account.is_premium}
       <Badge variant="secondary" class="text-[10px]">
@@ -205,8 +336,8 @@
           <CardContent>
             <Film class="size-12 text-muted-foreground mx-auto mb-3" />
             <CardDescription>
-              Type a movie name and hit Search.
-              <br />Results come from Cinemeta · streams from Torrentio / Comet.
+              Type a movie or series name and hit Search.
+              <br />Metadata + streams resolved via Real-Debrid.
             </CardDescription>
           </CardContent>
         </Card>
@@ -267,8 +398,65 @@
         </div>
       </div>
 
+      <!-- Episode picker — series only. Tabs by season, list per season -->
+      {#if selected.type === "series"}
+        {#if episodesLoading}
+          <div class="text-sm text-muted-foreground py-4 flex items-center gap-2">
+            <Loader2 class="size-4 animate-spin" /> Loading episodes…
+          </div>
+        {:else if !episodes.length}
+          <div class="text-sm text-muted-foreground">No episodes found for this series.</div>
+        {:else}
+          <!-- Season tabs -->
+          <div class="flex gap-1 mb-3 overflow-x-auto pb-1">
+            {#each seasons as s}
+              <button onclick={() => { activeSeason = s; pickedEpisode = null; streams = []; }}
+                      class="px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap
+                             {activeSeason === s
+                              ? 'bg-primary text-primary-foreground'
+                              : 'bg-secondary text-secondary-foreground hover:bg-secondary/70'}">
+                Season {s}
+              </button>
+            {/each}
+          </div>
+
+          <!-- Episode list -->
+          <div class="space-y-1 mb-4">
+            {#each visibleEpisodes as ep (ep.id)}
+              <button onclick={() => pickEpisode(ep)}
+                      class="w-full text-left p-2 rounded-md flex items-start gap-3
+                             {pickedEpisode?.id === ep.id
+                              ? 'bg-secondary border border-primary'
+                              : 'hover:bg-secondary/50 border border-transparent'}">
+                <div class="text-xs font-mono text-muted-foreground min-w-[40px]">
+                  S{String(ep.season).padStart(2, "0")}E{String(ep.episode).padStart(2, "0")}
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="text-sm font-medium truncate">{ep.title}</div>
+                  {#if ep.released || ep.runtime}
+                    <div class="text-[10px] text-muted-foreground">
+                      {ep.released ? new Date(ep.released).toLocaleDateString() : ""}
+                      {#if ep.runtime}· {ep.runtime}m{/if}
+                    </div>
+                  {/if}
+                </div>
+                {#if pickedEpisode?.id === ep.id}
+                  <Tv class="size-4 text-primary mt-0.5" />
+                {/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      {/if}
+
       <h3 class="text-sm font-semibold mb-2 text-muted-foreground uppercase tracking-wide">
-        Streams ({streams.length})
+        {#if selected.type === "series" && pickedEpisode}
+          Streams · S{String(pickedEpisode.season).padStart(2, "0")}E{String(pickedEpisode.episode).padStart(2, "0")} ({streams.length})
+        {:else if selected.type === "series"}
+          Pick an episode to see streams
+        {:else}
+          Streams ({streams.length})
+        {/if}
       </h3>
 
       {#if streamsLoading}
@@ -330,8 +518,29 @@
           {:else if activeJob.status === "error"}
             <div class="text-sm text-destructive">{activeJob.error ?? "Unknown error"}</div>
           {:else if url}
+            {@const playId = pickedEpisode?.id ?? selected?.id ?? activeJob.imdb_id}
             <!-- svelte-ignore a11y_media_has_caption -->
-            <video src={url} controls playsinline class="w-full rounded-md bg-black aspect-video"></video>
+            <video src={url} controls playsinline class="w-full rounded-md bg-black aspect-video"
+                    onloadedmetadata={(e) => checkResume(playId, e.currentTarget as HTMLVideoElement)}
+                    onplay={(e) => scrobble("start", e.currentTarget as HTMLVideoElement)}
+                    onpause={(e) => { scrobble("pause", e.currentTarget as HTMLVideoElement);
+                                       persistPosition(playId, e.currentTarget as HTMLVideoElement); }}
+                    ontimeupdate={(e) => persistPosition(playId, e.currentTarget as HTMLVideoElement)}
+                    onended={(e) => scrobble("stop", e.currentTarget as HTMLVideoElement)}></video>
+
+            {#if resumeOffer}
+              <div class="mt-2 p-3 rounded-md bg-secondary flex items-center gap-3">
+                <div class="flex-1 text-sm">
+                  Resume from {Math.floor(resumeOffer.position_seconds / 60)}m{Math.floor(resumeOffer.position_seconds % 60).toString().padStart(2,"0")}s?
+                </div>
+                <Button size="sm"
+                         onclick={() => {
+                           const v = document.querySelector("video") as HTMLVideoElement | null;
+                           if (v) acceptResume(v);
+                         }}>Resume</Button>
+                <Button variant="secondary" size="sm" onclick={declineResume}>Start over</Button>
+              </div>
+            {/if}
 
             <!-- Live cache progress bar (visible while streaming, dimmed when cached) -->
             <div class="mt-3">
@@ -412,6 +621,100 @@
       </div>
     {/if}
 
+    <!-- ── SETTINGS VIEW (RD / Trakt / cache / addons) ─────────────── -->
+    {#if view === "settings"}
+      {#if settingsLoading || !settings}
+        <Card><CardContent class="py-8 text-center">
+          <Loader2 class="animate-spin size-5 mx-auto text-muted-foreground" />
+        </CardContent></Card>
+      {:else}
+        <Card class="mb-3"><CardHeader>
+          <CardTitle>Playback</CardTitle>
+          <CardDescription>Default stream quality + auto-grab behaviour.</CardDescription>
+        </CardHeader><CardContent class="space-y-3">
+          <div class="flex items-center justify-between">
+            <span class="text-sm">Default quality</span>
+            <select class="bg-secondary text-sm rounded px-3 py-1.5"
+                    value={settings.default_quality}
+                    onchange={(e) => saveSettings({ default_quality: (e.currentTarget as HTMLSelectElement).value })}>
+              <option value="any">Any</option>
+              <option value="720p">720p</option>
+              <option value="1080p">1080p</option>
+              <option value="2160p">2160p (4K)</option>
+            </select>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-sm">Auto-grab top-seeded (series)</span>
+            <input type="checkbox" checked={settings.auto_grab_top_seeded}
+                   onchange={(e) => saveSettings({ auto_grab_top_seeded: (e.currentTarget as HTMLInputElement).checked })} />
+          </div>
+        </CardContent></Card>
+
+        <Card class="mb-3"><CardHeader>
+          <CardTitle>Cache</CardTitle>
+          <CardDescription>Hard cap in GB on disk usage. Empty = disk-fraction LRU only (90% partition).</CardDescription>
+        </CardHeader><CardContent>
+          <div class="flex items-center justify-between">
+            <span class="text-sm">Hard cap (GB)</span>
+            <input type="number" min="1" placeholder="—"
+                   class="bg-secondary text-sm rounded px-3 py-1.5 w-24 text-right"
+                   value={settings.cache_max_gb ?? ""}
+                   onchange={(e) => {
+                     const raw = (e.currentTarget as HTMLInputElement).value;
+                     saveSettings({ cache_max_gb: raw ? Number(raw) : null });
+                   }} />
+          </div>
+        </CardContent></Card>
+
+        <Card class="mb-3"><CardHeader>
+          <CardTitle class="flex items-center gap-2">
+            Trakt
+            {#if traktConnected}<Badge variant="secondary">Connected</Badge>
+            {:else}<Badge variant="outline">Not connected</Badge>{/if}
+          </CardTitle>
+          <CardDescription>Scrobble Theater playback to your Trakt timeline + import your watchlist.</CardDescription>
+        </CardHeader><CardContent>
+          {#if traktConnected}
+            <Button variant="secondary" size="sm"
+                     onclick={async () => { await api.trakt.disconnect(); traktConnected = false; }}>
+              Disconnect
+            </Button>
+          {:else}
+            <Button size="sm" onclick={async () => {
+              const r = await api.trakt.connectStart();
+              if (!r.ok) { lastError = r.error ?? "trakt connect failed"; return; }
+              const win = window.open(r.verification_url, "_blank");
+              alert(`Open ${r.verification_url} and enter code: ${r.user_code}`);
+              const poll = setInterval(async () => {
+                try {
+                  const pr = await api.trakt.connectPoll(r.device_code);
+                  if (pr.status === "connected") { traktConnected = true; clearInterval(poll); }
+                  else if (pr.status === "error") { clearInterval(poll); lastError = pr.error ?? "trakt poll error"; }
+                } catch (_) { /* keep polling */ }
+              }, r.interval * 1000);
+            }}>
+              Connect Trakt
+            </Button>
+          {/if}
+        </CardContent></Card>
+
+        <Card><CardHeader>
+          <CardTitle>Addons</CardTitle>
+          <CardDescription>Custom Stremio-protocol addon URLs. Leave empty for defaults (Cinemeta, Torrentio, Comet, MediaFusion, OpenSubtitles).</CardDescription>
+        </CardHeader><CardContent>
+          <textarea
+            class="w-full h-32 bg-secondary text-xs font-mono rounded p-3"
+            placeholder="https://example.com/manifest.json&#10;https://another.addon/manifest.json"
+            value={(settings.addons ?? []).join("\n")}
+            onchange={(e) => saveSettings({
+              addons: (e.currentTarget as HTMLTextAreaElement).value
+                .split("\n").map(s => s.trim()).filter(Boolean),
+            })}
+          ></textarea>
+        </CardContent></Card>
+      {/if}
+    {/if}
+
     <!-- ── LIBRARY VIEW (cached files on G:\) ──────────────────────── -->
     {#if view === "library"}
       {#if cacheDisk}
@@ -468,6 +771,11 @@
             class="flex-1 py-3 flex flex-col items-center gap-0.5
                    {view === 'library' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}">
       <HardDrive class="size-4" /><span>Library</span>
+    </button>
+    <button onclick={() => { view = "settings"; }}
+            class="flex-1 py-3 flex flex-col items-center gap-0.5
+                   {view === 'settings' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}">
+      <Settings class="size-4" /><span>Settings</span>
     </button>
   </nav>
   <!-- Spacer so content isn't hidden behind the fixed nav -->

@@ -469,6 +469,32 @@ async def stremio_search(request: Request, q: str = "", type: str = "movie",
     ]}
 
 
+@router.get("/api/miniapp/stremio/episodes")
+async def stremio_episodes(request: Request, imdb_id: str = ""):
+    """Series episode list. Used by the Detail view when type='series'.
+
+    Returns episodes sorted (S1E1, S1E2, ..., S2E1, ...) — each with the
+    Stremio addon `id` (e.g. 'tt0903747:1:1') ready to feed into
+    /streams for resolution."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio as _st
+    imdb_id = (imdb_id or "").strip()
+    if not imdb_id.startswith("tt"):
+        raise HTTPException(400, "imdb_id must start with 'tt'")
+    try:
+        eps = await asyncio.to_thread(_st.get_series_episodes, imdb_id, None)
+    except Exception as e:
+        logger.exception("stremio episodes failed")
+        raise HTTPException(500, f"episodes failed: {e!s}")
+    return {"episodes": [
+        {"id": e.id, "season": e.season, "episode": e.episode,
+         "title": e.title, "released": e.released, "overview": e.overview,
+         "thumbnail": e.thumbnail, "runtime": e.runtime}
+        for e in eps
+    ]}
+
+
 @router.get("/api/miniapp/stremio/streams")
 async def stremio_streams(request: Request, imdb_id: str = "",
                            type: str = "movie",
@@ -536,6 +562,193 @@ async def stremio_grab(body: _StremioGrabBody, request: Request):
             for f in files
         ],
     }
+
+
+# ── Theater P7 — Settings + resume position routes ─────────────────────────
+
+@router.get("/api/miniapp/stremio/settings")
+async def stremio_settings_get(request: Request):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio_settings as _ss
+    return {"settings": await _ss.get_all()}
+
+
+class _StremioSettingsPatch(BaseModel):
+    default_quality: Optional[str] = None
+    cache_max_gb: Optional[float] = None
+    addons: Optional[list[str]] = None
+    auto_grab_top_seeded: Optional[bool] = None
+
+
+@router.post("/api/miniapp/stremio/settings")
+async def stremio_settings_set(body: _StremioSettingsPatch, request: Request):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio_settings as _ss
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    return {"settings": await _ss.update(patch)}
+
+
+class _StremioPositionBody(BaseModel):
+    imdb_id: str
+    position_seconds: float
+    duration_seconds: Optional[float] = None
+
+
+@router.post("/api/miniapp/stremio/position")
+async def stremio_position_save(body: _StremioPositionBody, request: Request):
+    """Persist playback position for resume. Frontend fires this on
+    timeupdate (throttled) and on player pause/close."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio_settings as _ss
+    await _ss.save_position(body.imdb_id, body.position_seconds, body.duration_seconds)
+    return {"ok": True}
+
+
+@router.get("/api/miniapp/stremio/position/{imdb_id:path}")
+async def stremio_position_get(imdb_id: str, request: Request):
+    """Read last position so the player can `currentTime = X` on load."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio_settings as _ss
+    pos = await _ss.get_position(imdb_id)
+    return {"position": pos}
+
+
+# ── Theater P6 — Trakt sync routes ─────────────────────────────────────────
+
+@router.get("/api/miniapp/stremio/trakt/status")
+async def stremio_trakt_status(request: Request):
+    """Connected? Token valid? Days until refresh."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import trakt as _t
+    tok = _t.load_token()
+    if not tok:
+        return {"connected": False}
+    return {
+        "connected": True,
+        "expires_at": tok.expires_at,
+        "expires_in_days": round((tok.expires_at - int(__import__("time").time())) / 86400, 1),
+        "scope": tok.scope,
+    }
+
+
+@router.post("/api/miniapp/stremio/trakt/connect/start")
+async def stremio_trakt_connect_start(request: Request):
+    """Kick off Trakt device-code OAuth. Returns the user_code +
+    verification_url. UI shows these; user opens URL, types code; we
+    poll /connect/poll until token comes back."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import trakt as _t
+    try:
+        dc = await asyncio.to_thread(_t.device_code_init)
+    except _t.TraktError as e:
+        return {"ok": False, "error": str(e)}
+    return {
+        "ok": True,
+        "device_code": dc.device_code,
+        "user_code": dc.user_code,
+        "verification_url": dc.verification_url,
+        "expires_in": dc.expires_in,
+        "interval": dc.interval,
+    }
+
+
+class _TraktPollBody(BaseModel):
+    device_code: str
+
+
+@router.post("/api/miniapp/stremio/trakt/connect/poll")
+async def stremio_trakt_connect_poll(body: _TraktPollBody, request: Request):
+    """Poll the device-code flow. UI calls every `interval` seconds.
+    Returns {ok, status: 'pending'|'connected'|'error'}."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import trakt as _t
+    try:
+        tok = await asyncio.to_thread(_t.device_code_check, body.device_code)
+    except _t.TraktError as e:
+        return {"ok": False, "status": "error", "error": str(e)}
+    if tok is None:
+        return {"ok": True, "status": "pending"}
+    return {"ok": True, "status": "connected"}
+
+
+@router.post("/api/miniapp/stremio/trakt/disconnect")
+async def stremio_trakt_disconnect(request: Request):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import trakt as _t
+    _t.clear_token()
+    return {"ok": True}
+
+
+class _TraktScrobbleBody(BaseModel):
+    imdb_id: str
+    type: str = "movie"            # 'movie' | 'series'
+    season: Optional[int] = None
+    episode: Optional[int] = None
+    progress_pct: float = 0.0
+    event: str = "start"            # 'start' | 'pause' | 'stop'
+
+
+@router.post("/api/miniapp/stremio/trakt/scrobble")
+async def stremio_trakt_scrobble(body: _TraktScrobbleBody, request: Request):
+    """Fire a Trakt scrobble event. The frontend wires this to
+    <video> play/pause/ended events so the user's Trakt timeline
+    reflects Theater playback."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import trakt as _t
+    tok = _t.load_token()
+    if not tok:
+        return {"ok": False, "error": "trakt not connected"}
+    try:
+        tok = await asyncio.to_thread(_t.refresh_if_needed, tok)
+        fn = {"start": _t.scrobble_start, "pause": _t.scrobble_pause,
+              "stop": _t.scrobble_stop}.get(body.event)
+        if fn is None:
+            raise HTTPException(400, "event must be start|pause|stop")
+        out = await asyncio.to_thread(
+            fn, tok, imdb_id=body.imdb_id, type_=body.type,
+            season=body.season, episode=body.episode,
+            progress_pct=body.progress_pct,
+        )
+    except _t.TraktError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "response": out}
+
+
+@router.get("/api/miniapp/stremio/trakt/watchlist")
+async def stremio_trakt_watchlist(request: Request, type: str = "movies"):
+    """Render the user's Trakt watchlist inside Theater's Library tab."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import trakt as _t
+    tok = _t.load_token()
+    if not tok:
+        return {"ok": False, "error": "trakt not connected", "items": []}
+    try:
+        tok = await asyncio.to_thread(_t.refresh_if_needed, tok)
+        data = await asyncio.to_thread(_t.watchlist, tok, type_=type)
+    except _t.TraktError as e:
+        return {"ok": False, "error": str(e), "items": []}
+    # Map Trakt's shape to MetaItem-ish for the UI
+    items = []
+    for entry in (data or []):
+        section = entry.get("movie") or entry.get("show") or {}
+        ids = section.get("ids") or {}
+        items.append({
+            "id": ids.get("imdb") or "",
+            "type": "movie" if "movie" in entry else "series",
+            "name": section.get("title") or "",
+            "year": section.get("year"),
+        })
+    return {"ok": True, "items": items}
 
 
 # ── Stremio P4 — queue + cache routes ──────────────────────────────────────
@@ -2065,8 +2278,8 @@ button.warn { background: #ff9500; color: #fff; }
       </div>
       <div class=home-tile onclick="location.href='/app/stremio'">
         <div class=ico>🎬</div>
-        <div class=name>Stremio</div>
-        <div class=desc>Movies + series via Stremio addons + Real-Debrid · stream &amp; cache to G:\</div>
+        <div class=name>Theater</div>
+        <div class=desc>Movies + series · stream &amp; cache to G:\</div>
       </div>
       <div class=home-tile onclick="location.href='/iptv'">
         <div class=ico>📺</div>
@@ -3790,12 +4003,12 @@ async def miniapp_stremio():
         # bundle has been built. Shows a friendly "still building" stub.
         return HTMLResponse(
             """<!doctype html><meta charset=utf-8>
-<title>Sentinel Media · Stremio</title>
+<title>Sentinel Media · Theater</title>
 <style>body{font:15px system-ui;background:#0c0c0e;color:#e8e8ea;
 text-align:center;padding:50px 22px;line-height:1.6}
 a{color:#5b9dff;text-decoration:none}
 code{background:#1c1c1e;padding:2px 6px;border-radius:4px;font-size:13px}</style>
-<h2>🎬 Sentinel Media · Stremio</h2>
+<h2>🎬 Sentinel Media · Theater</h2>
 <p>The Svelte bundle isn't built yet.</p>
 <p>Run from <code>sentinel-smdl/stremio-ui/</code>:</p>
 <p><code>pnpm install &amp;&amp; pnpm build</code></p>

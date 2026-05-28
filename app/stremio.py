@@ -213,6 +213,69 @@ def get_meta(imdb_id: str, type_: str = "movie",
     return None
 
 
+# ── Series episode metadata ────────────────────────────────────────────────
+@dataclass
+class EpisodeMeta:
+    """One episode in a series (Stremio addon convention)."""
+    id: str               # 'tt0903747:1:1' — addon stream-content_id
+    imdb_id: str          # parent series imdb id
+    season: int
+    episode: int
+    title: str
+    released: Optional[str]
+    overview: Optional[str]
+    thumbnail: Optional[str]
+    runtime: Optional[int]   # minutes
+
+
+def get_series_episodes(imdb_id: str,
+                          addons: Optional[Iterable[str]] = None
+                          ) -> list[EpisodeMeta]:
+    """Pull the full episode list for a series. Cinemeta returns `videos`
+    inside the meta payload — each entry is a season/episode tuple. We
+    flatten and return ordered (S1E1, S1E2, ..., S2E1, ...).
+
+    The returned id (`tt0903747:1:1`) is exactly what /stream/<type>/<id>
+    expects — caller can hand it straight to get_streams()."""
+    addons = list(addons) if addons else DEFAULT_ADDONS
+    for manifest_url in addons:
+        manifest = get_manifest(manifest_url)
+        if not manifest:
+            continue
+        # Need full meta (Cinemeta is the only one that returns videos)
+        root = _addon_root(manifest_url)
+        url = f"{root}/meta/series/{imdb_id}.json"
+        data = _http_get_json(url)
+        if not data or "meta" not in data:
+            continue
+        videos = data["meta"].get("videos") or []
+        out: list[EpisodeMeta] = []
+        for v in videos:
+            season = int(v.get("season") or 0)
+            episode = int(v.get("episode") or v.get("number") or 0)
+            if season < 1 or episode < 1:
+                # Specials / season 0 — skip; caller can filter back in
+                continue
+            eid = v.get("id") or f"{imdb_id}:{season}:{episode}"
+            runtime = v.get("runtime")
+            if isinstance(runtime, str):
+                m = re.search(r"(\d+)", runtime)
+                runtime = int(m.group(1)) if m else None
+            out.append(EpisodeMeta(
+                id=eid, imdb_id=imdb_id,
+                season=season, episode=episode,
+                title=v.get("title") or v.get("name") or f"S{season:02d}E{episode:02d}",
+                released=v.get("released") or v.get("firstAired"),
+                overview=v.get("overview") or v.get("description"),
+                thumbnail=v.get("thumbnail"),
+                runtime=runtime,
+            ))
+        out.sort(key=lambda e: (e.season, e.episode))
+        if out:
+            return out
+    return []
+
+
 # ── Streams (Torrentio, Comet, etc.) ────────────────────────────────────────
 @dataclass
 class StreamEntry:

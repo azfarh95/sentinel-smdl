@@ -56,6 +56,30 @@ def _ensure_root() -> None:
     STREMIO_ROOT.mkdir(parents=True, exist_ok=True)
 
 
+def _folder_safe(imdb_id: str) -> str:
+    """Translate Stremio content_ids (movie: 'tt1375666'; episode:
+    'tt0903747:1:1') into Windows-safe folder names.
+
+    Movies stay as-is. Episodes get split into a parent imdb folder +
+    Sxx/Eyy subfolders so the on-disk layout reads cleanly:
+
+        Stremio/tt0903747/S01/E01/Breaking.Bad.S01E01.mkv
+                tt1375666/Inception.2010.1080p.mkv
+    """
+    parts = imdb_id.split(":")
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 3:
+        # tt<id>:S:E
+        try:
+            s = int(parts[1]); e = int(parts[2])
+            return f"{parts[0]}/S{s:02d}/E{e:02d}"
+        except ValueError:
+            pass
+    # Fallback: replace colons with hyphens
+    return imdb_id.replace(":", "-")
+
+
 @dataclass
 class CacheEntry:
     imdb_id: str
@@ -71,7 +95,10 @@ class CacheEntry:
 
     @property
     def folder(self) -> Path:
-        return STREMIO_ROOT / self.imdb_id
+        # The on-disk folder uses the colon-translated form. The dataclass's
+        # `imdb_id` stays as the raw Stremio content_id (so lookups by
+        # infohash still find it).
+        return STREMIO_ROOT / _folder_safe(self.imdb_id)
 
     @property
     def file_path(self) -> Path:
@@ -97,14 +124,23 @@ def _load_meta(folder: Path) -> Optional[CacheEntry]:
 
 
 def list_entries() -> list[CacheEntry]:
-    """All currently-cached items, in arbitrary order. Caller sorts."""
+    """All currently-cached items, in arbitrary order. Caller sorts.
+
+    Walks the tree to depth 3 so series-episode subfolders (tt.../Sxx/Eyy/)
+    are picked up alongside flat movie folders (tt.../)."""
     _ensure_root()
     out: list[CacheEntry] = []
-    for child in STREMIO_ROOT.iterdir():
-        if not child.is_dir():
+    # rglob is OK at our scale (dozens of entries); cap depth at 3 implicitly
+    # by only looking for .meta.json files.
+    for meta in STREMIO_ROOT.rglob(".meta.json"):
+        try:
+            with open(meta, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            e = CacheEntry(**d)
+        except Exception as ex:
+            logger.warning("cache meta unreadable %s: %s", meta, ex)
             continue
-        e = _load_meta(child)
-        if e and e.file_path.exists():
+        if e.file_path.exists():
             out.append(e)
     return out
 

@@ -432,8 +432,7 @@ async def files_list(request: Request, path: str = ""):
     with the same traversal-safe logic as file_serve. Owner-only since
     this exposes the whole download tree."""
     from pathlib import Path as _Path
-    from .file_serve import sign_share_url
-    from .config import DOWNLOADS_DIR
+    from .file_serve import sign_share_url, DOWNLOADS_DIR
 
     p = await _verify(request)
     require_scope(p, "smdl.admin")

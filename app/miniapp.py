@@ -1190,11 +1190,12 @@ def _enrich_watchlist_items(items: list[dict]) -> list[dict]:
         snoozed_until = int(e.get("snoozed_until") or 0)
         out.append({
             **e,
-            "username": stream_monitor.extract_username(url),
-            "platform": stream_monitor.extract_platform(url),
-            "status":   statuses.get(url, "unknown"),
-            "muted":    bool(e.get("muted")),
-            "snoozed":  snoozed_until > snoozed_threshold,
+            "username":    stream_monitor.extract_username(url),
+            "platform":    stream_monitor.extract_platform(url),
+            "status":      statuses.get(url, "unknown"),
+            "muted":       bool(e.get("muted")),
+            "auto_record": bool(e.get("auto_record")),
+            "snoozed":     snoozed_until > snoozed_threshold,
             "snoozed_until": snoozed_until or None,
         })
     # Sort group-first (platform), then username within group, both case-insensitive.
@@ -1312,6 +1313,54 @@ async def watchlist_mute(request: Request, body: WatchMuteBody):
         return JSONResponse({"ok": False, "error": msg}, status_code=400)
     items = stream_monitor.list_watchlist(chat_id=None if _is_owner(uid) else uid)
     return {"ok": True, "msg": msg, "items": _enrich_watchlist_items(items)}
+
+
+class WatchAutoRecordBody(BaseModel):
+    url: str
+    auto_record: bool
+
+
+@router.post("/api/miniapp/watchlist/auto_record")
+async def watchlist_auto_record(request: Request, body: WatchAutoRecordBody):
+    """Toggle the auto_record flag (#30). When true + not muted, the
+    monitor skips the Yes/No DM prompt and fires record_live() directly
+    on the OFFLINE→LIVE transition."""
+    p = await _verify(request)
+    require_scope(p, "smdl.streamtracker")
+    uid = int(p["user"]["id"])
+    ok, msg = stream_monitor.set_auto_record(
+        body.url, body.auto_record,
+        chat_id=None if _is_owner(uid) else uid,
+    )
+    if not ok:
+        return JSONResponse({"ok": False, "error": msg}, status_code=400)
+    items = stream_monitor.list_watchlist(chat_id=None if _is_owner(uid) else uid)
+    return {"ok": True, "msg": msg, "items": _enrich_watchlist_items(items)}
+
+
+class WatchBulkMuteBody(BaseModel):
+    platform: str
+    muted: bool
+
+
+@router.post("/api/miniapp/watchlist/bulk_mute")
+async def watchlist_bulk_mute(request: Request, body: WatchBulkMuteBody):
+    """Mute or unmute every watchlist entry on a given platform (#30).
+    Non-owners only affect their own entries."""
+    p = await _verify(request)
+    require_scope(p, "smdl.streamtracker")
+    uid = int(p["user"]["id"])
+    count, affected = stream_monitor.set_bulk_mute_by_platform(
+        body.platform, body.muted,
+        chat_id=None if _is_owner(uid) else uid,
+    )
+    items = stream_monitor.list_watchlist(chat_id=None if _is_owner(uid) else uid)
+    return {
+        "ok": True,
+        "count": count,
+        "affected": affected,
+        "items": _enrich_watchlist_items(items),
+    }
 
 
 @router.get("/api/miniapp/active")
@@ -2322,6 +2371,54 @@ button.warn { background: #ff9500; color: #fff; }
     padding: 2px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.4px; }
 .user-row .owner-badge { background: rgba(52,199,89,0.15); color: var(--success);
     padding: 2px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.4px; }
+/* Watchlist tile grid (#30) — replaces full-width per-streamer cards */
+.wl-site-section { margin-bottom: 14px; }
+.wl-site-bar { display: flex; align-items: center; gap: 8px; padding: 8px 4px;
+    cursor: pointer; user-select: none; }
+.wl-site-bar .caret { font-size: 10px; color: var(--muted); width: 12px;
+    transition: transform 150ms ease; }
+.wl-site-section.collapsed .wl-site-bar .caret { transform: rotate(-90deg); }
+.wl-site-section.collapsed .wl-tiles { display: none; }
+.wl-site-bar .title { font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.6px; color: var(--muted); }
+.wl-site-bar .count { background: var(--separator); color: var(--muted);
+    border-radius: 10px; padding: 1px 7px; font-size: 10px; font-weight: 600; }
+.wl-site-bar .bulk { margin-left: auto; display: flex; gap: 4px; }
+.wl-site-bar .bulk button { background: transparent; color: var(--muted);
+    border: 1px solid var(--separator); padding: 3px 8px; font-size: 10px;
+    line-height: 1; border-radius: 6px; cursor: pointer; }
+.wl-site-bar .bulk button:hover { color: var(--button); border-color: var(--button); }
+.wl-tiles { display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 8px; }
+.wl-tile { background: var(--card); border: 1px solid var(--separator);
+    border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column;
+    gap: 4px; min-width: 0; }
+.wl-tile.recording { box-shadow: inset 3px 0 0 0 var(--success); }
+.wl-tile .uname { display: flex; align-items: center; gap: 6px; font-weight: 600;
+    font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+.wl-tile .uname .dot { margin-right: 0; flex-shrink: 0; }
+.wl-tile .uname .u-link { color: var(--fg); text-decoration: none; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-tile .uname .u-link:active { color: var(--button); }
+.wl-tile .sub { font-size: 10px; color: var(--muted); line-height: 1.3;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-tile .sub .rec-tag { color: var(--success); font-weight: 700; }
+.wl-tile .actions { display: flex; gap: 4px; margin-top: 2px; }
+.wl-tile .actions button { background: transparent; color: var(--muted);
+    border: 1px solid var(--separator); padding: 4px 6px; font-size: 13px;
+    line-height: 1; border-radius: 5px; flex: 1; min-width: 0; cursor: pointer; }
+.wl-tile .actions button:hover { color: var(--button); border-color: var(--button); }
+.wl-tile .actions button.on { color: #ff9500; border-color: #ff9500; }
+.wl-tile .actions button.rec-on { color: var(--destructive); border-color: var(--destructive); }
+.wl-tile .actions button.auto-on { color: var(--success); border-color: var(--success); }
+.wl-tile .wl-edit { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--separator);
+    display: none; }
+.wl-tile .wl-edit.open { display: block; }
+.wl-tile .wl-edit input { font-size: 11px; padding: 5px 7px; margin-bottom: 4px; }
+.wl-tile .wl-edit button { font-size: 10px; padding: 3px 6px; }
+
 /* Profile Scraper — compact one-line row (replaces stacked layout, #33) */
 .scraper-row { display: flex; align-items: center; gap: 8px; padding: 6px 0;
     border-top: 1px solid var(--separator); min-height: 36px; }
@@ -2990,6 +3087,25 @@ const PLATFORM_ICON = {
   'Bilibili': '📺', 'Douyu': '📺',
 };
 
+// Watchlist tile grid (#30). One small tile per streamer:
+//   line 1: 🟢 @username
+//   line 2: LIVE/offline + label + muted/auto chips
+//   line 3: ▶/⏹ rec  ·  🔔/🔕 mute  ·  🎬 auto-rec  ·  ✎ edit  ·  🗑 remove
+// Per-platform sections are collapsible (state persisted in
+// localStorage as smdl_wl_collapsed:<platform>). Each section has its
+// own Mute-All / Unmute-All buttons.
+function wlCollapsedKey(platform) { return 'smdl_wl_collapsed:' + (platform || 'Other'); }
+function wlIsCollapsed(platform) {
+  try { return localStorage.getItem(wlCollapsedKey(platform)) === '1'; } catch { return false; }
+}
+function wlToggleCollapse(platform) {
+  const cur = wlIsCollapsed(platform);
+  try { localStorage.setItem(wlCollapsedKey(platform), cur ? '0' : '1'); } catch {}
+  const sec = document.getElementById('wl-sec-' + cssEscapeId(platform));
+  if (sec) sec.classList.toggle('collapsed', !cur);
+}
+function cssEscapeId(s) { return String(s).replace(/[^a-z0-9_-]/gi, '_'); }
+
 async function loadWatchlist() {
   try {
     const j = await api('/api/miniapp/watchlist');
@@ -2997,8 +3113,7 @@ async function loadWatchlist() {
     if (!j.items.length) { root.innerHTML = '<div class=empty>Watchlist is empty.</div>'; return; }
     const active = j.active || {};
 
-    // Group items by platform (already sorted alphabetically server-side
-    // by platform then username, so preserve insertion order here).
+    // Group by platform; server already sorted by (platform, username).
     const groups = new Map();
     for (const w of j.items) {
       const k = w.platform || 'Other';
@@ -3010,63 +3125,95 @@ async function loadWatchlist() {
     const sections = [];
     for (const [platform, rows] of groups) {
       const icon = PLATFORM_ICON[platform] || '🌐';
-      const head = `<div class=wl-group-head>${icon} ${esc(platform)}
-                      <span class=wl-group-count>${rows.length}</span></div>`;
-      const body = rows.map(w => {
+      const collapsed = wlIsCollapsed(platform);
+      const platformLit = JSON.stringify(platform);
+      const allMuted = rows.every(w => !!w.muted);
+      const bulkBtn = allMuted
+        ? `<button onclick='bulkMute(${platformLit}, false)' title="Unmute every ${esc(platform)} entry">🔔 Unmute all</button>`
+        : `<button onclick='bulkMute(${platformLit}, true)' title="Mute every ${esc(platform)} entry">🔕 Mute all</button>`;
+      const tiles = rows.map(w => {
         const i = idx++;
         const status = w.status || 'unknown';
         const muted  = !!w.muted;
+        const auto   = !!w.auto_record;
         const u = encodeURIComponent(w.url);
-        const muteTitle = muted ? 'Muted — tap to unmute' : 'Mute notifications';
-        const muteIcon  = muted ? '🔕' : '🔔';
         const job = active[w.url];
         const recording = !!job;
-        // Status sub-line: "LIVE · 12m 34s · 145.3 MB" when recording, plain
-        // "LIVE"/"offline"/"unknown" otherwise.
         let sub;
         if (recording) {
-          sub = `<span class=rec-tag>● REC</span> · LIVE · ${duration(job.elapsed_sec)} · ${bytes(job.bytes)}`;
+          sub = `<span class=rec-tag>● REC</span> · ${duration(job.elapsed_sec)} · ${bytes(job.bytes)}`;
         } else {
-          sub = statusLabel(status)
-              + (w.label && w.label !== w.url ? ' · ' + esc(w.label) : '')
-              + (muted ? ' · 🔕 muted' : '');
+          const pieces = [statusLabel(status)];
+          if (auto)  pieces.push('🎬 auto');
+          if (muted) pieces.push('🔕');
+          sub = pieces.join(' · ');
         }
-        // Action button: ⏹ Stop while recording, ▶ Rec otherwise.
         const actionBtn = recording
-          ? `<button class="icon-btn rec-on" title="Stop recording"
-                     onclick="stopFromWatchlist(${job.chat_id})">⏹</button>`
-          : `<button class="icon-btn" title="Start recording"
-                     onclick="recFromWatchlist('${u}')">▶</button>`;
+          ? `<button class="rec-on" title="Stop recording" onclick="stopFromWatchlist(${job.chat_id})">⏹</button>`
+          : `<button title="Start recording" onclick="recFromWatchlist('${u}')">▶</button>`;
         return `
-        <div class="card ${recording?'recording':''}">
-          <div class=wl-row>
+        <div class="wl-tile ${recording?'recording':''}">
+          <div class=uname>
             <span class="dot ${esc(status)}" title="${esc(statusLabel(status))}"></span>
-            <div class=grow>
-              <div class=username><a class=u-link onclick="openExternal('${u}')">${esc(w.username || w.url)}</a></div>
-              <div class=sub>${sub}</div>
-            </div>
+            <a class=u-link onclick="openExternal('${u}')" title="${esc(w.url)}">${esc(w.username || w.url)}</a>
+          </div>
+          <div class=sub title="${esc(w.label || '')}">${sub}</div>
+          <div class=actions>
             ${actionBtn}
-            <button class="icon-btn ${muted?'on':''}" title="${esc(muteTitle)}"
-                    onclick="toggleMute('${u}', ${muted?'false':'true'})">${muteIcon}</button>
-            <button class="icon-btn" title="Edit URL" onclick="toggleEdit(${i})">✎</button>
-            <button class="icon-btn" title="Remove" onclick="removeWatch('${u}')">🗑</button>
+            <button class="${muted?'on':''}" title="${esc(muted?'Unmute':'Mute notifications')}"
+                    onclick="toggleMute('${u}', ${muted?'false':'true'})">${muted?'🔕':'🔔'}</button>
+            <button class="${auto?'auto-on':''}" title="Auto-record when live (skip Yes/No prompt)"
+                    onclick="toggleAutoRecord('${u}', ${auto?'false':'true'})">🎬</button>
+            <button title="Edit URL" onclick="toggleEdit(${i})">✎</button>
+            <button title="Remove" onclick="removeWatch('${u}')">🗑</button>
           </div>
           <div class="wl-edit" id="wl-edit-${i}">
             <div class=field>URL</div>
             <input id="wl-url-${i}" value="${esc(w.url)}">
             <div class=field>Label (optional)</div>
             <input id="wl-label-${i}" value="${esc(w.label || '')}">
-            <div class=row>
-              <button class=sec onclick="toggleEdit(${i})">Cancel</button>
+            <div class=row style="display:flex;gap:4px;margin-top:4px">
+              <button onclick="toggleEdit(${i})">Cancel</button>
               <button onclick="saveEdit(${i}, '${u}')">Save</button>
             </div>
           </div>
         </div>`;
       }).join('');
-      sections.push(head + body);
+      const safeId = cssEscapeId(platform);
+      sections.push(`
+        <div class="wl-site-section ${collapsed?'collapsed':''}" id="wl-sec-${safeId}">
+          <div class=wl-site-bar>
+            <span class=caret onclick='wlToggleCollapse(${platformLit})'>▼</span>
+            <span class=title onclick='wlToggleCollapse(${platformLit})'>${icon} ${esc(platform)}</span>
+            <span class=count>${rows.length}</span>
+            <span class=bulk>${bulkBtn}</span>
+          </div>
+          <div class=wl-tiles>${tiles}</div>
+        </div>`);
     }
     root.innerHTML = sections.join('');
   } catch(e) { showErr('Load failed: '+e); }
+}
+
+async function toggleAutoRecord(encodedUrl, on) {
+  const url = decodeURIComponent(encodedUrl);
+  try {
+    await api('/api/miniapp/watchlist/auto_record', {
+      method: 'POST', body: JSON.stringify({url, auto_record: !!on}),
+    });
+    showOk(on ? '🎬 Auto-record enabled' : 'Auto-record disabled');
+    loadWatchlist();
+  } catch(e) { showErr(e); }
+}
+
+async function bulkMute(platform, muted) {
+  try {
+    const r = await api('/api/miniapp/watchlist/bulk_mute', {
+      method: 'POST', body: JSON.stringify({platform, muted}),
+    });
+    showOk(`${muted ? '🔕 Muted' : '🔔 Unmuted'} ${r.count} ${esc(platform)} entr${r.count===1?'y':'ies'}`);
+    loadWatchlist();
+  } catch(e) { showErr(e); }
 }
 
 async function recFromWatchlist(encodedUrl) {

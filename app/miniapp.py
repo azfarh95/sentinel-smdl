@@ -1323,6 +1323,33 @@ async def admin_scraper_probe(request: Request, body: ScraperProfileBody):
     return {"ok": True, "msg": msg}
 
 
+@router.post("/api/miniapp/admin/scraper/backfill")
+async def admin_scraper_backfill(request: Request, body: ScraperProfileBody):
+    """Spawn gallery-dl against the entire profile for historical content.
+    The regular scraper is forward-looking (baselines on first probe);
+    this endpoint complements it by pulling everything that already exists.
+    Runs in the background — returns immediately."""
+    p = await _verify(request)
+    require_scope(p, "smdl.admin")
+    _require_owner(p)
+    from . import profile_monitor as _pm
+    ok, msg = await _pm.start_backfill(body.url)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"ok": True, "msg": msg}
+
+
+@router.get("/api/miniapp/admin/scraper/backfill_status")
+async def admin_scraper_backfill_status(request: Request):
+    """In-memory status dict for all known backfills (running + recent).
+    Resets on daemon restart."""
+    p = await _verify(request)
+    require_scope(p, "smdl.admin")
+    _require_owner(p)
+    from . import profile_monitor as _pm
+    return _pm.backfill_status()
+
+
 # ── Live-recording repair (owner-only) ──────────────────────────────────────
 
 
@@ -2614,6 +2641,7 @@ async function loadScraper() {
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
           <button class="small sec" onclick='scraperProbeNow(${JSON.stringify(p.url)})'>🔄 Probe</button>
+          <button class="small sec" onclick='scraperBackfill(${JSON.stringify(p.url)})'>📦 Backfill</button>
           ${enabled
             ? `<button class="small sec" onclick='scraperPause(${JSON.stringify(p.url)})'>⏸ Pause</button>`
             : `<button class="small" onclick='scraperResume(${JSON.stringify(p.url)})'>▶ Resume</button>`}
@@ -2762,6 +2790,18 @@ async function scraperProbeNow(url) {
     });
     showOk(r.msg || 'Probed');
     loadScraper();
+  } catch(e) { showErr(e); }
+}
+
+async function scraperBackfill(url) {
+  // Confirm — backfill can pull hundreds of items and take a while.
+  if (!confirm('Backfill the entire profile history? This runs gallery-dl in the background and can take several minutes for large profiles.')) return;
+  try {
+    showOk('📦 Starting backfill…');
+    const r = await api('/api/miniapp/admin/scraper/backfill', {
+      method: 'POST', body: JSON.stringify({url}),
+    });
+    showOk(r.msg || 'Backfill started');
   } catch(e) { showErr(e); }
 }
 

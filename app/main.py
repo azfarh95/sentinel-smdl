@@ -200,6 +200,31 @@ app.include_router(sticker_routes.router)
 app.include_router(iptv_routes.router)
 
 
+# Global 5xx → JSON shim (#38). Without this, an unhandled exception inside
+# any route handler falls through to uvicorn's default text/plain
+# "Internal Server Error" response. Mini App clients that do `await r.json()`
+# then choke with "SyntaxError: Unexpected token 'I', \"Internal S\"... is
+# not valid JSON" — the api() helper shield (#35) catches that now, but the
+# proper fix is to never emit a non-JSON body in the first place. Logs the
+# full traceback so we keep the diagnostic but the wire response stays
+# JSON-shaped for every API consumer.
+from fastapi.responses import JSONResponse as _JSONResponse
+from fastapi.requests import Request as _Request
+from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+@app.exception_handler(Exception)
+async def _all_exception_handler(request: _Request, exc: Exception):
+    # Let FastAPI/Starlette's own HTTPException path handle 4xx etc.; only
+    # catch the "fell through to 500" path.
+    if isinstance(exc, _StarletteHTTPException):
+        return _JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    logger.exception("unhandled exception in %s %s", request.method, request.url.path)
+    return _JSONResponse(
+        {"detail": f"{type(exc).__name__}: {exc}"[:500]},
+        status_code=500,
+    )
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "sm-dl"}

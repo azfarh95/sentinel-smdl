@@ -292,16 +292,34 @@ def require_scope(payload: dict, scope: str) -> None:
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-async def _list_recent_downloads(limit: int = 50) -> list[dict]:
-    """Return the most recent N entries from url_cache, newest first."""
+async def _list_recent_downloads(limit: int = 50,
+                                   chat_id: Optional[int] = None) -> list[dict]:
+    """Return the most recent N entries the user can see.
+
+    When `chat_id` is provided (typical Mini App flow), reads from
+    download_history filtered to that user — matching the semantics of
+    /downloads/clear which wipes per-user history. Without chat_id (e.g.
+    legacy callers / boot smoke), falls back to url_cache global view.
+
+    Bug history (2026-05-28): Recent Downloads displayed url_cache
+    (global content cache, never user-filtered) while Clear wiped
+    download_history (per-user). Result: user clicks Clear → sees
+    "Cleared N rows" → list reappears because url_cache wasn't touched.
+    The fix is to source the display from the same table Clear acts on.
+    """
     out = []
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT url, files, platform, uploader, created_at "
-            "FROM url_cache ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        ) as cur:
+        if chat_id is not None:
+            sql = ("SELECT url, files, platform, uploader, downloaded_at AS created_at "
+                   "FROM download_history WHERE chat_id = ? "
+                   "ORDER BY downloaded_at DESC LIMIT ?")
+            params: tuple = (chat_id, limit)
+        else:
+            sql = ("SELECT url, files, platform, uploader, created_at "
+                   "FROM url_cache ORDER BY created_at DESC LIMIT ?")
+            params = (limit,)
+        async with db.execute(sql, params) as cur:
             async for row in cur:
                 d = dict(row)
                 try: d["files"] = json.loads(d.get("files") or "[]")
@@ -1005,9 +1023,14 @@ async def files_list(request: Request, path: str = ""):
 
 @router.get("/api/miniapp/downloads")
 async def downloads(request: Request, limit: int = 50):
-    """Per-user download history. Owner sees their own attributed downloads
-    plus, if the history table is empty for them, falls back to the global
-    url_cache (so the tab isn't empty for downloads made before this PR).
+    """Per-user download history.
+
+    Bug history (2026-05-28): previously fell back to the global
+    `url_cache` when the user's history was empty AND they were the owner.
+    That broke the Clear button — Clear wipes download_history; if history
+    went empty, the fallback re-populated the view from url_cache, so the
+    user saw "Cleared N rows" followed by the same entries reappearing.
+    Now: empty history = empty view. Period.
 
     Large downloads + live recordings get a signed share URL attached so the
     Mini App can render a tappable link that streams over the public tunnel."""
@@ -1015,11 +1038,6 @@ async def downloads(request: Request, limit: int = 50):
     require_scope(p, "smdl.downloader")
     uid = int(p["user"]["id"])
     rows = await _db.list_download_history(uid, limit=max(1, min(limit, 200)))
-    if not rows and _is_owner(uid):
-        rows = await _list_recent_downloads(limit=max(1, min(limit, 200)))
-        for r in rows:
-            r["downloaded_at"] = r.pop("created_at", None)
-            r["source"] = "url_cache (pre-history)"
     rows = [_enrich_with_share_url(r) for r in rows]
     return {"items": rows, "count": len(rows), "user_id": uid}
 
@@ -1620,6 +1638,28 @@ async def admin_approve_user(request: Request, body: UserStatusBody):
         return JSONResponse({"ok": False,
                              "error": "User not found, or is banned (unban first)."},
                             status_code=400)
+    return {"ok": True}
+
+
+class DenyUserBody(BaseModel):
+    chat_id: int
+    reason: str = ""
+
+
+@router.post("/api/miniapp/admin/users/deny")
+async def admin_deny_user(request: Request, body: DenyUserBody):
+    """Reject a pending join request. Removes the user row (they can
+    re-request later). Distinguished from ban/revoke which keeps the row
+    for audit purposes — deny is for users who never had access in the
+    first place."""
+    p = await _verify(request)
+    require_scope(p, "smdl.admin")
+    _require_owner(p)
+    # Use the existing ban path under the hood with a 'denied at pending'
+    # marker; this keeps a paper trail without inventing a new status enum.
+    ok = await _db.ban_user(body.chat_id, reason=f"DENIED@pending: {body.reason}".strip())
+    if not ok:
+        return JSONResponse({"ok": False, "error": "User not found"}, status_code=404)
     return {"ok": True}
 
 
@@ -2273,7 +2313,7 @@ button.warn { background: #ff9500; color: #fff; }
       </div>
       <div class=home-tile onclick="goto('watchlist')">
         <div class=ico>👁</div>
-        <div class=name>Watchlist</div>
+        <div class=name>Streams</div>
         <div class=desc>Auto-record streams from twitch · youtube · kick</div>
       </div>
       <div class=home-tile onclick="location.href='/app/stremio'">
@@ -2283,7 +2323,7 @@ button.warn { background: #ff9500; color: #fff; }
       </div>
       <div class=home-tile onclick="location.href='/iptv'">
         <div class=ico>📺</div>
-        <div class=name>Live TV</div>
+        <div class=name>IPTV</div>
         <div class=desc>11k+ public channels · EPG · scheduled DVR</div>
       </div>
       <div class="home-tile admin-only" id=tile-files onclick="goto('files')">
@@ -2380,10 +2420,10 @@ button.warn { background: #ff9500; color: #fff; }
     <div class=icon>📥</div><div class=label>DL</div>
   </div>
   <div class=sidebar-item id=nav-watchlist onclick="goto('watchlist')">
-    <div class=icon>👁</div><div class=label>Watch</div>
+    <div class=icon>👁</div><div class=label>Streams</div>
   </div>
   <div class=sidebar-item id=nav-live onclick="location.href='/iptv'">
-    <div class=icon>📺</div><div class=label>Live TV</div>
+    <div class=icon>📺</div><div class=label>IPTV</div>
   </div>
   <div class="sidebar-item admin-only" id=nav-files onclick="goto('files')">
     <div class=icon>📁</div><div class=label>Files</div>
@@ -3240,12 +3280,15 @@ async function loadAdmin() {
                     code ${esc(codeStr)} ${expired ? '· EXPIRED' : ''}
                   </div>
                 </div>
-                <button onclick="approveUser(${u.chat_id})">Approve</button>
+                <span style="display:flex;gap:6px">
+                  <button onclick="approveUser(${u.chat_id})">Approve</button>
+                  <button class="sec" onclick="denyUser(${u.chat_id})">Deny</button>
+                </span>
               </div>`;
             }).join('')}
       </div>`;
 
-    // 2b. Existing users (active + banned)
+    // 2b. Existing users (active + revoked)
     const others = users.items.filter(u => u.status !== 'pending');
     const usersHtml = `
       <div class=card>
@@ -3253,7 +3296,7 @@ async function loadAdmin() {
         ${others.length === 0
           ? '<div class=meta>No approved users yet.</div>'
           : others.map(u => {
-              const banned = (u.status === 'banned');
+              const revoked = (u.status === 'banned');   // status string kept for backend compat
               const owner = !!u.is_owner;
               const handle = u.username ? '@' + u.username : (u.first_name || ('chat ' + u.chat_id));
               return `
@@ -3261,14 +3304,14 @@ async function loadAdmin() {
                 <div class=grow>
                   <div class=name>${esc(handle)}
                     ${owner ? '<span class=owner-badge style="margin-left:6px">OWNER</span>' : ''}
-                    ${banned ? '<span class=ban-badge style="margin-left:6px">BANNED</span>' : ''}
+                    ${revoked ? '<span class=ban-badge style="margin-left:6px">REVOKED</span>' : ''}
                   </div>
                   <div class=meta>chat_id ${u.chat_id} · ${u.interaction_count}× · last seen ${timeago(u.last_seen)}</div>
                   ${u.banned_reason ? `<div class=meta>Reason: ${esc(u.banned_reason)}</div>` : ''}
                 </div>
-                ${owner ? '' : (banned
-                  ? `<button class=sec onclick="unbanUser(${u.chat_id})">Unban</button>`
-                  : `<button class="small danger" onclick="banUser(${u.chat_id})">Ban</button>`)}
+                ${owner ? '' : (revoked
+                  ? `<button class=sec onclick="unbanUser(${u.chat_id})">Restore</button>`
+                  : `<button class="small danger" onclick="banUser(${u.chat_id})">Revoke</button>`)}
               </div>`;
             }).join('')}
       </div>`;
@@ -3897,12 +3940,13 @@ async function saveAdminModeReason() {
 }
 
 async function banUser(chat_id) {
-  const reason = prompt('Reason for ban (optional, internal):') || '';
+  if (!confirm('Revoke this user\'s access? They will lose all SMDL access.')) return;
+  const reason = prompt('Reason (optional, internal):') || '';
   try {
     await api('/api/miniapp/admin/users/ban', {
       method: 'POST', body: JSON.stringify({chat_id, reason}),
     });
-    showOk('Banned');
+    showOk('Revoked');
     loadAdmin();
   } catch(e) { showErr(e); }
 }
@@ -3912,7 +3956,19 @@ async function unbanUser(chat_id) {
     await api('/api/miniapp/admin/users/unban', {
       method: 'POST', body: JSON.stringify({chat_id}),
     });
-    showOk('Unbanned');
+    showOk('Restored');
+    loadAdmin();
+  } catch(e) { showErr(e); }
+}
+
+async function denyUser(chat_id) {
+  if (!confirm('Deny this pending request? The user can re-request later.')) return;
+  const reason = prompt('Reason (optional, sent to user):') || '';
+  try {
+    await api('/api/miniapp/admin/users/deny', {
+      method: 'POST', body: JSON.stringify({chat_id, reason}),
+    });
+    showOk('Denied');
     loadAdmin();
   } catch(e) { showErr(e); }
 }
@@ -3947,6 +4003,17 @@ bootstrapWhoami();
 goto('watchlist');
 </script>
 </body></html>"""
+
+
+@router.get("/")
+async def miniapp_root_redirect():
+    """Bare-domain landing → Mini App home. The SMDL TWA points at this
+    URL on install; without this redirect the user sees a FastAPI 404.
+
+    Hash-strip is intentional: TG-WebApp initData arrives on /app's hash,
+    not the / hash. The browser handles forwarding the hash through 302
+    redirects natively, so we just emit the path."""
+    return RedirectResponse(url="/app", status_code=302)
 
 
 @router.get("/app", response_class=HTMLResponse)

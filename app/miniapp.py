@@ -414,6 +414,296 @@ def _enrich_with_share_url(row: dict) -> dict:
     return row
 
 
+# ── Stremio module (P1 + P3) ─────────────────────────────────────────────────
+# Backend endpoints for the Stremio Mini App tile. The actual UI is a
+# Svelte sub-app under static/stremio/ — these endpoints feed it.
+#
+# Auth: same _verify() initData gate as the rest of /api/miniapp/*.
+# Authorisation: owner-only (RD token + G:\ writes shouldn't be exposed
+# to allowed-users until we add per-user budgets).
+
+@router.get("/api/miniapp/stremio/account")
+async def stremio_account(request: Request):
+    """Real-Debrid account check — token validity, premium days remaining.
+    Used by the Mini App settings page + as a boot health check."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import realdebrid as _rd
+    try:
+        a = _rd.get_account()
+    except _rd.RealDebridError as e:
+        return {"ok": False, "error": str(e)}
+    return {
+        "ok": True,
+        "username": a.username,
+        "email": a.email,
+        "type": a.type,
+        "is_premium": a.is_premium,
+        "expiration": a.expiration_iso,
+        "days_left": round(a.premium_seconds_left / 86400, 1),
+        "points": a.points,
+    }
+
+
+@router.get("/api/miniapp/stremio/search")
+async def stremio_search(request: Request, q: str = "", type: str = "movie",
+                          limit: int = 24):
+    """Cinemeta search. Returns a list of MetaItems (id, name, year, poster,
+    imdb_rating, genres). The Svelte UI renders these as poster tiles."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio as _st
+    q = (q or "").strip()
+    if not q:
+        return {"results": []}
+    try:
+        items = await asyncio.to_thread(_st.search, q, type, None, limit)
+    except Exception as e:
+        logger.exception("stremio search failed")
+        raise HTTPException(500, f"search failed: {e!s}")
+    return {"results": [
+        {"id": m.id, "type": m.type, "name": m.name, "year": m.year,
+         "poster": m.poster, "description": m.description,
+         "imdb_rating": m.imdb_rating, "genres": m.genres}
+        for m in items
+    ]}
+
+
+@router.get("/api/miniapp/stremio/streams")
+async def stremio_streams(request: Request, imdb_id: str = "",
+                           type: str = "movie",
+                           quality: str = "1080p"):
+    """Fan out across stream-provider addons (Torrentio/Comet/MediaFusion),
+    re-rank by preferred quality + seeders, return the top N for the UI."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio as _st
+    imdb_id = (imdb_id or "").strip()
+    if not imdb_id.startswith("tt"):
+        raise HTTPException(400, "imdb_id must start with 'tt'")
+    try:
+        raw = await asyncio.to_thread(_st.get_streams, imdb_id, type, None)
+    except Exception as e:
+        logger.exception("stremio streams failed")
+        raise HTTPException(500, f"streams failed: {e!s}")
+    ranked = _st.rank_streams(raw, preferred_quality=quality)
+    return {"streams": [
+        {"title": s.title, "infohash": s.infohash, "has_magnet": bool(s.magnet),
+         "size_bytes": s.size_bytes, "seeders": s.seeders, "quality": s.quality,
+         "source_addon": s.source_addon, "file_index": s.file_index}
+        for s in ranked[:40]
+    ]}
+
+
+class _StremioGrabBody(BaseModel):
+    infohash: Optional[str] = None
+    magnet: Optional[str] = None
+    title: Optional[str] = None
+    file_index: Optional[int] = None
+
+
+@router.post("/api/miniapp/stremio/grab")
+async def stremio_grab(body: _StremioGrabBody, request: Request):
+    """Resolve a magnet/infohash through Real-Debrid → return the direct
+    streamable URL(s). Caller then either feeds the URL into <video> for
+    immediate playback or hands it to the SMDL download manager for
+    cache-to-G:\ (P5).
+
+    Long-poll: RD can take 30s–5min for uncached torrents. The UI should
+    show a spinner with the RD progress (P4 will surface that via a
+    separate status endpoint)."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio as _st  # for infohash → magnet helper
+    from . import realdebrid as _rd
+
+    magnet = body.magnet
+    if not magnet and body.infohash:
+        magnet = f"magnet:?xt=urn:btih:{body.infohash.lower()}"
+    if not magnet:
+        raise HTTPException(400, "either magnet or infohash required")
+
+    try:
+        files = await asyncio.to_thread(_rd.magnet_to_direct_urls, magnet,
+                                          timeout=300)
+    except _rd.RealDebridError as e:
+        return {"ok": False, "error": str(e)}
+    return {
+        "ok": True,
+        "files": [
+            {"filename": f.filename, "filesize": f.filesize,
+             "direct_url": f.direct_url, "mime_type": f.mime_type}
+            for f in files
+        ],
+    }
+
+
+# ── Stremio P4 — queue + cache routes ──────────────────────────────────────
+
+class _StremioQueueBody(BaseModel):
+    imdb_id: str
+    type: str = "movie"
+    title: str = ""
+    infohash: Optional[str] = None
+    magnet: Optional[str] = None
+    file_index: Optional[int] = None
+    source_stream_title: Optional[str] = None
+    quality: Optional[str] = None
+    expected_size: Optional[int] = None
+
+
+@router.post("/api/miniapp/stremio/queue")
+async def stremio_queue_enqueue(body: _StremioQueueBody, request: Request):
+    """Enqueue a grab. Returns the new job_id. Caller polls /jobs/{id}
+    until status becomes 'streaming' (direct_url available — playback
+    can start) or 'cached' (file on disk — local play)."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio_queue as _sq
+    magnet = body.magnet
+    if not magnet and body.infohash:
+        magnet = f"magnet:?xt=urn:btih:{body.infohash.lower()}"
+    if not magnet or not body.infohash:
+        raise HTTPException(400, "infohash (and ideally magnet) required")
+    job_id = await _sq.enqueue(
+        imdb_id=body.imdb_id, type_=body.type, title=body.title,
+        infohash=body.infohash, magnet=magnet,
+        file_index=body.file_index,
+        source_stream_title=body.source_stream_title,
+        quality=body.quality, expected_size=body.expected_size,
+    )
+    job = await _sq.get_job(job_id)
+    return {"ok": True, "job_id": job_id, "job": _job_to_dict(job)}
+
+
+@router.get("/api/miniapp/stremio/jobs")
+async def stremio_jobs_list(request: Request, limit: int = 50):
+    """Recent jobs across all states. Active first, then most recent."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio_queue as _sq
+    jobs = await _sq.list_jobs(limit=limit)
+    return {"jobs": [_job_to_dict(j) for j in jobs]}
+
+
+@router.get("/api/miniapp/stremio/jobs/{job_id}")
+async def stremio_jobs_get(job_id: int, request: Request):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio_queue as _sq
+    job = await _sq.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    return {"job": _job_to_dict(job)}
+
+
+@router.get("/api/miniapp/stremio/file/{infohash}")
+async def stremio_file_stream(infohash: str, request: Request):
+    """Range-served local file for a cached Stremio grab. Phones can
+    seek mid-stream because we honour the HTTP Range header."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio_cache as _cache
+    entry = _cache.find_by_infohash(infohash)
+    if not entry or not entry.file_path.exists():
+        raise HTTPException(404, "not cached")
+    _cache.touch_last_played(infohash)
+    return _serve_with_range(entry.file_path, entry.mime or "application/octet-stream",
+                              request.headers.get("range"))
+
+
+@router.get("/api/miniapp/stremio/cache")
+async def stremio_cache_list(request: Request):
+    """List everything in G:\\YT-DLP\\Stremio\\ — what's currently on disk.
+    Used by the Library view to show 'cached' badges + click-to-rewatch."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio_cache as _cache
+    entries = _cache.list_entries()
+    total, used, free = _cache._disk_usage_bytes()
+    return {
+        "entries": [
+            {"imdb_id": e.imdb_id, "infohash": e.infohash, "title": e.title,
+             "filename": e.filename, "filesize": e.filesize, "mime": e.mime,
+             "grabbed_at": e.grabbed_at, "last_played": e.last_played}
+            for e in sorted(entries, key=lambda x: x.last_played, reverse=True)
+        ],
+        "disk": {"total": total, "used": used, "free": free,
+                  "pct_used": (used / total * 100) if total else 0},
+    }
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+def _job_to_dict(job) -> dict:
+    """StremioJob → dict for JSON response. Mirrors the dataclass shape."""
+    if job is None:
+        return {}
+    return {
+        "id": job.id, "imdb_id": job.imdb_id, "type": job.type,
+        "title": job.title, "infohash": job.infohash,
+        "file_index": job.file_index,
+        "source_stream_title": job.source_stream_title,
+        "quality": job.quality, "expected_size": job.expected_size,
+        "status": job.status, "progress": job.progress,
+        "direct_url": job.direct_url,
+        "filename": job.filename, "filesize": job.filesize,
+        "error": job.error,
+        "created_at": job.created_at, "updated_at": job.updated_at,
+    }
+
+
+def _serve_with_range(path, media_type: str, range_header: Optional[str]):
+    """Tiny range-served file response. Phones (Stremio, native players,
+    Chrome) issue Range requests; we honour them so seek works.
+
+    Returns a Starlette/FastAPI streaming response."""
+    from fastapi.responses import StreamingResponse, Response
+    import re
+    size = os.path.getsize(path)
+    if not range_header:
+        # Full body — but still advertise byte-range support so the next
+        # seek-request picks up.
+        def _stream_full():
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk: break
+                    yield chunk
+        return StreamingResponse(_stream_full(), media_type=media_type,
+                                   headers={"Accept-Ranges": "bytes",
+                                              "Content-Length": str(size)})
+    m = re.match(r"bytes=(\d*)-(\d*)", range_header)
+    if not m:
+        raise HTTPException(416, "bad Range")
+    start_s, end_s = m.group(1), m.group(2)
+    start = int(start_s) if start_s else 0
+    end = int(end_s) if end_s else size - 1
+    start = max(0, start); end = min(end, size - 1)
+    if start > end:
+        raise HTTPException(416, "Range not satisfiable")
+    length = end - start + 1
+
+    def _stream_range():
+        with open(path, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(1024 * 1024, remaining))
+                if not chunk: break
+                remaining -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(
+        _stream_range(), status_code=206, media_type=media_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Content-Length": str(length),
+        },
+    )
+
+
 @router.post("/api/miniapp/downloads/clear")
 async def downloads_clear(request: Request):
     """Wipe the current user's download history. Global url_cache is
@@ -1761,7 +2051,7 @@ button.warn { background: #ff9500; color: #fff; }
   <div id=msg></div>
 
   <div class="page active" id=page-home>
-    <h1>Sentinel Media DL</h1>
+    <h1>Sentinel Media</h1>
     <div class=home-tiles>
       <div class=home-tile onclick="goto('downloads')">
         <div class=ico>📥</div>
@@ -1772,6 +2062,11 @@ button.warn { background: #ff9500; color: #fff; }
         <div class=ico>👁</div>
         <div class=name>Watchlist</div>
         <div class=desc>Auto-record streams from twitch · youtube · kick</div>
+      </div>
+      <div class=home-tile onclick="location.href='/app/stremio'">
+        <div class=ico>🎬</div>
+        <div class=name>Stremio</div>
+        <div class=desc>Movies + series via Stremio addons + Real-Debrid · stream &amp; cache to G:\</div>
       </div>
       <div class=home-tile onclick="location.href='/iptv'">
         <div class=ico>📺</div>
@@ -3449,6 +3744,46 @@ async def miniapp_index():
 @router.get("/app/", response_class=HTMLResponse)
 async def miniapp_index_slash():
     return HTMLResponse(HTML)
+
+
+@router.get("/app/stremio", response_class=HTMLResponse)
+@router.get("/app/stremio/", response_class=HTMLResponse)
+async def miniapp_stremio():
+    """Sentinel Media — Stremio sub-app shell.
+
+    Serves the Svelte 5 + shadcn-svelte single-page bundle from
+    /static/stremio/index.html. The Svelte app drives:
+      • Search box (Cinemeta)
+      • Poster grid → detail view
+      • Stream picker (Torrentio/Comet/MediaFusion)
+      • Grab button → RD resolve → playback / cache to G:\
+
+    Auth handoff: Telegram WebApp.initData arrives in the URL hash on
+    the first load (TG mini app convention). The Svelte app reads it
+    and includes it as `X-Telegram-Init-Data` on every /api/miniapp/*
+    call (same pattern as the main /app HTML)."""
+    path = os.path.join(os.path.dirname(__file__), "..", "static", "stremio", "index.html")
+    path = os.path.abspath(path)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return HTMLResponse(f.read())
+    except FileNotFoundError:
+        # Pre-build placeholder so the route works even before the Svelte
+        # bundle has been built. Shows a friendly "still building" stub.
+        return HTMLResponse(
+            """<!doctype html><meta charset=utf-8>
+<title>Sentinel Media · Stremio</title>
+<style>body{font:15px system-ui;background:#0c0c0e;color:#e8e8ea;
+text-align:center;padding:50px 22px;line-height:1.6}
+a{color:#5b9dff;text-decoration:none}
+code{background:#1c1c1e;padding:2px 6px;border-radius:4px;font-size:13px}</style>
+<h2>🎬 Sentinel Media · Stremio</h2>
+<p>The Svelte bundle isn't built yet.</p>
+<p>Run from <code>sentinel-smdl/stremio-ui/</code>:</p>
+<p><code>pnpm install &amp;&amp; pnpm build</code></p>
+<p>then reload this page.</p>
+<p style=margin-top:30px><a href="/app">← back to Sentinel Media</a></p>"""
+        )
 
 
 def _set_apk_cookie(resp, request: Request):

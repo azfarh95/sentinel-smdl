@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* shadcn-svelte design tokens — dark-only because SMDL is dark.
+   Values match the standard shadcn "zinc" preset, tuned slightly:
+     • background darker (#0c0c0e instead of zinc-950)
+     • primary = SMDL accent blue (210° hue) for affinity with the rest
+       of the Mini App rather than the default white-on-black. */
+@layer base {
+  :root {
+    --background: 240 10% 3.9%;        /* #0c0c0e */
+    --foreground: 0 0% 95%;            /* #f2f2f2 */
+
+    --card: 240 6% 10%;                /* #18181b — lifted surface */
+    --card-foreground: 0 0% 95%;
+
+    --popover: 240 6% 10%;
+    --popover-foreground: 0 0% 95%;
+
+    --primary: 210 100% 56%;           /* SMDL accent — same as #2997ff */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 240 4% 16%;           /* zinc-800 */
+    --secondary-foreground: 0 0% 95%;
+
+    --muted: 240 4% 16%;
+    --muted-foreground: 240 5% 65%;    /* zinc-400 */
+
+    --accent: 240 4% 16%;
+    --accent-foreground: 0 0% 95%;
+
+    --destructive: 0 72% 51%;          /* red-600 */
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 240 4% 16%;              /* zinc-800 */
+    --input: 240 4% 16%;
+    --ring: 210 100% 56%;              /* matches --primary for focus rings */
+
+    --radius: 0.6rem;
+  }
+
+  html, body { height: 100%; }
+  body { font-family: theme('fontFamily.sans'); }
+}

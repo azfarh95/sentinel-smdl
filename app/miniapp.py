@@ -1697,6 +1697,25 @@ button.warn { background: #ff9500; color: #fff; }
 .file-row .grow { flex: 1; min-width: 0; }
 .file-row .file-name { font-size: 14px; word-break: break-all; }
 .file-row .file-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+/* Inline file preview modal — opens when the user taps a media file in
+   the Files browser. Videos / images / audio play right here without
+   bouncing to an external browser. */
+.preview-modal { display: none; position: fixed; inset: 0;
+                 background: rgba(0,0,0,0.92); z-index: 100;
+                 padding: env(safe-area-inset-top, 0) 0 env(safe-area-inset-bottom, 0); }
+.preview-modal.open { display: flex; flex-direction: column; }
+.preview-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+                background: rgba(0,0,0,0.5); color: var(--fg); }
+.preview-head .name { flex: 1; font-size: 13px; word-break: break-all; }
+.preview-head button { background: transparent; border: 1px solid var(--separator);
+                       color: var(--fg); padding: 6px 10px; font-size: 13px;
+                       border-radius: 6px; }
+.preview-body { flex: 1; display: flex; align-items: center; justify-content: center;
+                overflow: auto; padding: 8px; }
+.preview-body video, .preview-body img { max-width: 100%; max-height: 100%;
+                                          object-fit: contain; }
+.preview-body audio { width: 90%; max-width: 500px; }
+.preview-body .non-media { color: var(--muted); text-align: center; padding: 40px 20px; }
 </style>
 </head><body>
 
@@ -1788,6 +1807,15 @@ button.warn { background: #ff9500; color: #fff; }
     <h1>Admin</h1>
     <div id=admin-content><div class=empty><span class=spin></span> Loading…</div></div>
   </div>
+</div>
+
+<div class=preview-modal id=preview-modal>
+  <div class=preview-head>
+    <div class=name id=preview-name></div>
+    <button onclick="downloadCurrentPreview()">⬇ Download</button>
+    <button onclick="closePreview()">✕</button>
+  </div>
+  <div class=preview-body id=preview-body></div>
 </div>
 
 <div class=sidebar>
@@ -1994,7 +2022,7 @@ async function loadFiles(path) {
                 : ['zip','tar','gz','7z'].includes(ext) ? '📦'
                 : '📄';
       const link = f.share_url
-        ? `onclick="openExternal('${encodeURIComponent(f.share_url)}')"`
+        ? `onclick="openPreview('${encodeURIComponent(f.share_url)}', '${encodeURIComponent(f.name)}')"`
         : `onclick="showErr('No share URL — SHARE_SECRET/PUBLIC_BASE_URL not configured')"`;
       rows.push(`
         <div class=file-row ${link}>
@@ -2167,6 +2195,57 @@ async function saveEdit(i, encodedOldUrl) {
     showOk('Updated');
     loadWatchlist();
   } catch(e) { showErr(e); }
+}
+
+// ── Inline file preview ────────────────────────────────────────────────
+// Plays / shows media inline using <video>/<img>/<audio> tags. Since
+// these embed the resource (rather than navigate to it), the browser
+// ignores the FileResponse's Content-Disposition:attachment and just
+// renders the file. For non-media types, shows a friendly "use the
+// download button" message + still gives access via the modal header.
+let _previewUrl = '';
+let _previewName = '';
+
+function openPreview(encodedUrl, encodedName) {
+  _previewUrl  = decodeURIComponent(encodedUrl);
+  _previewName = decodeURIComponent(encodedName);
+  const ext = (_previewName.split('.').pop() || '').toLowerCase();
+  const body = document.getElementById('preview-body');
+  const nameEl = document.getElementById('preview-name');
+  nameEl.textContent = _previewName;
+
+  let inner;
+  if (['mp4','mov','mkv','webm','m4v'].includes(ext)) {
+    inner = `<video src="${_previewUrl}" controls autoplay playsinline></video>`;
+  } else if (['jpg','jpeg','png','gif','webp','heic','avif','bmp'].includes(ext)) {
+    inner = `<img src="${_previewUrl}" alt="${esc(_previewName)}">`;
+  } else if (['mp3','m4a','aac','flac','wav','opus','ogg'].includes(ext)) {
+    inner = `<audio src="${_previewUrl}" controls autoplay></audio>`;
+  } else {
+    inner = `<div class=non-media>
+      No inline preview for <code>.${esc(ext || 'file')}</code> files.<br>
+      Use the ⬇ Download button above to fetch it.
+    </div>`;
+  }
+  body.innerHTML = inner;
+  document.getElementById('preview-modal').classList.add('open');
+}
+
+function closePreview() {
+  const body = document.getElementById('preview-body');
+  // Stop any playing media before the modal closes
+  body.querySelectorAll('video, audio').forEach(el => { try { el.pause(); el.src = ''; } catch{} });
+  body.innerHTML = '';
+  document.getElementById('preview-modal').classList.remove('open');
+  _previewUrl = '';
+  _previewName = '';
+}
+
+function downloadCurrentPreview() {
+  if (!_previewUrl) return;
+  // tg.openLink fires the browser-level navigation that respects
+  // Content-Disposition:attachment and triggers a real download.
+  openExternal(encodeURIComponent(_previewUrl));
 }
 
 function openExternal(encodedUrl) {

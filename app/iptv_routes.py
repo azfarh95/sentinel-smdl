@@ -47,6 +47,96 @@ from . import iptv as _iptv
 from . import iptv_dedup as _dedup
 from . import miniapp as _mini   # reuse _verify + require_scope
 
+
+# Shared top nav (#29). Injected into each IPTV page's <body>. Three display
+# modes — `fixed` (default, always visible), `hover` (slides down when mouse
+# nears the top edge), `hidden` (gone; tiny corner pill catches right-click
+# to bring it back). Right-click on the nav cycles modes. Persisted to
+# localStorage under `smdl_iptv_nav_mode`.
+_IPTV_TOPNAV = """
+<style>
+.smdl-iptv-topnav-host { position: fixed; top: 0; left: 0; right: 0; z-index: 9000;
+    pointer-events: none; }
+.smdl-iptv-topnav-host .nav { pointer-events: auto; display: flex; align-items: center;
+    gap: 4px; padding: 6px 10px;
+    background: rgba(15, 17, 21, 0.92); border-bottom: 1px solid #1f2733;
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    transition: transform 180ms ease;
+    font: 12px/1.2 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+.smdl-iptv-topnav-host .nav a { display: inline-flex; align-items: center; gap: 5px;
+    padding: 6px 10px; color: #cfd2d8; text-decoration: none; border-radius: 6px;
+    border: 1px solid transparent; }
+.smdl-iptv-topnav-host .nav a:hover { background: #1a1d24; color: #fff; }
+.smdl-iptv-topnav-host .nav a.active { background: #1a2a3a; color: #5ac8fa;
+    border-color: #2a4054; }
+.smdl-iptv-topnav-host .nav .mode-chip { margin-left: auto; font-size: 10px; color: #6a7585;
+    background: #1a1d24; border: 1px solid #2a2f3a; padding: 2px 8px; border-radius: 99px;
+    cursor: context-menu; user-select: none; white-space: nowrap; }
+.smdl-iptv-topnav-host .reveal-pill { pointer-events: auto; position: fixed;
+    top: 8px; right: 8px; padding: 4px 10px; font-size: 10px; color: #6a7585;
+    background: rgba(15,17,21,0.9); border: 1px solid #2a2f3a; border-radius: 99px;
+    cursor: context-menu; user-select: none; display: none;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+/* Mode: fixed */
+body.smdl-iptv-nav-fixed { padding-top: 36px; }
+body.smdl-iptv-nav-fixed .smdl-iptv-topnav-host .nav { transform: translateY(0); }
+/* Mode: hover — nav slides off-screen by default, reveals on mouseenter on a 6px
+   top hot-zone created via the host's :hover state. */
+body.smdl-iptv-nav-hover .smdl-iptv-topnav-host { top: 0; height: 6px; }
+body.smdl-iptv-nav-hover .smdl-iptv-topnav-host:hover { height: auto; }
+body.smdl-iptv-nav-hover .smdl-iptv-topnav-host .nav { transform: translateY(-100%); }
+body.smdl-iptv-nav-hover .smdl-iptv-topnav-host:hover .nav { transform: translateY(0); }
+/* Mode: hidden — nav gone entirely; reveal-pill in corner catches right-click. */
+body.smdl-iptv-nav-hidden .smdl-iptv-topnav-host .nav { display: none; }
+body.smdl-iptv-nav-hidden .smdl-iptv-topnav-host .reveal-pill { display: inline-block; }
+@media print { .smdl-iptv-topnav-host { display: none !important; } }
+</style>
+<div class="smdl-iptv-topnav-host" id="smdl-iptv-topnav-host">
+  <div class="nav" id="smdl-iptv-topnav">
+    <a href="/app" title="Home">🏠 Home</a>
+    <a href="/app#downloads" title="Downloads">⬇ DL</a>
+    <a href="/app#watchlist" title="Streams">👁 Streams</a>
+    <a href="/iptv" class="active" title="IPTV">📺 IPTV</a>
+    <a href="/app#files" title="Files">📁 Files</a>
+    <a href="/app#scraper" title="Scraper">🕷 Scrape</a>
+    <a href="/app#admin" title="Admin">🛡 Admin</a>
+    <a href="/app#settings" title="Settings">⚙</a>
+    <span class="mode-chip" id="smdl-iptv-nav-mode-chip" title="Right-click here or anywhere on this bar to cycle: Fixed → Hover → Hidden">Fixed</span>
+  </div>
+  <span class="reveal-pill" id="smdl-iptv-nav-reveal" title="Right-click to bring the nav back">⋯ nav</span>
+</div>
+<script>
+(function(){
+  const MODES = ['fixed', 'hover', 'hidden'];
+  const LABELS = { fixed: 'Fixed', hover: 'Hover', hidden: 'Hidden' };
+  const KEY = 'smdl_iptv_nav_mode';
+  const chip = document.getElementById('smdl-iptv-nav-mode-chip');
+  const nav  = document.getElementById('smdl-iptv-topnav');
+  const pill = document.getElementById('smdl-iptv-nav-reveal');
+  function apply(mode) {
+    const cls = document.body.classList;
+    MODES.forEach(m => cls.remove('smdl-iptv-nav-' + m));
+    cls.add('smdl-iptv-nav-' + mode);
+    if (chip) chip.textContent = LABELS[mode] || 'Fixed';
+    try { localStorage.setItem(KEY, mode); } catch(_){}
+  }
+  function cycle(e) {
+    if (e) e.preventDefault();
+    let cur = 'fixed';
+    try { cur = localStorage.getItem(KEY) || 'fixed'; } catch(_){}
+    const next = MODES[(MODES.indexOf(cur) + 1) % MODES.length] || 'fixed';
+    apply(next);
+  }
+  let saved = 'fixed';
+  try { saved = localStorage.getItem(KEY) || 'fixed'; } catch(_){}
+  if (!MODES.includes(saved)) saved = 'fixed';
+  apply(saved);
+  if (nav)  nav.addEventListener('contextmenu', cycle);
+  if (pill) pill.addEventListener('contextmenu', cycle);
+})();
+</script>
+"""
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -1495,8 +1585,8 @@ _BROWSE_HTML = r"""<!doctype html>
     .login-card .err { color:#f5b4b4; font-size:12px; margin-top:8px; min-height:14px; }
   </style>
 </head>
-<body>
-
+<body class="smdl-iptv-nav-fixed">
+""" + _IPTV_TOPNAV + """
 <div class="login-veil" id="login-veil">
   <div class="login-card">
     <h2>🔑 First-launch setup</h2>
@@ -2473,8 +2563,8 @@ _PLAY_HTML = r"""<!doctype html>
     .toast.show { opacity:1; }
   </style>
 </head>
-<body>
-
+<body class="smdl-iptv-nav-fixed">
+""" + _IPTV_TOPNAV + """
 <div class="back" onclick="if(window.history.length>1)history.back();else location.href='/iptv'">← Back to channels</div>
 
 <div class="wrap">
@@ -3295,8 +3385,8 @@ _RECORDINGS_HTML = r"""<!doctype html>
     @keyframes pulse { 50% { opacity:.4; } }
   </style>
 </head>
-<body>
-
+<body class="smdl-iptv-nav-fixed">
+""" + _IPTV_TOPNAV + """
 <div class="topbar">
   <a class="back" href="/iptv">← Live TV</a>
   <h1>📼 Recordings</h1>

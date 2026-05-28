@@ -946,6 +946,89 @@ async def downloads_clear(request: Request):
     return {"ok": True, "deleted": n}
 
 
+@router.post("/api/miniapp/downloads/batch")
+async def downloads_batch(request: Request):
+    """Queue 1+ URLs for download independent of the Telegram bot.
+
+    Body: {urls: ["...", ...]}  — accepts a list. Whitespace/newline
+    splitting + dedup is done client-side; this endpoint validates shape
+    and kicks off downloader.download() per URL as fire-and-forget tasks.
+    The global _semaphore in downloader.py (MAX_CONCURRENT) backpressures
+    them so the same cap that applies to bot-initiated downloads applies
+    here. History rows are written to the DB by downloader.download() on
+    completion — the existing GET /downloads endpoint picks them up.
+
+    Returns immediately with {accepted, rejected, accepted_urls}. The UI
+    polls GET /downloads to surface progress.
+    """
+    from . import downloader as _dl
+
+    p = await _verify(request)
+    require_scope(p, "smdl.downloader")
+    uid = int(p["user"]["id"])
+    is_owner_flag = bool(p.get("user", {}).get("is_owner"))
+
+    body = await request.json()
+    raw_urls = body.get("urls") or []
+    if not isinstance(raw_urls, list):
+        return JSONResponse({"detail": "urls must be a list"}, status_code=400)
+
+    # Validate shape + dedup. Trust the client to have split on whitespace.
+    seen: set[str] = set()
+    accepted: list[str] = []
+    rejected: list[dict] = []
+    for u in raw_urls:
+        if not isinstance(u, str):
+            continue
+        u = u.strip()
+        if not u:
+            continue
+        if not (u.startswith("http://") or u.startswith("https://")):
+            rejected.append({"url": u, "reason": "not http(s)"})
+            continue
+        if u in seen:
+            continue
+        seen.add(u)
+        accepted.append(u)
+
+    if not accepted:
+        return JSONResponse({"detail": "no valid URLs"}, status_code=400)
+
+    # Cap per-request to keep one user from queueing thousands at once.
+    MAX_PER_REQUEST = 50
+    if len(accepted) > MAX_PER_REQUEST:
+        rejected.extend({"url": u, "reason": "exceeds per-request cap"}
+                        for u in accepted[MAX_PER_REQUEST:])
+        accepted = accepted[:MAX_PER_REQUEST]
+
+    async def _run_one(url: str):
+        try:
+            res = await _dl.download(url=url, is_owner=is_owner_flag)
+            if res.get("files"):
+                try:
+                    await _db.record_download(
+                        chat_id=uid, url=url, files=res["files"],
+                        platform=_dl._platform_from_url(url), uploader=None,
+                    )
+                except Exception:
+                    logger.exception("paste-batch: history insert failed for %s", url)
+            else:
+                logger.warning("paste-batch: download returned no files for %s: %s",
+                               url, res.get("error"))
+        except Exception:
+            logger.exception("paste-batch: download failed for %s", url)
+
+    for u in accepted:
+        asyncio.create_task(_run_one(u))
+
+    return {
+        "accepted": len(accepted),
+        "rejected": len(rejected),
+        "accepted_urls": accepted,
+        "rejected_urls": rejected,
+    }
+
+
 @router.get("/api/miniapp/files/list")
 async def files_list(request: Request, path: str = ""):
     """Browse the host's /downloads directory. Returns folders + files
@@ -2349,6 +2432,14 @@ button.warn { background: #ff9500; color: #fff; }
       <h1>Recent Downloads</h1>
       <button class="small sec" onclick="clearDownloadHistory()" title="Wipe your download history">🗑 Clear</button>
     </div>
+    <div class=card style="margin-bottom:14px">
+      <div class=meta style="margin-bottom:6px">Paste one or more URLs (newline / space / comma-separated). Up to 50 at a time. Live-recording URLs go through the watchlist, not this box.</div>
+      <textarea id=dl-batch-input rows=3 placeholder="https://... &#10;https://..." style="width:100%;box-sizing:border-box;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:ui-monospace,monospace;font-size:13px;resize:vertical"></textarea>
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+        <button class="primary" onclick="submitDownloadBatch()" id=dl-batch-go>⬇ Download</button>
+        <div class=meta id=dl-batch-status></div>
+      </div>
+    </div>
     <div id=downloads-list><div class=empty><span class=spin></span> Loading…</div></div>
   </div>
 
@@ -2631,6 +2722,36 @@ async function clearDownloadHistory() {
     showOk(`Cleared ${r.deleted || 0} row(s)`);
     loadDownloads();
   } catch(e) { showErr(e); }
+}
+
+async function submitDownloadBatch() {
+  const ta  = document.getElementById('dl-batch-input');
+  const go  = document.getElementById('dl-batch-go');
+  const stt = document.getElementById('dl-batch-status');
+  const raw = (ta.value || '').trim();
+  if (!raw) return;
+  // Split on any whitespace OR comma OR semicolon. Filter to look-like-URLs.
+  const urls = Array.from(new Set(
+    raw.split(/[\s,;]+/).map(s => s.trim()).filter(s => /^https?:\/\//i.test(s))
+  ));
+  if (!urls.length) { showErr('No http(s) URLs found in input.'); return; }
+  go.disabled = true; stt.textContent = `Queueing ${urls.length}…`;
+  try {
+    const r = await api('/api/miniapp/downloads/batch', {
+      method: 'POST', body: JSON.stringify({ urls })
+    });
+    ta.value = '';
+    const rej = r.rejected ? ` · ${r.rejected} rejected` : '';
+    stt.textContent = `✓ Queued ${r.accepted}${rej} — refresh below as they land.`;
+    setTimeout(() => { stt.textContent = ''; loadDownloads(); }, 1200);
+    setTimeout(() => loadDownloads(), 5000);
+    setTimeout(() => loadDownloads(), 15000);
+  } catch(e) {
+    stt.textContent = '';
+    showErr('Batch failed: ' + e);
+  } finally {
+    go.disabled = false;
+  }
 }
 
 // ── Files browser (SFTP-style /downloads access) ────────────────────────

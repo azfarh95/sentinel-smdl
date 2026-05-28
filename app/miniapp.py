@@ -4000,7 +4000,11 @@ async function restartService() {
 
 // Surface the Admin tab if we're owner. Best-effort — failures stay silent.
 bootstrapWhoami();
-goto('watchlist');
+// Boot navigation: land on Home. Earlier this was hardcoded to
+// 'watchlist' from when SMDL was primarily a stream-watcher; with the
+// Theater + IPTV + Files + Scraper modules in place, Home (the tile
+// grid) is the right entry point.
+goto('home');
 </script>
 </body></html>"""
 

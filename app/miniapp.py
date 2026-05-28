@@ -1408,15 +1408,29 @@ HTML = """<!doctype html>
   --success: #34c759;
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-body { margin: 0; padding: 0 0 0 56px; font: 15px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
-       background: var(--bg); color: var(--fg); min-height: 100vh; }
-/* Left sidebar (was bottom tabbar). 56px wide; icon + tiny label per entry;
-   Settings pinned at the bottom via flex spacer. */
+body { margin: 0; padding: env(safe-area-inset-top, 0) 0 env(safe-area-inset-bottom, 0) 56px;
+       font: 15px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+       background: var(--bg); color: var(--fg); min-height: 100vh;
+       transition: padding-left 0.2s ease; }
+body.sidebar-collapsed { padding-left: 28px; }
+/* Left sidebar (was bottom tabbar). 56px wide normal, 28px collapsed
+   (icons only). Settings pinned at the bottom via flex spacer.
+   safe-area padding on top so the first nav item doesn't sit behind
+   the device status bar / Telegram chrome. */
 .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 56px;
            background: var(--section); border-right: 1px solid var(--separator);
-           display: flex; flex-direction: column; z-index: 10; padding: 8px 0; }
+           display: flex; flex-direction: column; z-index: 10;
+           padding: calc(env(safe-area-inset-top, 0px) + 8px) 0 env(safe-area-inset-bottom, 0px);
+           transition: width 0.2s ease; overflow: hidden; }
+body.sidebar-collapsed .sidebar { width: 28px; }
 .sidebar-spacer { flex: 1; }
 .sidebar-divider { height: 1px; background: var(--separator); margin: 6px 8px; }
+body.sidebar-collapsed .sidebar-divider { margin: 6px 4px; }
+.sidebar-toggle { display: flex; align-items: center; justify-content: center;
+                  padding: 8px 0; color: var(--muted); cursor: pointer;
+                  user-select: none; font-size: 14px; line-height: 1;
+                  border-bottom: 1px solid var(--separator); margin-bottom: 4px; }
+.sidebar-toggle:hover { color: var(--button); }
 .sidebar-item { display: flex; flex-direction: column; align-items: center;
                 padding: 9px 4px; color: var(--muted); cursor: pointer;
                 user-select: none; border-left: 3px solid transparent;
@@ -1426,6 +1440,11 @@ body { margin: 0; padding: 0 0 0 56px; font: 15px/1.4 -apple-system, system-ui, 
                        background: rgba(41,151,255,0.10); }
 .sidebar-item .icon { font-size: 20px; line-height: 1; }
 .sidebar-item .label { font-size: 9.5px; line-height: 1.05; letter-spacing: 0.1px; }
+/* Icons-only mode: shrink padding, hide labels, slightly smaller icons. */
+body.sidebar-collapsed .sidebar-item { padding: 9px 2px; gap: 0; border-left-width: 2px; }
+body.sidebar-collapsed .sidebar-item .label { display: none; }
+body.sidebar-collapsed .sidebar-item .icon { font-size: 16px; }
+body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
 /* Home tile grid — landing page for the Mini App. 2 cols on phones. */
 .home-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 6px; }
 .home-tile { background: var(--section); border-radius: 12px; padding: 16px 12px;
@@ -1440,7 +1459,7 @@ body { margin: 0; padding: 0 0 0 56px; font: 15px/1.4 -apple-system, system-ui, 
 .sidebar-item.admin-only.show { display: flex; }
 .home-tile.admin-only { display: none; }
 .home-tile.admin-only.show { display: block; }
-.page { display: none; padding: 12px; }
+.page { display: none; padding: max(12px, calc(env(safe-area-inset-top, 0px) + 4px)) 12px 12px; }
 .page.active { display: block; }
 .subtabs { display: flex; gap: 6px; margin: 0 0 14px; overflow-x: auto;
            -webkit-overflow-scrolling: touch; scrollbar-width: none; }
@@ -1616,6 +1635,9 @@ button.warn { background: #ff9500; color: #fff; }
 </div>
 
 <div class=sidebar>
+  <div class=sidebar-toggle id=nav-toggle onclick="toggleSidebar()" title="Collapse / expand nav">
+    <span id=nav-toggle-icon>«</span>
+  </div>
   <div class="sidebar-item active" id=nav-home onclick="goto('home')">
     <div class=icon>🏠</div><div class=label>Home</div>
   </div>
@@ -1646,6 +1668,23 @@ const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 const initData = tg?.initData || '';
 let current = 'home';
+
+// Sidebar collapse preference — persisted across sessions in localStorage.
+// Default = expanded (false). Restored on page load so the layout doesn't
+// flicker between expanded and collapsed states.
+function applySidebarState(collapsed) {
+  document.body.classList.toggle('sidebar-collapsed', !!collapsed);
+  const ico = document.getElementById('nav-toggle-icon');
+  if (ico) ico.textContent = collapsed ? '»' : '«';
+}
+function toggleSidebar() {
+  const next = !document.body.classList.contains('sidebar-collapsed');
+  applySidebarState(next);
+  try { localStorage.setItem('smdl_sidebar_collapsed', next ? '1' : '0'); } catch {}
+}
+try {
+  applySidebarState(localStorage.getItem('smdl_sidebar_collapsed') === '1');
+} catch {}
 let watchlistTimer = null;
 
 function api(path, opts = {}) {

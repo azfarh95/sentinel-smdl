@@ -8,7 +8,7 @@
    *  No router — single-component view state machine. The TG BackButton
    *  is wired to navigate Detail → Search; on Search it closes the app. */
   import { onMount } from "svelte";
-  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive } from "lucide-svelte";
+  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive } from "@lucide/svelte";
   import { api, type MetaItem, type StreamEntry, type GrabFile, type RDAccount,
             type StremioJob, type CacheEntry } from "$lib/api";
   import { fmtSize } from "$lib/utils";
@@ -330,6 +330,7 @@
           {:else if activeJob.status === "error"}
             <div class="text-sm text-destructive">{activeJob.error ?? "Unknown error"}</div>
           {:else if url}
+            <!-- svelte-ignore a11y_media_has_caption -->
             <video src={url} controls playsinline class="w-full rounded-md bg-black aspect-video"></video>
 
             <!-- Live cache progress bar (visible while streaming, dimmed when cached) -->

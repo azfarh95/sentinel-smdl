@@ -3746,6 +3746,24 @@ async def miniapp_index_slash():
     return HTMLResponse(HTML)
 
 
+@router.get("/app/stremio/assets/{filename:path}")
+async def miniapp_stremio_asset(filename: str):
+    """Serve the Svelte bundle's hashed assets (CSS, JS, sourcemaps,
+    chunk JS). Path-traversal guarded — only filenames inside the
+    static/stremio/assets directory are served."""
+    from fastapi.responses import FileResponse
+    base = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                         "..", "static", "stremio", "assets"))
+    target = os.path.abspath(os.path.join(base, filename))
+    if not target.startswith(base + os.sep) or not os.path.isfile(target):
+        raise HTTPException(404, "asset not found")
+    media = "application/javascript" if target.endswith(".js") \
+        else "text/css"  if target.endswith(".css") \
+        else "application/json" if target.endswith(".map") \
+        else "application/octet-stream"
+    return FileResponse(target, media_type=media)
+
+
 @router.get("/app/stremio", response_class=HTMLResponse)
 @router.get("/app/stremio/", response_class=HTMLResponse)
 async def miniapp_stremio():

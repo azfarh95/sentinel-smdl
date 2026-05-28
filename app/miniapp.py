@@ -414,6 +414,93 @@ def _enrich_with_share_url(row: dict) -> dict:
     return row
 
 
+@router.post("/api/miniapp/downloads/clear")
+async def downloads_clear(request: Request):
+    """Wipe the current user's download history. Global url_cache is
+    untouched (it's a content cache, not personal history)."""
+    p = await _verify(request)
+    require_scope(p, "smdl.downloader")
+    uid = int(p["user"]["id"])
+    n = await _db.clear_download_history(uid)
+    return {"ok": True, "deleted": n}
+
+
+@router.get("/api/miniapp/files/list")
+async def files_list(request: Request, path: str = ""):
+    """Browse the host's /downloads directory. Returns folders + files
+    at the given relative path. Path is resolved against DOWNLOADS_DIR
+    with the same traversal-safe logic as file_serve. Owner-only since
+    this exposes the whole download tree."""
+    from pathlib import Path as _Path
+    from .file_serve import sign_share_url
+    from .config import DOWNLOADS_DIR
+
+    p = await _verify(request)
+    require_scope(p, "smdl.admin")
+    _require_owner(p)
+
+    root = _Path(DOWNLOADS_DIR).resolve()
+    rel = (path or "").strip("/").replace("\\", "/")
+    target = (root / rel).resolve() if rel else root
+    # Path-traversal guard: target must be inside the downloads root.
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid path")
+    if not target.exists() or not target.is_dir():
+        raise HTTPException(status_code=404, detail="not a directory")
+
+    folders, files = [], []
+    try:
+        for entry in target.iterdir():
+            # Skip hidden + the noisy backfill log
+            if entry.name.startswith(".") or entry.name == "_backfill.log":
+                continue
+            try:
+                st = entry.stat()
+            except OSError:
+                continue
+            rel_entry = str(entry.relative_to(root)).replace("\\", "/")
+            if entry.is_dir():
+                folders.append({
+                    "name":  entry.name,
+                    "path":  rel_entry,
+                    "type":  "dir",
+                    "mtime": int(st.st_mtime),
+                })
+            elif entry.is_file():
+                share_url = sign_share_url(rel_entry)
+                files.append({
+                    "name":      entry.name,
+                    "path":      rel_entry,
+                    "type":      "file",
+                    "size":      st.st_size,
+                    "mtime":     int(st.st_mtime),
+                    "share_url": share_url,
+                })
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="permission denied")
+
+    folders.sort(key=lambda d: d["name"].lower())
+    files.sort(key=lambda d: d["mtime"], reverse=True)
+
+    # Breadcrumbs: list of {name, path} from root → current
+    crumbs = [{"name": "/", "path": ""}]
+    if rel:
+        parts = rel.split("/")
+        acc = []
+        for p_ in parts:
+            acc.append(p_)
+            crumbs.append({"name": p_, "path": "/".join(acc)})
+
+    return {
+        "cwd":     rel,
+        "crumbs":  crumbs,
+        "folders": folders,
+        "files":   files,
+    }
+
+
 @router.get("/api/miniapp/downloads")
 async def downloads(request: Request, limit: int = 50):
     """Per-user download history. Owner sees their own attributed downloads
@@ -1585,6 +1672,32 @@ button.warn { background: #ff9500; color: #fff; }
         vertical-align: middle; }
 @keyframes sp { to { transform: rotate(360deg); } }
 .url { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; }
+/* Page header — h1 + actions on the right (e.g. Downloads clear button) */
+.page-header { display: flex; align-items: center; gap: 10px; margin: 6px 0 14px; }
+.page-header h1 { margin: 0; flex: 1; }
+/* Simplified download row — single clickable line: @user · description */
+.dl-row { padding: 10px 12px; border-radius: 8px; background: var(--section);
+          margin-bottom: 6px; }
+.dl-row a { color: var(--fg); text-decoration: none; display: block; }
+.dl-row a:active { color: var(--button); }
+.dl-row .user { font-weight: 600; }
+.dl-row .desc { color: var(--muted); font-size: 13px; margin-top: 2px;
+                word-break: break-all; }
+.dl-row .when { color: var(--muted); font-size: 11px; margin-top: 4px; }
+/* Files page */
+.files-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+                font-size: 13px; margin-bottom: 12px; color: var(--muted); }
+.files-crumbs a { color: var(--link); text-decoration: none; cursor: pointer; }
+.files-crumbs .sep { color: var(--separator); margin: 0 2px; }
+.file-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+            border-bottom: 1px solid var(--separator); cursor: pointer;
+            transition: background 0.12s; }
+.file-row:hover { background: rgba(255,255,255,0.03); }
+.file-row:last-child { border-bottom: 0; }
+.file-row .file-ico { font-size: 20px; line-height: 1; width: 24px; text-align: center; }
+.file-row .grow { flex: 1; min-width: 0; }
+.file-row .file-name { font-size: 14px; word-break: break-all; }
+.file-row .file-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
 </style>
 </head><body>
 
@@ -1609,6 +1722,11 @@ button.warn { background: #ff9500; color: #fff; }
         <div class=name>Live TV</div>
         <div class=desc>11k+ public channels · EPG · scheduled DVR</div>
       </div>
+      <div class="home-tile admin-only" id=tile-files onclick="goto('files')">
+        <div class=ico>📁</div>
+        <div class=name>Files</div>
+        <div class=desc>Browse + fetch from /downloads (SFTP-style)</div>
+      </div>
       <div class="home-tile admin-only" id=tile-scraper onclick="goto('scraper')">
         <div class=ico>🤖</div>
         <div class=name>Scraper</div>
@@ -1623,8 +1741,20 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
 
   <div class=page id=page-downloads>
-    <h1>Recent Downloads</h1>
+    <div class=page-header>
+      <h1>Recent Downloads</h1>
+      <button class="small sec" onclick="clearDownloadHistory()" title="Wipe your download history">🗑 Clear</button>
+    </div>
     <div id=downloads-list><div class=empty><span class=spin></span> Loading…</div></div>
+  </div>
+
+  <div class=page id=page-files>
+    <div class=page-header>
+      <h1>Files</h1>
+      <button class="small sec" onclick="loadFiles(filesCwd)" title="Refresh">🔄</button>
+    </div>
+    <div id=files-crumbs class=files-crumbs></div>
+    <div id=files-list><div class=empty><span class=spin></span> Loading…</div></div>
   </div>
 
   <div class=page id=page-watchlist>
@@ -1676,6 +1806,9 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
   <div class=sidebar-item id=nav-live onclick="location.href='/iptv'">
     <div class=icon>📺</div><div class=label>Live TV</div>
+  </div>
+  <div class="sidebar-item admin-only" id=nav-files onclick="goto('files')">
+    <div class=icon>📁</div><div class=label>Files</div>
   </div>
   <div class="sidebar-item admin-only" id=tab-scraper onclick="goto('scraper')">
     <div class=icon>🤖</div><div class=label>Scrape</div>
@@ -1749,13 +1882,15 @@ function goto(page) {
   // we never light up nav-live from this function.
   const navMap = {
     home: 'nav-home', downloads: 'nav-downloads', watchlist: 'nav-watchlist',
-    scraper: 'tab-scraper', admin: 'tab-admin', settings: 'nav-settings',
+    files: 'nav-files', scraper: 'tab-scraper', admin: 'tab-admin',
+    settings: 'nav-settings',
   };
   const targetId = navMap[page];
   document.querySelectorAll('.sidebar-item').forEach(el =>
     el.classList.toggle('active', el.id === targetId));
   if (page === 'downloads') loadDownloads();
   else if (page === 'watchlist') loadWatchlist();
+  else if (page === 'files') loadFiles(filesCwd);
   else if (page === 'scraper') loadScraper();
   else if (page === 'settings') loadSettings();
   else if (page === 'admin') loadAdmin();
@@ -1770,45 +1905,113 @@ async function loadDownloads() {
   try {
     const j = await api('/api/miniapp/downloads?limit=50');
     const root = document.getElementById('downloads-list');
-    if (!j.items.length) { root.innerHTML = '<div class=empty>No downloads yet.</div>'; return; }
-    // Probe OneDrive mode once; the per-row button only renders when not disabled.
-    let odMode = 'disabled';
-    try {
-      const cfg = await api('/api/miniapp/config');
-      odMode = (cfg.values && cfg.values.onedrive_mode) || 'disabled';
-    } catch(_e) {}
-    const showCloud = odMode !== 'disabled';
+    if (!j.items.length) {
+      root.innerHTML = '<div class=empty>No downloads yet.</div>';
+      return;
+    }
+    // Simplified row: @username · description as one clickable line.
+    // Description = trailing URL segment (post shortcode / filename basename).
     root.innerHTML = j.items.map(d => {
-      const u = encodeURIComponent(d.url);
-      // File link: only show for downloads that have a signed share_url
-      // (live recordings + files ≥50 MB). Reels/photos stay compact.
-      let fileLine = '';
-      if (d.share_url) {
-        const filenames = (d.files || []).map(f => f.split('/').pop()).filter(Boolean);
-        const fname = filenames[0] || 'file';
-        const share = encodeURIComponent(d.share_url);
-        const tag = d.is_live_recording ? '🔴' : '🎥';
-        const sizeStr = d.size_mb ? ` · ${d.size_mb} MB` : '';
-        fileLine = `<div class=meta style="margin-top:4px">
-          <a class=u-link onclick="openExternal('${share}')">${tag} ${esc(fname)}${sizeStr}</a>
-        </div>`;
-      }
+      const url  = d.url || '';
+      const user = d.uploader || d.platform || 'unknown';
+      // Pick a description: last meaningful path segment from the URL.
+      let desc = '';
+      try {
+        const parts = new URL(url).pathname.split('/').filter(Boolean);
+        // Skip platform-noise segments like "p", "reel", "@user" — take the last identifier.
+        desc = parts[parts.length - 1] || parts[parts.length - 2] || '';
+      } catch { desc = url; }
+      if (!desc && (d.files || []).length) desc = d.files[0].split('/').pop();
+      const u = encodeURIComponent(url);
       return `
-      <div class=card>
-        <div class=row>
-          <div class=grow>
-            <div class=name>
-              <a class=u-link onclick="openExternal('${u}')">${esc(d.platform || 'other')} · @${esc(d.uploader || '?')}</a>
-            </div>
-            ${fileLine}
-            <div class=timeago>${timeago(d.downloaded_at || d.created_at)}</div>
-          </div>
-          ${showCloud ? `<button class="icon-btn" title="Upload to OneDrive"
-              onclick="uploadToOneDrive('${u}', this)">☁</button>` : ''}
-        </div>
-      </div>
-    `;}).join('');
+        <div class=dl-row>
+          <a onclick="openExternal('${u}')">
+            <div class=user>@${esc(user)}</div>
+            <div class=desc>${esc(desc || url)}</div>
+            <div class=when>${timeago(d.downloaded_at || d.created_at)}</div>
+          </a>
+        </div>`;
+    }).join('');
   } catch(e) { showErr('Load failed: '+e); }
+}
+
+async function clearDownloadHistory() {
+  if (!confirm('Wipe your entire download history? The actual files on disk stay; only the in-app history rows are deleted.')) return;
+  try {
+    const r = await api('/api/miniapp/downloads/clear', { method: 'POST' });
+    showOk(`Cleared ${r.deleted || 0} row(s)`);
+    loadDownloads();
+  } catch(e) { showErr(e); }
+}
+
+// ── Files browser (SFTP-style /downloads access) ────────────────────────
+let filesCwd = '';
+
+function fmtSize(n) {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0; while (n >= 1024 && i < u.length-1) { n /= 1024; i++; }
+  return n.toFixed(n < 10 && i ? 1 : 0) + ' ' + u[i];
+}
+function fmtDate(unix) {
+  if (!unix) return '';
+  const d = new Date(unix * 1000);
+  return d.toLocaleString();
+}
+
+async function loadFiles(path) {
+  filesCwd = path || '';
+  const listRoot   = document.getElementById('files-list');
+  const crumbsRoot = document.getElementById('files-crumbs');
+  listRoot.innerHTML   = '<div class=empty><span class=spin></span> Loading…</div>';
+  crumbsRoot.innerHTML = '';
+  try {
+    const q = filesCwd ? '?path=' + encodeURIComponent(filesCwd) : '';
+    const j = await api('/api/miniapp/files/list' + q);
+    // Breadcrumbs
+    crumbsRoot.innerHTML = j.crumbs.map((c, i) => {
+      const sep = i > 0 ? `<span class=sep>/</span>` : '';
+      const safePath = c.path.replace(/'/g, "\\'");
+      return `${sep}<a onclick="loadFiles('${safePath}')">${esc(c.name === '/' ? '📁 root' : c.name)}</a>`;
+    }).join('');
+    // Rows: folders first, then files
+    const rows = [];
+    for (const d of j.folders) {
+      const safePath = d.path.replace(/'/g, "\\'");
+      rows.push(`
+        <div class=file-row onclick="loadFiles('${safePath}')">
+          <div class=file-ico>📂</div>
+          <div class=grow>
+            <div class=file-name>${esc(d.name)}/</div>
+            <div class=file-meta>${fmtDate(d.mtime)}</div>
+          </div>
+        </div>`);
+    }
+    for (const f of j.files) {
+      const ext = (f.name.split('.').pop() || '').toLowerCase();
+      const ico = ['mp4','mov','mkv','webm'].includes(ext) ? '🎬'
+                : ['jpg','jpeg','png','gif','webp','heic'].includes(ext) ? '🖼'
+                : ['mp3','m4a','aac','flac','wav','opus'].includes(ext) ? '🎵'
+                : ['zip','tar','gz','7z'].includes(ext) ? '📦'
+                : '📄';
+      const link = f.share_url
+        ? `onclick="openExternal('${encodeURIComponent(f.share_url)}')"`
+        : `onclick="showErr('No share URL — SHARE_SECRET/PUBLIC_BASE_URL not configured')"`;
+      rows.push(`
+        <div class=file-row ${link}>
+          <div class=file-ico>${ico}</div>
+          <div class=grow>
+            <div class=file-name>${esc(f.name)}</div>
+            <div class=file-meta>${fmtSize(f.size)} · ${fmtDate(f.mtime)}</div>
+          </div>
+        </div>`);
+    }
+    if (rows.length === 0) {
+      listRoot.innerHTML = '<div class=empty>Folder is empty.</div>';
+    } else {
+      listRoot.innerHTML = rows.join('');
+    }
+  } catch(e) { showErr('Load files failed: '+e); }
 }
 
 async function uploadToOneDrive(encodedUrl, btn) {
@@ -2231,7 +2434,8 @@ async function bootstrapWhoami() {
     isOwner = !!j.is_owner;
     // Toggle the sidebar entries AND the home tiles together so owner-only
     // surfaces appear in both places at once.
-    ['tab-admin', 'tab-scraper', 'tile-admin', 'tile-scraper'].forEach(id => {
+    ['tab-admin', 'tab-scraper', 'nav-files',
+     'tile-admin', 'tile-scraper', 'tile-files'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.classList.toggle('show', isOwner);
     });

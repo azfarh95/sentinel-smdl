@@ -2494,8 +2494,8 @@ button.warn { background: #ff9500; color: #fff; }
       </div>
       <div class="home-tile admin-only" id=tile-admin onclick="goto('admin')">
         <div class=ico>🛡</div>
-        <div class=name>Admin</div>
-        <div class=desc>Beta users · site blocklist · admin lockdown</div>
+        <div class=name>Server</div>
+        <div class=desc>Server settings · users · site blocklist · kill switch</div>
       </div>
     </div>
   </div>
@@ -2559,7 +2559,7 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
 
   <div class=page id=page-admin>
-    <h1>Admin</h1>
+    <h1>Server <span class=meta style="font-weight:400;font-size:13px;color:var(--muted);margin-left:8px">(owner-only · server-wide controls)</span></h1>
     <div id=admin-content><div class=empty><span class=spin></span> Loading…</div></div>
   </div>
 </div>
@@ -2596,7 +2596,7 @@ button.warn { background: #ff9500; color: #fff; }
     <div class=icon>🤖</div><div class=label>Scrape</div>
   </div>
   <div class="sidebar-item admin-only" id=tab-admin onclick="goto('admin')">
-    <div class=icon>🛡</div><div class=label>Admin</div>
+    <div class=icon>🛡</div><div class=label>Server</div>
   </div>
   <div class=sidebar-spacer></div>
   <div class=sidebar-divider></div>
@@ -3438,7 +3438,7 @@ async function bootstrapWhoami() {
 async function loadAdmin() {
   if (!isOwner) {
     document.getElementById('admin-content').innerHTML =
-      '<div class=empty>Admin tab is owner-only.</div>';
+      '<div class=empty>Server tab is owner-only.</div>';
     return;
   }
   const root = document.getElementById('admin-content');

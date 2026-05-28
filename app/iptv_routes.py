@@ -99,7 +99,7 @@ body.smdl-iptv-nav-hidden .smdl-iptv-topnav-host .reveal-pill { display: inline-
     <a href="/iptv" class="active" title="IPTV">📺 IPTV</a>
     <a href="/app#files" title="Files">📁 Files</a>
     <a href="/app#scraper" title="Scraper">🕷 Scrape</a>
-    <a href="/app#admin" title="Admin">🛡 Admin</a>
+    <a href="/app#admin" title="Server">🛡 Server</a>
     <a href="/app#settings" title="Settings">⚙</a>
     <span class="mode-chip" id="smdl-iptv-nav-mode-chip" title="Right-click here or anywhere on this bar to cycle: Fixed → Hover → Hidden">Fixed</span>
   </div>

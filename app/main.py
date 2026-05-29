@@ -242,3 +242,54 @@ async def health_bot():
         "ready":      bool(state.get("ready")),
         "last_error": state.get("last_error"),
     }
+
+
+# ── #42 — /internal/reload-env (#27 fanout endpoint) ─────────────────────────
+# Loopback + INTERNAL_RELOAD_TOKEN-gated. Called by sentinel-watchdog's
+# secrets API after it writes a new value to .env.local, so SMDL can hot-swap
+# keys without a container restart. See sentinel-watchdog @ c9d42cf.
+from pathlib import Path as _Path
+import hmac as _hmac
+import os as _os
+
+from . import _reload_env as _renv
+from . import file_serve as _file_serve
+
+
+def _swap_share_secret(v: str) -> None:
+    """Rebind the module-level SHARE_SECRET so /share/<token>/<file>
+    immediately validates against the new HMAC key. The four usage
+    sites in file_serve all look up SHARE_SECRET by name (no captured
+    locals), so this single rebind is sufficient."""
+    _file_serve.SHARE_SECRET = v
+
+
+_renv.register_hot_swap("SMDL_SHARE_SECRET", _swap_share_secret)
+
+
+@app.post("/internal/reload-env")
+async def internal_reload_env(request: _Request):
+    host = request.client.host if request.client else ""
+    # In a container, loopback may show as the container's IP (gateway). Accept
+    # the standard loopback aliases AND the docker bridge gateway range.
+    # Watchdog reaches us via host.docker.internal which Docker maps to the
+    # gateway 172.17.0.1 (or similar) — request.client.host then shows the
+    # gateway. The token gate is the real auth boundary.
+    if host not in ("127.0.0.1", "::1", "localhost") and not host.startswith("172."):
+        raise _StarletteHTTPException(403, f"internal endpoint: loopback only (got {host})")
+    expected = _os.environ.get("INTERNAL_RELOAD_TOKEN", "")
+    presented = request.headers.get("x-internal-reload-token", "")
+    if not expected:
+        raise _StarletteHTTPException(503, "INTERNAL_RELOAD_TOKEN not set in env")
+    if not _hmac.compare_digest(expected, presented):
+        raise _StarletteHTTPException(401, "internal endpoint: token mismatch")
+
+    body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+    keys = body.get("keys") if isinstance(body, dict) else None
+    env_path_str = _os.environ.get("ENV_LOCAL_PATH", "/secrets/.env.local")
+    result = await asyncio.to_thread(
+        _renv.reload_env_in_process, _Path(env_path_str), keys=keys,
+    )
+    logger.info("reload-env keys=%s applied=%s frozen=%s",
+                keys or "all", result["applied"], result["frozen"])
+    return {"ok": True, **result}

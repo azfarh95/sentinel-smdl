@@ -1,0 +1,12 @@
+{
+  "name": "sentinel-sitebuilder-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tauri wrap of the Sentinel Sitebuilder theme-token editor",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  }
+}

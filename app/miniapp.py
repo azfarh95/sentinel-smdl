@@ -2360,23 +2360,36 @@ HTML = """<!doctype html>
 <meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>SM-DL</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+/* Apply the saved appearance before first paint (no flash-of-default-theme).
+   Defaults: chrome palette + bold intensity (the futuristic look out of the box). */
+(function(){ try {
+  var d = document.documentElement;
+  d.dataset.theme = localStorage.getItem('smdl_theme') || '@@DEFAULT_THEME@@';
+  d.dataset.fx    = localStorage.getItem('smdl_fx')    || '@@DEFAULT_FX@@';
+} catch (e) {} })();
+</script>
 <style>
-:root {
-  --bg: var(--tg-theme-bg-color, #1c1c1e);
-  --fg: var(--tg-theme-text-color, #e8e8ea);
-  --muted: var(--tg-theme-hint-color, #8e8e93);
-  --link: var(--tg-theme-link-color, #2997ff);
-  --button: var(--tg-theme-button-color, #2997ff);
-  --button-text: var(--tg-theme-button-text-color, #fff);
-  --section: var(--tg-theme-section-bg-color, #2c2c2e);
-  --separator: var(--tg-theme-section-separator-color, #38383a);
-  --destructive: #ff453a;
-  --success: #34c759;
-}
+/* ── Theme engine ───────────────────────────────────────────────────────────
+   Black / metallic / futuristic. Palette is PINNED (no longer defers to the
+   Telegram client theme) so the look is identical in the Android APK, the
+   Windows desktop wrap, and in-Telegram. Two axes, both per-device via
+   localStorage and switchable live in Settings → Appearance:
+     data-theme: chrome | graphite | obsidian | gunmetal   (accent + metal hue)
+     data-fx:    bold | refined                            (glow / sheen / shape)
+   The boot <script> in <head> sets both before first paint to avoid a flash.
+   The :root / [data-theme] / [data-fx] blocks below are GENERATED from
+   app/theme_tokens.json by app/themes.py — edit the JSON, not this CSS. */
+/*@@THEME_CSS@@*/
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 body { margin: 0; padding: env(safe-area-inset-top, 0) 0 env(safe-area-inset-bottom, 0) 56px;
        font: 15px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
-       background: var(--bg); color: var(--fg); min-height: 100vh;
+       color: var(--fg); min-height: 100vh;
+       background:
+         radial-gradient(1100px 720px at 78% -12%, rgba(var(--accent-rgb), 0.07), transparent 60%),
+         radial-gradient(900px 600px at -10% 110%, rgba(var(--accent-rgb), 0.045), transparent 55%),
+         var(--bg);
+       background-attachment: fixed;
        transition: padding-left 0.2s ease; }
 body.sidebar-collapsed { padding-left: 28px; }
 /* Left sidebar (was bottom tabbar). 56px wide normal, 28px collapsed
@@ -2384,7 +2397,9 @@ body.sidebar-collapsed { padding-left: 28px; }
    safe-area padding on top so the first nav item doesn't sit behind
    the device status bar / Telegram chrome. */
 .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 56px;
-           background: var(--section); border-right: 1px solid var(--separator);
+           background: var(--surface); border-right: 1px solid var(--separator);
+           box-shadow: inset -1px 0 0 rgba(255,255,255,calc(0.05 * var(--sheen))),
+                       2px 0 16px rgba(0,0,0,0.4);
            display: flex; flex-direction: column; z-index: 10;
            padding: calc(env(safe-area-inset-top, 0px) + 8px) 0 env(safe-area-inset-bottom, 0px);
            transition: width 0.2s ease; overflow: hidden; }
@@ -2402,8 +2417,9 @@ body.sidebar-collapsed .sidebar-divider { margin: 6px 4px; }
                 user-select: none; border-left: 3px solid transparent;
                 text-align: center; gap: 3px; transition: background 0.12s; }
 .sidebar-item:hover { background: rgba(255,255,255,0.03); }
-.sidebar-item.active { color: var(--button); border-left-color: var(--button);
-                       background: rgba(41,151,255,0.10); }
+.sidebar-item.active { color: var(--accent); border-left-color: var(--accent);
+                       background: var(--accent-soft);
+                       box-shadow: inset 0 0 18px rgba(var(--accent-rgb), calc(0.12 * var(--sheen))); }
 .sidebar-item .icon { font-size: 20px; line-height: 1; }
 .sidebar-item .label { font-size: 9.5px; line-height: 1.05; letter-spacing: 0.1px; }
 /* Icons-only mode: shrink padding, hide labels, slightly smaller icons. */
@@ -2413,14 +2429,19 @@ body.sidebar-collapsed .sidebar-item .icon { font-size: 16px; }
 body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
 /* Home tile grid — landing page for the Mini App. 2 cols on phones. */
 .home-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 6px; }
-.home-tile { background: var(--section); border-radius: 12px; padding: 16px 12px;
+.home-tile { background: var(--surface); border-radius: var(--tile-radius); padding: 16px 12px;
              cursor: pointer; border: 1px solid var(--separator); position: relative;
-             text-align: left; transition: transform 0.1s, background 0.12s;
-             color: var(--fg); }
-.home-tile:active { transform: scale(0.98); background: rgba(255,255,255,0.04); }
-.home-tile .ico { font-size: 30px; line-height: 1; margin-bottom: 8px; }
-.home-tile .name { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
-.home-tile .desc { font-size: 11px; color: var(--muted); line-height: 1.3; }
+             overflow: hidden; text-align: left; color: var(--fg);
+             box-shadow: var(--glow);
+             transition: transform 0.1s, border-color 0.15s, box-shadow 0.18s; }
+.home-tile::before { content: ''; position: absolute; inset: 0; pointer-events: none;
+             border-radius: inherit;
+             background: linear-gradient(180deg, rgba(255,255,255,calc(0.08 * var(--sheen))) 0%, transparent 38%); }
+.home-tile:hover { border-color: var(--accent-line); box-shadow: var(--glow-strong); }
+.home-tile:active { transform: scale(0.98); }
+.home-tile .ico { font-size: 30px; line-height: 1; margin-bottom: 8px; position: relative; }
+.home-tile .name { font-size: 14px; font-weight: 600; margin-bottom: 2px; position: relative; }
+.home-tile .desc { font-size: 11px; color: var(--muted); line-height: 1.3; position: relative; }
 .sidebar-item.admin-only { display: none; }
 .sidebar-item.admin-only.show { display: flex; }
 .home-tile.admin-only { display: none; }
@@ -2429,7 +2450,7 @@ body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
    in the Telegram mobile WebView). Edit mode disables the wiggle's transition
    jank, kills page-scroll under the finger (touch-action:none), and shows a
    grab handle. Order persists per-device in localStorage. */
-#tiles-arrange-btn.on { background: var(--button); color: #fff; border-color: var(--button); }
+#tiles-arrange-btn.on { background: var(--button); color: var(--button-text); border-color: var(--button); box-shadow: var(--glow); }
 .home-tiles.editing .home-tile { cursor: grab; touch-action: none;
   animation: tile-wiggle 0.45s ease-in-out infinite alternate; }
 .home-tiles.editing .home-tile::after { content: '⠿'; position: absolute;
@@ -2443,27 +2464,37 @@ body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
            -webkit-overflow-scrolling: touch; scrollbar-width: none; }
 .subtabs::-webkit-scrollbar { display: none; }
 .subtab { padding: 7px 13px; border: 1px solid var(--separator); border-radius: 16px;
-          background: var(--card); color: var(--fg); font-size: 12px; cursor: pointer;
-          white-space: nowrap; transition: background 0.15s; }
-.subtab:hover { background: rgba(255,255,255,0.04); }
-.subtab.active { background: var(--button); color: var(--button-text); border-color: var(--button); }
+          background: var(--surface); color: var(--fg); font-size: 12px; cursor: pointer;
+          white-space: nowrap; transition: background 0.15s, border-color 0.15s, box-shadow 0.18s; }
+.subtab:hover { border-color: var(--accent-line); }
+.subtab.active { background: linear-gradient(180deg, var(--accent), var(--accent-2));
+          color: var(--button-text); border-color: var(--accent); box-shadow: var(--glow); }
 .subtab-pane { display: none; }
 .subtab-pane.active { display: block; }
 h1 { font-size: 1.3em; margin: 6px 0 14px; }
-.card { background: var(--section); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+.card { background: var(--surface); border: 1px solid var(--separator);
+        border-radius: var(--radius); padding: 12px; margin-bottom: 10px; box-shadow: var(--glow); }
 .row { display: flex; align-items: center; gap: 10px; }
 .row .grow { flex: 1; min-width: 0; }
 .row .name { font-weight: 600; word-break: break-word; }
 .row .meta { font-size: 12px; color: var(--muted); margin-top: 2px; word-break: break-all; }
-button { background: var(--button); color: var(--button-text); border: 0; padding: 9px 14px;
-         border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; touch-action: manipulation; }
+button { background: linear-gradient(180deg, var(--accent), var(--accent-2));
+         color: var(--button-text); border: 0; padding: 9px 14px;
+         border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer;
+         letter-spacing: var(--label-ls); box-shadow: var(--glow);
+         touch-action: manipulation; transition: transform 0.08s, box-shadow 0.18s, filter 0.15s; }
+button:hover { box-shadow: var(--glow-strong); filter: brightness(1.06); }
 button:active { transform: scale(0.97); }
-button.sec { background: transparent; color: var(--button); border: 1px solid var(--button); }
-button.danger { background: var(--destructive); }
+button.sec { background: transparent; color: var(--accent); border: 1px solid var(--accent-line);
+         box-shadow: none; }
+button.sec:hover { background: var(--accent-soft); border-color: var(--accent); filter: none; }
+button.danger { background: linear-gradient(180deg, var(--destructive), #c4332b); color: #fff; }
 button.small { padding: 6px 10px; font-size: 12px; }
-input { width: 100%; padding: 10px 12px; border: 1px solid var(--separator); border-radius: 8px;
-        background: var(--bg); color: var(--fg); font-size: 14px; }
-input:focus { outline: none; border-color: var(--button); }
+input { width: 100%; padding: 10px 12px; border: 1px solid var(--separator); border-radius: 10px;
+        background: var(--bg-elev); color: var(--fg); font-size: 14px;
+        transition: border-color 0.15s, box-shadow 0.18s; }
+input:focus { outline: none; border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft); }
 .field { font-size: 12px; color: var(--muted); margin: 4px 4px 4px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px; vertical-align: middle; }
 .dot.live    { background: var(--success); box-shadow: 0 0 6px var(--success); animation: pulse 1.4s infinite; }
@@ -2513,10 +2544,10 @@ button.warn { background: #ff9500; color: #fff; }
 .set-grid { display: grid; gap: 12px;
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
     align-items: start; }
-.set-tile { background: var(--card); border: 1px solid var(--separator);
-    border-radius: 10px; padding: 12px 14px; }
+.set-tile { background: var(--surface); border: 1px solid var(--separator);
+    border-radius: var(--radius); padding: 12px 14px; box-shadow: var(--glow); }
 .set-tile .head { display: flex; align-items: center; gap: 6px;
-    font-size: 12px; font-weight: 700; color: var(--muted);
+    font-size: 12px; font-weight: 700; color: var(--accent);
     text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 8px; }
 .set-tile.full { grid-column: 1 / -1; }
 .set-pt-preview { font-family: ui-monospace, monospace; font-size: 11px;
@@ -2529,9 +2560,30 @@ button.warn { background: #ff9500; color: #fff; }
     font-family: ui-monospace, monospace; cursor: pointer; }
 .set-pt-tokens .tok:hover { color: var(--button); }
 
+/* Appearance picker — theme swatches + intensity toggle */
+.appearance .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.6px; margin: 4px 0 6px; }
+.theme-swatches { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.swatch { position: relative; display: flex; align-items: center; gap: 8px;
+    padding: 10px; border-radius: 10px; border: 1px solid var(--separator);
+    cursor: pointer; color: var(--fg); text-align: left; box-shadow: none;
+    font-size: 12px; font-weight: 600; overflow: hidden; }
+.swatch::before { content: ''; position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,0.06), transparent 45%); }
+.swatch.active { border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 16px rgba(var(--accent-rgb), 0.3); }
+.swatch .sw-dot { width: 14px; height: 14px; border-radius: 50%; flex: 0 0 auto;
+    position: relative; }
+.swatch .sw-name { position: relative; white-space: nowrap; }
+.fx-toggle { display: flex; gap: 8px; margin-top: 4px; }
+.fx-toggle button { flex: 1; background: var(--surface); color: var(--fg);
+    border: 1px solid var(--separator); box-shadow: none; font-weight: 500; }
+.fx-toggle button.active { background: linear-gradient(180deg, var(--accent), var(--accent-2));
+    color: var(--button-text); border-color: var(--accent); box-shadow: var(--glow); }
+
 /* #41 Part 2 — restructure preview / progress */
 .rs-summary { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-.rs-summary b { color: var(--text); }
+.rs-summary b { color: var(--fg); }
 .rs-list { max-height: 300px; overflow-y: auto; border: 1px solid var(--separator);
     border-radius: 8px; }
 .rs-row { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px;
@@ -3815,12 +3867,58 @@ async function loadSettings() {
       </div>
 
       <div class=set-grid>
+        <div class=set-tile id=appearance-tile>
+          <div class=head>🎨 Appearance</div>
+          ${appearanceInner()}
+        </div>
         ${oneDriveTile}
         ${downloadsTile}
       </div>
     `;
     updatePathTemplatePreview();
   } catch(e) { showErr('Load failed: '+e); }
+}
+
+// ── Appearance: black/metallic/futuristic theme engine (per-device) ──────────
+// THEMES is generated from app/theme_tokens.json (see app/themes.py).
+const THEMES = @@THEME_SWATCHES@@;
+
+function appearanceInner() {
+  const cur = document.documentElement.dataset.theme || 'chrome';
+  const fx  = document.documentElement.dataset.fx || 'bold';
+  const swatches = THEMES.map(t => `
+    <button class="swatch ${t.id === cur ? 'active' : ''}" onclick="setTheme('${t.id}')"
+      style="background:linear-gradient(160deg, ${t.surf}, ${t.bg})">
+      <span class=sw-dot style="background:${t.accent}; box-shadow:0 0 8px ${t.accent}"></span>
+      <span class=sw-name>${t.name}</span>
+    </button>`).join('');
+  return `
+    <div class=appearance>
+      <div class=lbl>Palette</div>
+      <div class=theme-swatches>${swatches}</div>
+      <div class=lbl style="margin-top:12px">Intensity</div>
+      <div class=fx-toggle>
+        <button class="${fx === 'bold' ? 'active' : ''}" onclick="setFx('bold')">⚡ Bold</button>
+        <button class="${fx === 'refined' ? 'active' : ''}" onclick="setFx('refined')">✦ Refined</button>
+      </div>
+    </div>`;
+}
+
+function renderAppearance() {
+  const tile = document.getElementById('appearance-tile');
+  if (tile) tile.innerHTML = '<div class=head>🎨 Appearance</div>' + appearanceInner();
+}
+
+function setTheme(id) {
+  document.documentElement.dataset.theme = id;
+  try { localStorage.setItem('smdl_theme', id); } catch (e) {}
+  renderAppearance();
+}
+
+function setFx(mode) {
+  document.documentElement.dataset.fx = mode;
+  try { localStorage.setItem('smdl_fx', mode); } catch (e) {}
+  renderAppearance();
 }
 
 function updatePathTemplatePreview() {
@@ -4848,14 +4946,53 @@ async def miniapp_root_redirect():
     return RedirectResponse(url="/app", status_code=302)
 
 
+def _render_app_html() -> str:
+    """Inject the generated theme CSS + tokens into the static HTML shell.
+    Cheap string substitution; themes.load_tokens() hot-reloads on file change
+    so editing theme_tokens.json restyles the app without a restart."""
+    from . import themes
+    tokens = themes.load_tokens()
+    dft_theme, dft_fx = themes.defaults(tokens)
+    return (HTML
+            .replace("/*@@THEME_CSS@@*/", themes.render_theme_css(tokens))
+            .replace("@@DEFAULT_THEME@@", dft_theme)
+            .replace("@@DEFAULT_FX@@", dft_fx)
+            .replace("@@THEME_SWATCHES@@", themes.swatches_js(tokens)))
+
+
 @router.get("/app", response_class=HTMLResponse)
 async def miniapp_index():
-    return HTMLResponse(HTML)
+    return HTMLResponse(_render_app_html())
 
 
 @router.get("/app/", response_class=HTMLResponse)
 async def miniapp_index_slash():
-    return HTMLResponse(HTML)
+    return HTMLResponse(_render_app_html())
+
+
+@router.get("/api/miniapp/theme-tokens")
+async def get_theme_tokens(request: Request):
+    """Read the live design tokens. Auth'd (not owner-only) so any client —
+    a future Sitebuilder, another pillar — can mirror the palette."""
+    await _verify(request)
+    from . import themes
+    return themes.load_tokens()
+
+
+@router.post("/api/miniapp/theme-tokens")
+async def put_theme_tokens(request: Request):
+    """Overwrite the design tokens (owner-only). Restyles the app immediately —
+    this is the 'change themes without rewiring code' hook the builder drives."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import themes
+    body = await request.json()
+    try:
+        saved = themes.save_tokens(body)
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "tokens": saved}
 
 
 @router.get("/app/stremio/assets/{filename:path}")

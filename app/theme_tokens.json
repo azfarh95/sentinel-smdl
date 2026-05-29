@@ -1,0 +1,54 @@
+{
+  "$comment": "Sentinel Media design tokens. Edit values here to restyle the UI without touching CSS or component code. app/themes.py generates the :root + [data-theme] + [data-fx] CSS from this at serve time (hot-reloaded on file change). This is the seed for a cross-pillar 'Sitebuilder'.",
+  "defaults": { "theme": "chrome", "fx": "bold" },
+  "constants": {
+    "destructive": "#ff453a",
+    "success": "#34c759",
+    "warn": "#ff9f0a",
+    "metal-angle": "160deg"
+  },
+  "palettes": {
+    "chrome": {
+      "name": "Chrome · Cyan",
+      "bg": "#07080a", "bg-elev": "#0e1116", "fg": "#e6edf3", "muted": "#8b97a6",
+      "accent": "#2af6ff", "accent-2": "#15c2d4", "accent-rgb": "42, 246, 255",
+      "surface-1": "#14171c", "surface-2": "#1b1f26", "separator": "#2a2f37",
+      "button-text": "#04141a"
+    },
+    "graphite": {
+      "name": "Graphite · Silver",
+      "bg": "#000000", "bg-elev": "#111216", "fg": "#f2f4f7", "muted": "#888d96",
+      "accent": "#d6dae0", "accent-2": "#9aa0a8", "accent-rgb": "214, 218, 224",
+      "surface-1": "#15161a", "surface-2": "#1d1f24", "separator": "#33363d",
+      "button-text": "#15171b"
+    },
+    "obsidian": {
+      "name": "Obsidian · Violet",
+      "bg": "#08070c", "bg-elev": "#110f17", "fg": "#ece8f5", "muted": "#948aa8",
+      "accent": "#b14bff", "accent-2": "#7d2fc7", "accent-rgb": "177, 75, 255",
+      "surface-1": "#16131f", "surface-2": "#1e1a2b", "separator": "#322a44",
+      "button-text": "#ffffff"
+    },
+    "gunmetal": {
+      "name": "Gunmetal · Amber",
+      "bg": "#0a0b0d", "bg-elev": "#111318", "fg": "#eef1f4", "muted": "#8d949e",
+      "accent": "#ffb340", "accent-2": "#e0902a", "accent-rgb": "255, 179, 64",
+      "surface-1": "#16191e", "surface-2": "#1d2228", "separator": "#2c313a",
+      "button-text": "#1a1206"
+    }
+  },
+  "intensities": {
+    "refined": {
+      "radius": "14px", "tile-radius": "16px",
+      "glow": "0 1px 2px rgba(0,0,0,0.5)",
+      "glow-strong": "0 6px 22px rgba(0,0,0,0.55)",
+      "sheen": "0.35", "label-tt": "none", "label-ls": "normal"
+    },
+    "bold": {
+      "radius": "10px", "tile-radius": "10px",
+      "glow": "0 0 14px rgba(var(--accent-rgb), 0.35)",
+      "glow-strong": "0 0 24px rgba(var(--accent-rgb), 0.55)",
+      "sheen": "1", "label-tt": "uppercase", "label-ls": "0.05em"
+    }
+  }
+}

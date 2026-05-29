@@ -42,6 +42,10 @@ _DEFAULT_TIMEOUT = 30                # per-request HTTP timeout
 _POLL_INTERVAL = 1.5                 # seconds between info polls
 _DEFAULT_RESOLVE_TIMEOUT = 180       # cap on the full magnet→URL flow
 
+# Owner-editable token file. Bind-mounted (./smdl/config:/config) so a token
+# saved from the Settings UI survives image rebuilds without an env change.
+_TOKEN_FILE = os.environ.get("RD_TOKEN_FILE", "/config/rd_token")
+
 
 class RealDebridError(Exception):
     """Raised when the RD API rejects a request or returns malformed data."""
@@ -53,12 +57,38 @@ def _get_token() -> Optional[str]:
     t = os.environ.get("RD_API_TOKEN", "").strip()
     if t:
         return t
-    # Fallback: /config/rd_token (single-line file)
+    # Fallback: token file (single-line), owner-editable from the Settings UI.
     try:
-        with open("/config/rd_token", "r", encoding="utf-8") as f:
+        with open(_TOKEN_FILE, "r", encoding="utf-8") as f:
             return f.read().strip() or None
     except (FileNotFoundError, PermissionError):
         return None
+
+
+def set_token(token: str) -> None:
+    """Persist the owner's RD personal token to the token file. Atomic
+    write so a crash mid-save can't leave a truncated token behind."""
+    token = (token or "").strip()
+    if not token:
+        raise RealDebridError("Empty token.")
+    d = os.path.dirname(_TOKEN_FILE) or "."
+    os.makedirs(d, exist_ok=True)
+    tmp = f"{_TOKEN_FILE}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(token + "\n")
+    os.replace(tmp, _TOKEN_FILE)
+
+
+def token_status() -> dict:
+    """Whether a token is configured + a masked tail for display. Never
+    returns the raw token. `source` tells the owner where it's coming
+    from (an env var overrides the editable file)."""
+    env_t = os.environ.get("RD_API_TOKEN", "").strip()
+    tok = _get_token()
+    source = "env" if env_t else ("file" if tok else None)
+    masked = f"…{tok[-4:]}" if tok and len(tok) >= 4 else ("set" if tok else None)
+    return {"set": bool(tok), "masked": masked, "source": source,
+            "editable": not env_t}
 
 
 # ── HTTP helpers ────────────────────────────────────────────────────────────

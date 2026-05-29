@@ -228,6 +228,32 @@
   }
   $effect(() => { if (view === "settings" && !settings) loadSettings(); });
 
+  // ── Real-Debrid token (owner pastes it when missing/rotated) ──────────
+  let rdStatus = $state<{ set: boolean; masked: string | null;
+                          source: string | null; editable: boolean } | null>(null);
+  let rdTokenInput = $state("");
+  let rdSaving = $state(false);
+  let rdSaveMsg = $state<string | null>(null);
+
+  async function loadRdStatus() {
+    try { rdStatus = await api.rdToken.status(); } catch (e) { lastError = String(e); }
+  }
+  async function saveRdToken() {
+    if (!rdTokenInput.trim()) return;
+    rdSaving = true; rdSaveMsg = null;
+    try {
+      const r = await api.rdToken.set(rdTokenInput.trim());
+      rdStatus = r.status;
+      rdTokenInput = "";
+      account = r.account;
+      rdSaveMsg = r.account?.ok
+        ? `Saved — RD account ${r.account.username ?? ""} active.`
+        : `Saved, but RD rejected it: ${r.account?.error ?? "unknown error"}`;
+    } catch (e) { rdSaveMsg = String(e); }
+    finally { rdSaving = false; }
+  }
+  $effect(() => { if (view === "settings" && !rdStatus) loadRdStatus(); });
+
   // Resume offer: when entering player, check for saved position.
   async function checkResume(imdb: string, vid: HTMLVideoElement) {
     try {
@@ -628,6 +654,39 @@
           <Loader2 class="animate-spin size-5 mx-auto text-muted-foreground" />
         </CardContent></Card>
       {:else}
+        <Card class="mb-3"><CardHeader>
+          <CardTitle class="flex items-center gap-2">
+            Real-Debrid
+            {#if rdStatus?.set}<Badge variant="secondary">Configured {rdStatus.masked}</Badge>
+            {:else}<Badge variant="destructive">No token</Badge>{/if}
+          </CardTitle>
+          <CardDescription>
+            Personal API token from
+            <a href="https://real-debrid.com/apitoken" target="_blank"
+               class="text-primary underline">real-debrid.com/apitoken</a>.
+            Used to turn torrents into direct streams.
+          </CardDescription>
+        </CardHeader><CardContent class="space-y-2">
+          {#if rdStatus?.editable === false}
+            <p class="text-xs text-muted-foreground">
+              Token is set via the <code>RD_API_TOKEN</code> environment variable —
+              edit it there to change it.
+            </p>
+          {:else}
+            <div class="flex gap-2">
+              <Input type="password" placeholder="Paste RD token…"
+                     bind:value={rdTokenInput} class="text-sm" />
+              <Button size="sm" disabled={rdSaving || !rdTokenInput.trim()}
+                      onclick={saveRdToken}>
+                {#if rdSaving}<Loader2 class="animate-spin size-4" />{:else}Save{/if}
+              </Button>
+            </div>
+            {#if rdSaveMsg}
+              <p class="text-xs text-muted-foreground">{rdSaveMsg}</p>
+            {/if}
+          {/if}
+        </CardContent></Card>
+
         <Card class="mb-3"><CardHeader>
           <CardTitle>Playback</CardTitle>
           <CardDescription>Default stream quality + auto-grab behaviour.</CardDescription>

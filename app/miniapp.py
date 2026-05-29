@@ -268,7 +268,10 @@ async def _verify(request: Request) -> dict:
     )
     if not bot_token:
         raise HTTPException(status_code=503, detail="bot token not configured")
-    init_data = request.headers.get("x-init-data") or ""
+    # Canonical header is X-Init-Data (used across all SMDL surfaces). The
+    # Stremio sub-app historically sent X-Telegram-Init-Data, so accept both.
+    init_data = (request.headers.get("x-init-data")
+                 or request.headers.get("x-telegram-init-data") or "")
     payload = _validate_init_data(init_data, bot_token)
     await _check_access(payload)
     # initData auth implies owner — synthesise a wildcard session so
@@ -387,10 +390,21 @@ class StreamStopBody(BaseModel):
 async def whoami(request: Request):
     p = await _verify(request)
     uid = int(p["user"]["id"])
+    # Owner is the union of two signals so this never disagrees with
+    # /auth/session (which keys off the cookie's wildcard scope):
+    #   • a wildcard-scope session — the v1 APK owner cookie or an
+    #     initData session, both of which mean "this caller is the owner"
+    #     regardless of whether owner_chat_id happens to be configured;
+    #   • the legacy chat-id match for the Telegram bot path.
+    # Without the scope check, an owner-cookie session whose synthesised
+    # uid can't be matched would render is_owner=False and silently hide
+    # the Files / Scraper / Admin surfaces.
+    scopes = (p.get("session") or {}).get("scopes") or []
+    is_owner = ("*" in scopes) or _is_owner(uid)
     return {
         "user": p.get("user"),
         "owner_chat_id": _cfg_get("owner_chat_id"),
-        "is_owner": _is_owner(uid),
+        "is_owner": is_owner,
         "allowed_users_count": len(_allowed_users()),
     }
 
@@ -606,6 +620,47 @@ async def stremio_settings_set(body: _StremioSettingsPatch, request: Request):
     from . import stremio_settings as _ss
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
     return {"settings": await _ss.update(patch)}
+
+
+@router.get("/api/miniapp/stremio/rd-token")
+async def stremio_rd_token_status(request: Request):
+    """Whether a Real-Debrid token is configured (never returns the value)."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import realdebrid as _rd
+    return _rd.token_status()
+
+
+class _RDTokenBody(BaseModel):
+    token: str
+
+
+@router.post("/api/miniapp/stremio/rd-token")
+async def stremio_rd_token_set(body: _RDTokenBody, request: Request):
+    """Owner pastes their personal RD token (real-debrid.com/apitoken).
+    Persisted to the bind-mounted token file, then validated by hitting
+    /user. Returns the new status + account check so the UI can confirm."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import realdebrid as _rd
+    tok = (body.token or "").strip()
+    if not tok:
+        return JSONResponse({"ok": False, "error": "empty token"}, status_code=400)
+    try:
+        _rd.set_token(tok)
+    except _rd.RealDebridError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    except OSError as e:
+        return JSONResponse({"ok": False, "error": f"could not save token: {e}"},
+                            status_code=500)
+    # Validate against RD immediately so the owner gets instant feedback.
+    try:
+        a = _rd.get_account()
+        account = {"ok": True, "username": a.username, "is_premium": a.is_premium,
+                   "days_left": round(a.premium_seconds_left / 86400, 1)}
+    except _rd.RealDebridError as e:
+        account = {"ok": False, "error": str(e)}
+    return {"ok": True, "status": _rd.token_status(), "account": account}
 
 
 class _StremioPositionBody(BaseModel):
@@ -2937,6 +2992,9 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
   <div class=sidebar-spacer></div>
   <div class=sidebar-divider></div>
+  <div class=sidebar-item id=nav-account onclick="location.href='/account'">
+    <div class=icon>👤</div><div class=label>Account</div>
+  </div>
   <div class=sidebar-item id=nav-settings onclick="goto('settings')">
     <div class=icon>⚙️</div><div class=label>Settings</div>
   </div>
@@ -3994,7 +4052,7 @@ async function restructurePreview() {
 function restructureApply() {
   const inc = document.getElementById('rs-unmatched')?.checked;
   const n = _rsLastPlan?.summary?.move || 0;
-  const msg = 'Move ' + n + ' file' + (n === 1 ? '' : 's') + ' to match the template?\n\nEvery move is journaled — you can undo it afterwards.';
+  const msg = 'Move ' + n + ' file' + (n === 1 ? '' : 's') + ' to match the template?\\n\\nEvery move is journaled — you can undo it afterwards.';
   const go = async () => {
     const out = document.getElementById('rs-result');
     try {
@@ -4025,10 +4083,10 @@ async function streamRestructureProgress(jobId) {
       if (done) break;
       buf += dec.decode(value, { stream: true });
       let idx;
-      while ((idx = buf.indexOf('\n\n')) >= 0) {
+      while ((idx = buf.indexOf('\\n\\n')) >= 0) {
         const frame = buf.slice(0, idx);
         buf = buf.slice(idx + 2);
-        const line = frame.split('\n').find(l => l.startsWith('data:'));
+        const line = frame.split('\\n').find(l => l.startsWith('data:'));
         if (!line) continue;
         try { renderRsProgress(JSON.parse(line.slice(5).trim())); } catch {}
       }
@@ -4066,7 +4124,7 @@ function renderRsProgress(st) {
 }
 
 function restructureRollback() {
-  const msg = 'Undo the most recent migration?\n\nFiles will be moved back to their original paths.';
+  const msg = 'Undo the most recent migration?\\n\\nFiles will be moved back to their original paths.';
   const go = async () => {
     const out = document.getElementById('rs-result');
     if (out) out.innerHTML = '<div class=meta>Rolling back…</div>';
@@ -4961,14 +5019,23 @@ def _render_app_html() -> str:
             .replace("@@THEME_SWATCHES@@", themes.swatches_js(tokens)))
 
 
+# The app shell is a tiny, server-rendered HTML string that gates owner-only
+# nav at runtime via whoami. It MUST NOT be cached by the WebView: a stale
+# copy strands the owner on an old build (missing nav, missing Account hatch)
+# and is exactly the "somehow I am on a stale version" failure. no-store is
+# cheap here — the heavy assets (thumbs, stremio bundle) carry their own
+# long-lived cache headers separately.
+_NO_STORE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
+
+
 @router.get("/app", response_class=HTMLResponse)
 async def miniapp_index():
-    return HTMLResponse(_render_app_html())
+    return HTMLResponse(_render_app_html(), headers=_NO_STORE)
 
 
 @router.get("/app/", response_class=HTMLResponse)
 async def miniapp_index_slash():
-    return HTMLResponse(_render_app_html())
+    return HTMLResponse(_render_app_html(), headers=_NO_STORE)
 
 
 @router.get("/app/sitebuilder", response_class=HTMLResponse)
@@ -5118,3 +5185,217 @@ async def auth_setup(request: Request):
 async def auth_check(request: Request):
     """Lightweight cookie probe — returns whether the APK session is recognised."""
     return {"authenticated": _verify_apk_cookie(request.cookies.get(COOKIE_NAME, ""))}
+
+
+def _clear_apk_cookie(resp, request: Request) -> None:
+    """Delete the session cookie. Must mirror the domain/path used by
+    _set_apk_cookie or the browser keeps the old cookie."""
+    host = (request.url.hostname or "").lower()
+    domain = COOKIE_DOMAIN if host.endswith("az-sentinel.xyz") else None
+    resp.delete_cookie(key=COOKIE_NAME, domain=domain, path="/")
+
+
+@router.get("/auth/session")
+async def auth_session(request: Request):
+    """Describe the CURRENT session so the Account panel can show who you
+    are and offer Logout / re-key. Never raises — an absent/invalid cookie
+    just reports kind='none'. Owner = v1 cookie or v2 with the '*' scope."""
+    session = _parse_session_cookie(request.cookies.get(COOKIE_NAME, ""))
+    if session is None:
+        return {"authenticated": False, "kind": "none",
+                "version": None, "scopes": [], "user_id": None}
+    scopes = session.get("scopes") or []
+    is_owner = "*" in scopes
+    return {
+        "authenticated": True,
+        "kind": "owner" if is_owner else "guest",
+        "version": session.get("version"),
+        "scopes": scopes,
+        "user_id": session.get("user_id"),
+    }
+
+
+@router.post("/auth/logout")
+async def auth_logout(request: Request):
+    """Drop the session cookie (e.g. to leave a guest session before
+    pasting the owner key)."""
+    resp = JSONResponse({"ok": True})
+    _clear_apk_cookie(resp, request)
+    return resp
+
+
+class _AuthLoginBody(BaseModel):
+    token: str
+
+
+@router.post("/auth/login")
+async def auth_login(body: _AuthLoginBody, request: Request):
+    """JSON twin of /auth/setup for in-app re-keying: paste the 64-char
+    owner token → set the owner cookie → return JSON (no redirect, so the
+    Account panel can confirm inline)."""
+    if not _safe_token_eq((body.token or "").strip(), OWNER_AUTH_TOKEN):
+        return JSONResponse({"ok": False, "error": "invalid_token"}, status_code=401)
+    resp = JSONResponse({"ok": True, "kind": "owner"})
+    _set_apk_cookie(resp, request)
+    return resp
+
+
+# Self-contained — NO @@placeholder@@ tokens (those are serve-time
+# substituted in the main /app HTML and can mangle JS). Plain f-string-free
+# string so nothing here depends on the inline-app JS or owner perms.
+_ACCOUNT_HTML = """<!doctype html><html lang=en><head>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Account · Sentinel Media</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+background:#0c0c0e;color:#e8e8ea;margin:0;padding:24px 18px;max-width:560px;
+margin-left:auto;margin-right:auto}
+h1{font-size:22px;margin:4px 0 18px}
+.card{background:#161618;border:1px solid #26262a;border-radius:14px;
+padding:16px 16px;margin:0 0 16px}
+.lbl{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#8a8a90;
+margin:0 0 6px}
+.val{font-size:16px;font-weight:600}
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:13px;
+font-weight:600}
+.badge.owner{background:#10331c;color:#5fd38a;border:1px solid #1f5c33}
+.badge.guest{background:#33270f;color:#e7b15f;border:1px solid #5c451f}
+.badge.none{background:#26262a;color:#9a9aa0;border:1px solid #38383c}
+.muted{color:#8a8a90;font-size:13px;margin:8px 0 0}
+input{width:100%;background:#0c0c0e;border:1px solid #38383c;color:#e8e8ea;
+border-radius:10px;padding:12px 12px;font-size:15px;font-family:ui-monospace,
+SFMono-Regular,Menlo,monospace;margin:0 0 10px}
+button{width:100%;border:0;border-radius:10px;padding:12px 12px;font-size:15px;
+font-weight:600;cursor:pointer}
+.primary{background:#5b9dff;color:#06121f}
+.danger{background:#2a1416;color:#ff8b8b;border:1px solid #5c2226}
+.ghost{background:transparent;color:#5b9dff;text-decoration:none;display:block;
+text-align:center;padding:12px;font-weight:600}
+.msg{font-size:13px;margin:8px 0 0;min-height:16px}
+.msg.ok{color:#5fd38a}.msg.err{color:#ff8b8b}
+.row{margin:0 0 10px}
+</style></head><body>
+<h1>Account</h1>
+
+<div class=card id=status-card>
+  <p class=lbl>Session</p>
+  <p class=val><span class="badge none" id=kind-badge>checking…</span></p>
+  <p class=muted id=scope-line></p>
+</div>
+
+<div class=card id=logout-card style="display:none">
+  <p class=lbl>Leave this session</p>
+  <button class=danger id=btn-logout>Log out</button>
+  <p class="msg" id=logout-msg></p>
+</div>
+
+<div class=card>
+  <p class=lbl>Sign in as owner</p>
+  <div class=row>
+    <input id=owner-key type=password autocomplete=off autocapitalize=off
+      autocorrect=off spellcheck=false placeholder="64-character owner key">
+  </div>
+  <button class=primary id=btn-login>Set owner key</button>
+  <p class="msg" id=login-msg></p>
+</div>
+
+<a class=ghost href="/app">Back to Sentinel Media</a>
+
+<script>
+var tg = (window.Telegram && window.Telegram.WebApp) || null;
+if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+
+function hdrs(extra) {
+  var h = { "Accept": "application/json" };
+  if (tg && tg.initData) h["X-Init-Data"] = tg.initData;
+  if (extra) for (var k in extra) h[k] = extra[k];
+  return h;
+}
+
+function renderSession(s) {
+  var badge = document.getElementById("kind-badge");
+  var scope = document.getElementById("scope-line");
+  var logoutCard = document.getElementById("logout-card");
+  var kind = s && s.kind ? s.kind : "none";
+  badge.className = "badge " + kind;
+  if (kind === "owner") {
+    badge.textContent = "Owner";
+    scope.textContent = "Full access. Re-key below if you need to rotate.";
+    logoutCard.style.display = "";
+  } else if (kind === "guest") {
+    badge.textContent = "Guest";
+    var sc = (s.scopes || []).join(", ") || "limited";
+    scope.textContent = "Scoped session (" + sc + "). Log out, then paste the owner key.";
+    logoutCard.style.display = "";
+  } else {
+    badge.textContent = "Not signed in";
+    scope.textContent = "Paste the owner key below to sign in.";
+    logoutCard.style.display = "none";
+  }
+}
+
+function loadSession() {
+  fetch("/auth/session", { headers: hdrs(), credentials: "include", cache: "no-store" })
+    .then(function (r) { return r.json(); })
+    .then(renderSession)
+    .catch(function () {
+      document.getElementById("kind-badge").textContent = "unknown";
+    });
+}
+
+document.getElementById("btn-logout").addEventListener("click", function () {
+  var m = document.getElementById("logout-msg");
+  m.className = "msg"; m.textContent = "Logging out…";
+  fetch("/auth/logout", { method: "POST", headers: hdrs(), credentials: "include" })
+    .then(function (r) { return r.json(); })
+    .then(function () {
+      m.className = "msg ok"; m.textContent = "Logged out.";
+      loadSession();
+    })
+    .catch(function () { m.className = "msg err"; m.textContent = "Logout failed."; });
+});
+
+document.getElementById("btn-login").addEventListener("click", function () {
+  var token = document.getElementById("owner-key").value.trim();
+  var m = document.getElementById("login-msg");
+  if (!token) { m.className = "msg err"; m.textContent = "Enter the owner key."; return; }
+  m.className = "msg"; m.textContent = "Verifying…";
+  fetch("/auth/login", {
+    method: "POST",
+    headers: hdrs({ "Content-Type": "application/json" }),
+    credentials: "include",
+    body: JSON.stringify({ token: token }),
+  })
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (res.ok && res.j && res.j.ok) {
+        m.className = "msg ok"; m.textContent = "Signed in. Loading…";
+        window.location.href = "/app";
+      } else {
+        m.className = "msg err";
+        m.textContent = (res.j && res.j.error === "invalid_token")
+          ? "That key did not match." : "Sign-in failed.";
+      }
+    })
+    .catch(function () { m.className = "msg err"; m.textContent = "Network error."; });
+});
+
+loadSession();
+</script>
+</body></html>"""
+
+
+@router.get("/account", response_class=HTMLResponse)
+async def account_page():
+    """Standalone, perms-independent account/login page. Reached from the
+    main app via location.href (the one nav style that works for a guest /
+    non-owner who cannot use the goto()-driven tabs). Served no-store so a
+    stale cached copy can never lock the owner out again."""
+    return HTMLResponse(
+        _ACCOUNT_HTML,
+        headers={"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"},
+    )

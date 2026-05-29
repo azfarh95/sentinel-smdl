@@ -9,7 +9,9 @@ const tg = (window as any).Telegram?.WebApp;
 
 function headers(): Record<string, string> {
   const h: Record<string, string> = { "Accept": "application/json" };
-  if (tg?.initData) h["X-Telegram-Init-Data"] = tg.initData;
+  // Canonical header across all SMDL surfaces is X-Init-Data (server reads
+  // that). Sending X-Telegram-Init-Data silently 401'd the initData path.
+  if (tg?.initData) h["X-Init-Data"] = tg.initData;
   return h;
 }
 
@@ -173,6 +175,18 @@ export const api = {
     get: () => get<{ settings: any }>("/api/miniapp/stremio/settings"),
     set: (patch: Record<string, any>) =>
       post<{ settings: any }>("/api/miniapp/stremio/settings", patch),
+  },
+
+  /** Real-Debrid personal token — owner pastes it here when missing/rotated. */
+  rdToken: {
+    status: () =>
+      get<{ set: boolean; masked: string | null; source: string | null;
+            editable: boolean }>("/api/miniapp/stremio/rd-token"),
+    set: (token: string) =>
+      post<{ ok: boolean; error?: string;
+             status: { set: boolean; masked: string | null; source: string | null;
+                       editable: boolean };
+             account: RDAccount }>("/api/miniapp/stremio/rd-token", { token }),
   },
   position: {
     get: (imdb_id: string) =>

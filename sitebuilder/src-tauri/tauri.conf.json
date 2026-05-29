@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Sentinel Sitebuilder",
+  "version": "0.1.0",
+  "identifier": "xyz.az-sentinel.sitebuilder",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Sentinel Sitebuilder",
+        "url": "https://media.az-sentinel.xyz/app/sitebuilder",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 820,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": ["default"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "Sentinel Sitebuilder — edit theme tokens, restyle every surface without code.",
+    "longDescription": "Owner-only theme editor for the Sentinel pillars. Edits the design tokens (palettes + intensities) that drive the SMDL UI across APK / Windows / Telegram, then saves them live — no code change, no restart. Reuses the .az-sentinel.xyz session cookie.",
+    "publisher": "Azfar",
+    "category": "DeveloperTool",
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "displayLanguageSelector": false,
+        "languages": ["English"]
+      }
+    }
+  }
+}

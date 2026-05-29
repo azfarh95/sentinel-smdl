@@ -3901,6 +3901,7 @@ function appearanceInner() {
         <button class="${fx === 'bold' ? 'active' : ''}" onclick="setFx('bold')">⚡ Bold</button>
         <button class="${fx === 'refined' ? 'active' : ''}" onclick="setFx('refined')">✦ Refined</button>
       </div>
+      ${isOwner ? `<a class=lbl style="display:inline-block;margin-top:12px;color:var(--accent);text-decoration:none" href="/app/sitebuilder">⬡ Open Sitebuilder — edit palettes &amp; intensities →</a>` : ''}
     </div>`;
 }
 
@@ -4968,6 +4969,19 @@ async def miniapp_index():
 @router.get("/app/", response_class=HTMLResponse)
 async def miniapp_index_slash():
     return HTMLResponse(_render_app_html())
+
+
+@router.get("/app/sitebuilder", response_class=HTMLResponse)
+@router.get("/app/sitebuilder/", response_class=HTMLResponse)
+async def miniapp_sitebuilder():
+    """Sentinel Sitebuilder — owner-gated theme-token editor.
+
+    Served from SMDL itself (same origin as the token API → reuses cookie /
+    X-Init-Data auth). The page is harmless without auth: its GET/POST to
+    /api/miniapp/theme-tokens are the gated boundary (POST is owner-only).
+    The Tauri desktop window (desktop/) points at this URL."""
+    from . import sitebuilder
+    return HTMLResponse(sitebuilder.SITEBUILDER_HTML)
 
 
 @router.get("/api/miniapp/theme-tokens")

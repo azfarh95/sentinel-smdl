@@ -2830,7 +2830,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sentinel-smdl-desktop"
+name = "sentinel-sitebuilder-desktop"
 version = "0.1.0"
 dependencies = [
  "log",

@@ -2340,6 +2340,18 @@ body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
 .sidebar-item.admin-only.show { display: flex; }
 .home-tile.admin-only { display: none; }
 .home-tile.admin-only.show { display: block; }
+/* #41 — drag-to-reorder. Pointer-event based (HTML5 draggable is unreliable
+   in the Telegram mobile WebView). Edit mode disables the wiggle's transition
+   jank, kills page-scroll under the finger (touch-action:none), and shows a
+   grab handle. Order persists per-device in localStorage. */
+#tiles-arrange-btn.on { background: var(--button); color: #fff; border-color: var(--button); }
+.home-tiles.editing .home-tile { cursor: grab; touch-action: none;
+  animation: tile-wiggle 0.45s ease-in-out infinite alternate; }
+.home-tiles.editing .home-tile::after { content: '⠿'; position: absolute;
+  top: 6px; right: 9px; color: var(--muted); font-size: 15px; line-height: 1; }
+.home-tile.dragging { opacity: 0.65; transform: scale(1.05); z-index: 5;
+  cursor: grabbing; box-shadow: 0 8px 22px rgba(0,0,0,0.45); animation: none; }
+@keyframes tile-wiggle { from { transform: rotate(-0.7deg); } to { transform: rotate(0.7deg); } }
 .page { display: none; padding: max(12px, calc(env(safe-area-inset-top, 0px) + 4px)) 12px 12px; }
 .page.active { display: block; }
 .subtabs { display: flex; gap: 6px; margin: 0 0 14px; overflow-x: auto;
@@ -2618,39 +2630,42 @@ button.warn { background: #ff9500; color: #fff; }
   <div id=msg></div>
 
   <div class="page active" id=page-home>
-    <h1>Sentinel Media</h1>
-    <div class=home-tiles>
-      <div class=home-tile onclick="goto('downloads')">
+    <div class=page-header>
+      <h1>Sentinel Media</h1>
+      <button class="small sec" id=tiles-arrange-btn onclick="toggleTileEdit()" title="Drag tiles to reorder · saved on this device">✥ Arrange</button>
+    </div>
+    <div class=home-tiles id=home-tiles>
+      <div class=home-tile data-tile=downloads onclick="goto('downloads')">
         <div class=ico>📥</div>
         <div class=name>Downloads</div>
         <div class=desc>Recent yt-dlp / gallery-dl jobs · file delivery links</div>
       </div>
-      <div class=home-tile onclick="goto('watchlist')">
+      <div class=home-tile data-tile=streams onclick="goto('watchlist')">
         <div class=ico>👁</div>
         <div class=name>Streams</div>
         <div class=desc>Auto-record streams from twitch · youtube · kick</div>
       </div>
-      <div class=home-tile onclick="location.href='/app/stremio'">
+      <div class=home-tile data-tile=theater onclick="location.href='/app/stremio'">
         <div class=ico>🎬</div>
         <div class=name>Theater</div>
         <div class=desc>Movies + series · stream &amp; cache to G:\</div>
       </div>
-      <div class=home-tile onclick="location.href='/iptv'">
+      <div class=home-tile data-tile=iptv onclick="location.href='/iptv'">
         <div class=ico>📺</div>
         <div class=name>IPTV</div>
         <div class=desc>11k+ public channels · EPG · scheduled DVR</div>
       </div>
-      <div class="home-tile admin-only" id=tile-files onclick="goto('files')">
+      <div class="home-tile admin-only" data-tile=files id=tile-files onclick="goto('files')">
         <div class=ico>📁</div>
         <div class=name>Files</div>
         <div class=desc>Browse + fetch from /downloads (SFTP-style)</div>
       </div>
-      <div class="home-tile admin-only" id=tile-scraper onclick="goto('scraper')">
+      <div class="home-tile admin-only" data-tile=scraper id=tile-scraper onclick="goto('scraper')">
         <div class=ico>🤖</div>
         <div class=name>Scraper</div>
         <div class=desc>Profile monitoring · age-gated platforms</div>
       </div>
-      <div class="home-tile admin-only" id=tile-admin onclick="goto('admin')">
+      <div class="home-tile admin-only" data-tile=server id=tile-admin onclick="goto('admin')">
         <div class=ico>🛡</div>
         <div class=name>Server</div>
         <div class=desc>Server settings · users · site blocklist · kill switch</div>
@@ -2839,6 +2854,84 @@ function toggleSidebar() {
 try {
   applySidebarState(localStorage.getItem('smdl_sidebar_collapsed') === '1');
 } catch {}
+
+// ── #41: drag-to-reorder home tiles ─────────────────────────────────────────
+// Pointer events (not HTML5 draggable) so it works under touch in the Telegram
+// WebView as well as with a mouse. Order is a per-device preference in
+// localStorage; it stores tile *keys* (data-tile) so it survives markup edits
+// and new tiles append at the end rather than breaking the saved layout.
+const TILE_ORDER_KEY = 'smdl_tile_order';
+let _tileEdit = false;
+let _tileDrag = null;
+
+function _tileContainer() { return document.getElementById('home-tiles'); }
+
+function applyTileOrder() {
+  const c = _tileContainer();
+  if (!c) return;
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem(TILE_ORDER_KEY) || '[]'); } catch {}
+  if (!Array.isArray(saved) || !saved.length) return;
+  const present = [...c.querySelectorAll('.home-tile')];
+  const byKey = new Map(present.map(el => [el.dataset.tile, el]));
+  const ordered = [];
+  saved.forEach(k => { if (byKey.has(k)) { ordered.push(byKey.get(k)); byKey.delete(k); } });
+  present.forEach(el => { if (byKey.has(el.dataset.tile)) ordered.push(el); }); // unsaved → keep at end
+  ordered.forEach(el => c.appendChild(el));
+}
+
+function saveTileOrder() {
+  const c = _tileContainer();
+  if (!c) return;
+  const order = [...c.querySelectorAll('.home-tile')].map(el => el.dataset.tile);
+  try { localStorage.setItem(TILE_ORDER_KEY, JSON.stringify(order)); } catch {}
+}
+
+function toggleTileEdit() {
+  _tileEdit = !_tileEdit;
+  const c = _tileContainer();
+  const btn = document.getElementById('tiles-arrange-btn');
+  if (c) c.classList.toggle('editing', _tileEdit);
+  if (btn) { btn.classList.toggle('on', _tileEdit); btn.textContent = _tileEdit ? '✓ Done' : '✥ Arrange'; }
+  if (!_tileEdit) saveTileOrder();
+}
+
+function initTileReorder() {
+  const c = _tileContainer();
+  if (!c) return;
+  applyTileOrder();
+  // Capture-phase click guard: in edit mode, swallow the click before it
+  // reaches a tile's inline onclick so dragging never navigates away.
+  c.addEventListener('click', e => {
+    if (_tileEdit) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+  c.addEventListener('pointerdown', e => {
+    if (!_tileEdit) return;
+    const tile = e.target.closest('.home-tile');
+    if (!tile) return;
+    _tileDrag = tile;
+    tile.classList.add('dragging');
+    try { tile.setPointerCapture(e.pointerId); } catch {}
+  });
+  c.addEventListener('pointermove', e => {
+    if (!_tileDrag) return;
+    e.preventDefault();
+    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.home-tile');
+    if (!over || over === _tileDrag || over.parentElement !== c) return;
+    const tiles = [...c.querySelectorAll('.home-tile')];
+    if (tiles.indexOf(_tileDrag) < tiles.indexOf(over)) c.insertBefore(_tileDrag, over.nextSibling);
+    else c.insertBefore(_tileDrag, over);
+  });
+  const endDrag = () => {
+    if (!_tileDrag) return;
+    _tileDrag.classList.remove('dragging');
+    _tileDrag = null;
+    saveTileOrder();
+  };
+  c.addEventListener('pointerup', endDrag);
+  c.addEventListener('pointercancel', endDrag);
+}
+
 let watchlistTimer = null;
 
 function api(path, opts = {}) {
@@ -4476,6 +4569,8 @@ async function restartService() {
 
 // Surface the Admin tab if we're owner. Best-effort — failures stay silent.
 bootstrapWhoami();
+// Apply the saved home-tile order + wire up drag-to-reorder (#41).
+initTileReorder();
 // Boot navigation: land on Home. Earlier this was hardcoded to
 // 'watchlist' from when SMDL was primarily a stream-watcher; with the
 // Theater + IPTV + Files + Scraper modules in place, Home (the tile

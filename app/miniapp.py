@@ -2365,8 +2365,8 @@ HTML = """<!doctype html>
    Defaults: chrome palette + bold intensity (the futuristic look out of the box). */
 (function(){ try {
   var d = document.documentElement;
-  d.dataset.theme = localStorage.getItem('smdl_theme') || 'chrome';
-  d.dataset.fx    = localStorage.getItem('smdl_fx')    || 'bold';
+  d.dataset.theme = localStorage.getItem('smdl_theme') || '@@DEFAULT_THEME@@';
+  d.dataset.fx    = localStorage.getItem('smdl_fx')    || '@@DEFAULT_FX@@';
 } catch (e) {} })();
 </script>
 <style>
@@ -2377,83 +2377,10 @@ HTML = """<!doctype html>
    localStorage and switchable live in Settings → Appearance:
      data-theme: chrome | graphite | obsidian | gunmetal   (accent + metal hue)
      data-fx:    bold | refined                            (glow / sheen / shape)
-   The boot <script> in <head> sets both before first paint to avoid a flash. */
-:root {
-  color-scheme: dark;
-
-  /* intensity knobs — defaults match data-fx="refined"; [data-fx] overrides */
-  --radius: 14px;
-  --tile-radius: 16px;
-  --glow: 0 1px 2px rgba(0,0,0,0.5);
-  --glow-strong: 0 6px 22px rgba(0,0,0,0.55);
-  --sheen: 0;
-  --label-tt: none;
-  --label-ls: normal;
-  --metal-angle: 160deg;
-
-  /* palette — defaults = Chrome · Cyan; [data-theme=…] overrides the rest */
-  --bg: #07080a;
-  --bg-elev: #0e1116;
-  --fg: #e6edf3;
-  --muted: #8b97a6;
-  --accent: #2af6ff;
-  --accent-2: #15c2d4;
-  --accent-rgb: 42, 246, 255;
-  --surface-1: #14171c;
-  --surface-2: #1b1f26;
-  --separator: #2a2f37;
-  --button-text: #04141a;
-  --destructive: #ff453a;
-  --success: #34c759;
-  --warn: #ff9f0a;
-
-  /* derived — used throughout the existing CSS */
-  --link: var(--accent);
-  --button: var(--accent);
-  --section: var(--surface-1);
-  --card: var(--surface-1);
-  --surface: linear-gradient(var(--metal-angle), var(--surface-2) 0%, var(--surface-1) 100%);
-  --accent-soft: rgba(var(--accent-rgb), 0.12);
-  --accent-line: rgba(var(--accent-rgb), 0.55);
-}
-
-:root[data-theme="graphite"] {
-  --bg: #000000; --bg-elev: #111216; --fg: #f2f4f7; --muted: #888d96;
-  --accent: #d6dae0; --accent-2: #9aa0a8; --accent-rgb: 214, 218, 224;
-  --surface-1: #15161a; --surface-2: #1d1f24; --separator: #33363d;
-  --button-text: #15171b;
-}
-:root[data-theme="obsidian"] {
-  --bg: #08070c; --bg-elev: #110f17; --fg: #ece8f5; --muted: #948aa8;
-  --accent: #b14bff; --accent-2: #7d2fc7; --accent-rgb: 177, 75, 255;
-  --surface-1: #16131f; --surface-2: #1e1a2b; --separator: #322a44;
-  --button-text: #ffffff;
-}
-:root[data-theme="gunmetal"] {
-  --bg: #0a0b0d; --bg-elev: #111318; --fg: #eef1f4; --muted: #8d949e;
-  --accent: #ffb340; --accent-2: #e0902a; --accent-rgb: 255, 179, 64;
-  --surface-1: #16191e; --surface-2: #1d2228; --separator: #2c313a;
-  --button-text: #1a1206;
-}
-
-:root[data-fx="bold"] {
-  --radius: 10px;
-  --tile-radius: 10px;
-  --glow: 0 0 14px rgba(var(--accent-rgb), 0.35);
-  --glow-strong: 0 0 24px rgba(var(--accent-rgb), 0.55);
-  --sheen: 1;
-  --label-tt: uppercase;
-  --label-ls: 0.05em;
-}
-:root[data-fx="refined"] {
-  --radius: 14px;
-  --tile-radius: 16px;
-  --glow: 0 1px 2px rgba(0,0,0,0.5);
-  --glow-strong: 0 6px 22px rgba(0,0,0,0.55);
-  --sheen: 0.35;
-  --label-tt: none;
-  --label-ls: normal;
-}
+   The boot <script> in <head> sets both before first paint to avoid a flash.
+   The :root / [data-theme] / [data-fx] blocks below are GENERATED from
+   app/theme_tokens.json by app/themes.py — edit the JSON, not this CSS. */
+/*@@THEME_CSS@@*/
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 body { margin: 0; padding: env(safe-area-inset-top, 0) 0 env(safe-area-inset-bottom, 0) 56px;
        font: 15px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
@@ -3953,12 +3880,8 @@ async function loadSettings() {
 }
 
 // ── Appearance: black/metallic/futuristic theme engine (per-device) ──────────
-const THEMES = [
-  { id: 'chrome',   name: 'Chrome · Cyan',     bg: '#07080a', surf: '#1b1f26', accent: '#2af6ff' },
-  { id: 'graphite', name: 'Graphite · Silver', bg: '#000000', surf: '#1d1f24', accent: '#d6dae0' },
-  { id: 'obsidian', name: 'Obsidian · Violet', bg: '#08070c', surf: '#1e1a2b', accent: '#b14bff' },
-  { id: 'gunmetal', name: 'Gunmetal · Amber',  bg: '#0a0b0d', surf: '#1d2228', accent: '#ffb340' },
-];
+// THEMES is generated from app/theme_tokens.json (see app/themes.py).
+const THEMES = @@THEME_SWATCHES@@;
 
 function appearanceInner() {
   const cur = document.documentElement.dataset.theme || 'chrome';
@@ -5023,14 +4946,53 @@ async def miniapp_root_redirect():
     return RedirectResponse(url="/app", status_code=302)
 
 
+def _render_app_html() -> str:
+    """Inject the generated theme CSS + tokens into the static HTML shell.
+    Cheap string substitution; themes.load_tokens() hot-reloads on file change
+    so editing theme_tokens.json restyles the app without a restart."""
+    from . import themes
+    tokens = themes.load_tokens()
+    dft_theme, dft_fx = themes.defaults(tokens)
+    return (HTML
+            .replace("/*@@THEME_CSS@@*/", themes.render_theme_css(tokens))
+            .replace("@@DEFAULT_THEME@@", dft_theme)
+            .replace("@@DEFAULT_FX@@", dft_fx)
+            .replace("@@THEME_SWATCHES@@", themes.swatches_js(tokens)))
+
+
 @router.get("/app", response_class=HTMLResponse)
 async def miniapp_index():
-    return HTMLResponse(HTML)
+    return HTMLResponse(_render_app_html())
 
 
 @router.get("/app/", response_class=HTMLResponse)
 async def miniapp_index_slash():
-    return HTMLResponse(HTML)
+    return HTMLResponse(_render_app_html())
+
+
+@router.get("/api/miniapp/theme-tokens")
+async def get_theme_tokens(request: Request):
+    """Read the live design tokens. Auth'd (not owner-only) so any client —
+    a future Sitebuilder, another pillar — can mirror the palette."""
+    await _verify(request)
+    from . import themes
+    return themes.load_tokens()
+
+
+@router.post("/api/miniapp/theme-tokens")
+async def put_theme_tokens(request: Request):
+    """Overwrite the design tokens (owner-only). Restyles the app immediately —
+    this is the 'change themes without rewiring code' hook the builder drives."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import themes
+    body = await request.json()
+    try:
+        saved = themes.save_tokens(body)
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "tokens": saved}
 
 
 @router.get("/app/stremio/assets/{filename:path}")

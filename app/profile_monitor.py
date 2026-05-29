@@ -889,6 +889,94 @@ async def resume_profile(url: str) -> tuple[bool, str]:
     return ok, ("Resumed (failure_count reset)" if ok else "Not in scrape list")
 
 
+# ── Historical backfill (one-shot gallery-dl on whole profile) ─────────
+# The regular scraper is a forward-looking watcher: first probe baselines
+# the existing posts; only NEW posts after that trigger a download. If
+# the operator wants the historical content too, start_backfill spawns
+# a gallery-dl process against the entire profile. Runs in the background
+# (asyncio task) so the API can return immediately. Status is kept in
+# memory; resets on daemon restart, which is fine for a one-shot tool.
+
+_active_backfills: dict[str, dict] = {}
+
+
+def backfill_status() -> dict:
+    """Return a copy of the in-memory backfill status dict.
+    Keys are profile URLs; values include status / started_at / ended_at /
+    items / error."""
+    return {u: dict(s) for u, s in _active_backfills.items()}
+
+
+async def start_backfill(url: str) -> tuple[bool, str]:
+    """Spawn gallery-dl against the entire profile so historical content
+    lands in /downloads/scraper-backfill/<platform>/<user>/. Returns
+    immediately; the task continues in the background."""
+    if not re.match(r"^https?://", url or "", re.IGNORECASE):
+        url = "https://" + (url or "").lstrip("/")
+    url = url.rstrip("/")
+    profile = await db.scraper_get_profile(url)
+    if not profile:
+        return False, "Not in scrape list"
+    if _active_backfills.get(url, {}).get("status") == "running":
+        return False, "Backfill already running for this profile"
+
+    username = profile.get("username") or "_unknown"
+    platform = profile.get("platform") or "instagram"
+    cookie_key = _cookie_key_from_url(profile["url"])
+    cookiepath = _cookie_path(cookie_key) if cookie_key else None
+    output_root = f"/downloads/scraper-backfill/{platform}/{username}"
+
+    cmd = ["gallery-dl", "-D", output_root, "--retries", "3", "--sleep", "2-5"]
+    if cookiepath:
+        cmd += ["--cookies", cookiepath]
+    cmd.append(url + "/")
+
+    async def _run():
+        started_at = datetime.now(timezone.utc).isoformat()
+        _active_backfills[url] = {
+            "status":     "running",
+            "started_at": started_at,
+            "platform":   platform,
+            "username":   username,
+            "output":     output_root,
+        }
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await proc.communicate()
+            rc = proc.returncode or 0
+            stdout_text = (out or b"").decode("utf-8", errors="replace")
+            stderr_text = (err or b"").decode("utf-8", errors="replace")
+            # gallery-dl prints one filepath per downloaded item to stdout
+            items = sum(1 for ln in stdout_text.splitlines()
+                        if ln.startswith("/downloads"))
+            entry = _active_backfills.get(url, {})
+            entry["ended_at"] = datetime.now(timezone.utc).isoformat()
+            entry["items"]    = items
+            if rc == 0:
+                entry["status"] = "complete"
+                logger.info("backfill complete: %s (%s items)", username, items)
+            else:
+                entry["status"] = "error"
+                entry["error"]  = (stderr_text or f"exit {rc}")[:500]
+                logger.warning("backfill failed: %s (exit %s) — %s",
+                                username, rc, stderr_text[:200])
+            _active_backfills[url] = entry
+        except Exception as e:
+            logger.exception("backfill crashed: %s", username)
+            _active_backfills[url].update({
+                "status":   "error",
+                "error":    str(e)[:500],
+                "ended_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+    asyncio.create_task(_run())
+    return True, f"Backfill started → {output_root}"
+
+
 async def probe_now(app: Application, url: str) -> tuple[bool, str]:
     """Force a single probe immediately, outside the session schedule. Used by
     /scrape_now. Does NOT alter next_probe_at."""

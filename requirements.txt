@@ -19,3 +19,6 @@ msal>=1.30
 httpx>=0.27
 # Form parsing for /auth/setup (APK cookie bootstrap from Suite launcher)
 python-multipart>=0.0.18
+# Image thumbnail generation for the Files tab (#32). Video thumbs use the
+# system ffmpeg via subprocess; this is only for image decoding.
+Pillow>=10.4,<12

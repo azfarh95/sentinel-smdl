@@ -19,7 +19,8 @@ import androidx.appcompat.app.AppCompatActivity
 /**
  * Minimal WebView wrapper for SMDL's IPTV browser.
  *
- *  - Loads https://media.az-sentinel.xyz/iptv
+ *  - Loads https://media.az-sentinel.xyz/app (the home tile grid; the IPTV
+ *    tab is reached from there via the side-nav).
  *  - Cookies persist (CookieManager) so the `sentinel_apk_session` cookie
  *    set by /auth/setup survives across launches → user pastes the owner
  *    token once and the JSON API calls keep working for 90 days.
@@ -154,7 +155,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (savedInstanceState == null) {
-            web.loadUrl("https://media.az-sentinel.xyz/iptv")
+            web.loadUrl("https://media.az-sentinel.xyz/app")
         } else {
             web.restoreState(savedInstanceState)
         }

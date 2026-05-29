@@ -251,6 +251,45 @@ def set_muted(url: str, muted: bool, chat_id: int | None = None) -> tuple[bool, 
     return False, f"Not in watchlist: {url}"
 
 
+def set_auto_record(url: str, auto_record: bool, chat_id: int | None = None) -> tuple[bool, str]:
+    """Flip the `auto_record` flag (#30). When true, the OFFLINE→LIVE
+    transition skips the Yes/No DM prompt and fires record_live() directly.
+    Muted overrides this: a muted+auto_record entry still records (no
+    notification = no prompt = no UX difference), but auto_record does
+    NOT bypass the mute when bot uses Yes/Skip path."""
+    entries = _load_watchlist()
+    for e in entries:
+        if e.get("url") == url:
+            if chat_id is not None and e.get("added_by") != chat_id:
+                return False, "Not your entry"
+            e["auto_record"] = bool(auto_record)
+            _save_watchlist(entries)
+            return True, "Auto-record on" if auto_record else "Auto-record off"
+    return False, f"Not in watchlist: {url}"
+
+
+def set_bulk_mute_by_platform(platform: str, muted: bool,
+                              chat_id: int | None = None) -> tuple[int, list[str]]:
+    """Bulk mute/unmute every watchlist entry on a given platform (#30).
+    When chat_id is non-None, only affects entries that user added.
+    Returns (count_changed, affected_urls)."""
+    platform_lc = (platform or "").lower()
+    entries = _load_watchlist()
+    affected: list[str] = []
+    for e in entries:
+        if chat_id is not None and e.get("added_by") != chat_id:
+            continue
+        ep = extract_platform(e.get("url", ""))
+        if (ep or "").lower() != platform_lc:
+            continue
+        if bool(e.get("muted")) != bool(muted):
+            e["muted"] = bool(muted)
+            affected.append(e.get("url", ""))
+    if affected:
+        _save_watchlist(entries)
+    return len(affected), affected
+
+
 def get_status(url: str) -> str:
     """Return last-seen status for a URL: 'live' | 'offline' | 'unknown'."""
     return _last_status.get(url, "unknown")
@@ -372,12 +411,35 @@ async def _poll_once(app: Application, entries: list[dict[str, Any]]) -> None:
             continue
 
         if prev != "live" and is_live:
-            # OFFLINE → LIVE transition. Notify owner with inline keyboard.
-            # Prefer the URL-extracted username (stable: 'dewdropdoll') over
-            # yt-dlp's `uploader` field (sometimes blank or human-name).
+            # OFFLINE → LIVE transition.
             uname = extract_username(url) or (result.get("uploader") or label)
             platform = extract_platform(url)
             owner_lang = get_lang(OWNER_CHAT_ID)
+            # #30 — auto-record short-circuit. If the entry is flagged
+            # auto_record AND not muted, skip the Yes/No prompt and fire
+            # record_live directly. The recording is owned by whoever
+            # added the entry (added_by), or the owner for legacy entries.
+            entry_for_url = next((x for x in entries if x.get("url") == url), {})
+            if entry_for_url.get("auto_record") and not entry_for_url.get("muted"):
+                target_chat = int(entry_for_url.get("added_by") or OWNER_CHAT_ID)
+                try:
+                    await app.bot.send_message(
+                        chat_id=target_chat,
+                        text=f"🎬 Auto-recording {platform} · @{uname}",
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
+                try:
+                    from .recorder_bridge import bridge as _bridge
+                    asyncio.create_task(_bridge.record(
+                        chat_id=target_chat, url=url,
+                        platform=platform, uploader=uname,
+                    ))
+                    logger.info("monitor: %s went LIVE — auto-recording (entry flagged)", label)
+                except Exception:
+                    logger.exception("monitor: auto-record dispatch failed for %s", label)
+                continue
             text = t(
                 "monitor_live_prompt", owner_lang,
                 platform=platform, uploader=uname,

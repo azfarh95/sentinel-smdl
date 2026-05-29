@@ -884,6 +884,91 @@ def _job_to_dict(job) -> dict:
     }
 
 
+# ── #41: file-restructure migration (owner-only) ────────────────────────────
+# Re-path the existing library to match the current download_path_template.
+# Preview is read-only; apply journals every move so it can be rolled back.
+
+@router.get("/api/miniapp/restructure/preview")
+async def restructure_preview(request: Request, include_unmatched: bool = False,
+                              limit: int = 400):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import restructure as rs
+    from . import database as db
+    from .downloader import DOWNLOADS_DIR
+    template = _cfg_get("download_path_template") or "{platform}/{uploader}/{title}.{ext}"
+    meta = await rs.build_metadata_index(db)
+    plan = await asyncio.to_thread(
+        rs.build_plan, template, DOWNLOADS_DIR, meta, include_unmatched)
+    rel = lambda pth: os.path.relpath(pth, DOWNLOADS_DIR)  # noqa: E731
+    # Surface the moves first (what the user cares about), then conflicts.
+    ordered = ([it for it in plan if it.action == "move"]
+               + [it for it in plan if it.action == "conflict"]
+               + [it for it in plan if it.action in ("skip", "noop")])
+    items = [{"action": it.action, "reason": it.reason, "matched": it.matched,
+              "src": rel(it.src), "dst": rel(it.dst)} for it in ordered[:limit]]
+    return {"ok": True, "template": template,
+            "summary": rs.plan_summary(plan), "truncated": len(plan) > limit,
+            "items": items}
+
+
+@router.post("/api/miniapp/restructure/apply")
+async def restructure_apply(request: Request):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import restructure as rs
+    from . import database as db
+    from .downloader import DOWNLOADS_DIR
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    include_unmatched = bool(body.get("include_unmatched"))
+    template = _cfg_get("download_path_template") or "{platform}/{uploader}/{title}.{ext}"
+    meta = await rs.build_metadata_index(db)
+    job_id = await rs.run_migration(template, DOWNLOADS_DIR, meta, include_unmatched)
+    return {"ok": True, "job_id": job_id}
+
+
+@router.get("/api/miniapp/restructure/progress/{job_id}")
+async def restructure_progress(request: Request, job_id: str):
+    p = await _verify(request)
+    _require_owner(p)
+    from fastapi.responses import StreamingResponse
+    from . import restructure as rs
+
+    async def _events():
+        last = None
+        while True:
+            job = rs.get_job(job_id)
+            if job is None:
+                yield 'data: {"status":"unknown"}\n\n'
+                return
+            snap = json.dumps({k: job[k] for k in
+                               ("status", "total", "done", "moved", "errors", "manifest")})
+            if snap != last:
+                yield f"data: {snap}\n\n"
+                last = snap
+            if job["status"] in ("done", "error"):
+                return
+            if await request.is_disconnected():
+                return
+            await asyncio.sleep(0.4)
+
+    return StreamingResponse(_events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@router.post("/api/miniapp/restructure/rollback")
+async def restructure_rollback(request: Request):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import restructure as rs
+    from .downloader import DOWNLOADS_DIR
+    return await rs.rollback(DOWNLOADS_DIR)
+
+
 def _serve_with_range(path, media_type: str, range_header: Optional[str]):
     """Tiny range-served file response. Phones (Stremio, native players,
     Chrome) issue Range requests; we honour them so seek works.
@@ -2340,6 +2425,18 @@ body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
 .sidebar-item.admin-only.show { display: flex; }
 .home-tile.admin-only { display: none; }
 .home-tile.admin-only.show { display: block; }
+/* #41 — drag-to-reorder. Pointer-event based (HTML5 draggable is unreliable
+   in the Telegram mobile WebView). Edit mode disables the wiggle's transition
+   jank, kills page-scroll under the finger (touch-action:none), and shows a
+   grab handle. Order persists per-device in localStorage. */
+#tiles-arrange-btn.on { background: var(--button); color: #fff; border-color: var(--button); }
+.home-tiles.editing .home-tile { cursor: grab; touch-action: none;
+  animation: tile-wiggle 0.45s ease-in-out infinite alternate; }
+.home-tiles.editing .home-tile::after { content: '⠿'; position: absolute;
+  top: 6px; right: 9px; color: var(--muted); font-size: 15px; line-height: 1; }
+.home-tile.dragging { opacity: 0.65; transform: scale(1.05); z-index: 5;
+  cursor: grabbing; box-shadow: 0 8px 22px rgba(0,0,0,0.45); animation: none; }
+@keyframes tile-wiggle { from { transform: rotate(-0.7deg); } to { transform: rotate(0.7deg); } }
 .page { display: none; padding: max(12px, calc(env(safe-area-inset-top, 0px) + 4px)) 12px 12px; }
 .page.active { display: block; }
 .subtabs { display: flex; gap: 6px; margin: 0 0 14px; overflow-x: auto;
@@ -2431,6 +2528,33 @@ button.warn { background: #ff9500; color: #fff; }
     padding: 2px 8px; border-radius: 99px; font-size: 10px;
     font-family: ui-monospace, monospace; cursor: pointer; }
 .set-pt-tokens .tok:hover { color: var(--button); }
+
+/* #41 Part 2 — restructure preview / progress */
+.rs-summary { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.rs-summary b { color: var(--text); }
+.rs-list { max-height: 300px; overflow-y: auto; border: 1px solid var(--separator);
+    border-radius: 8px; }
+.rs-row { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px;
+    border-bottom: 1px solid var(--separator); font-size: 11px; }
+.rs-row:last-child { border-bottom: none; }
+.rs-act { flex: 0 0 auto; text-transform: uppercase; font-size: 9px;
+    font-weight: 700; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 99px;
+    color: #fff; }
+.rs-move .rs-act { background: #34c759; }
+.rs-conflict .rs-act { background: #ff9500; }
+.rs-skip .rs-act { background: var(--separator); color: var(--muted); }
+.rs-path { flex: 1 1 auto; min-width: 0; font-family: ui-monospace, monospace;
+    word-break: break-all; }
+.rs-src { color: var(--muted); }
+.rs-dst { color: var(--text); }
+.rs-arrow { color: var(--button); margin: 0 4px; }
+.rs-reason { display: block; color: var(--muted); opacity: 0.7; font-size: 10px; }
+.rs-bar { height: 8px; background: var(--separator); border-radius: 99px;
+    overflow: hidden; margin: 6px 0; }
+.rs-bar-fill { height: 100%; width: 0; background: var(--button);
+    transition: width 0.25s ease; }
+.rs-bar-fill.ok { background: #34c759; }
+.rs-bar-fill.err { background: #ff3b30; }
 
 /* Watchlist tile grid (#30) — replaces full-width per-streamer cards */
 .wl-site-section { margin-bottom: 14px; }
@@ -2618,39 +2742,42 @@ button.warn { background: #ff9500; color: #fff; }
   <div id=msg></div>
 
   <div class="page active" id=page-home>
-    <h1>Sentinel Media</h1>
-    <div class=home-tiles>
-      <div class=home-tile onclick="goto('downloads')">
+    <div class=page-header>
+      <h1>Sentinel Media</h1>
+      <button class="small sec" id=tiles-arrange-btn onclick="toggleTileEdit()" title="Drag tiles to reorder · saved on this device">✥ Arrange</button>
+    </div>
+    <div class=home-tiles id=home-tiles>
+      <div class=home-tile data-tile=downloads onclick="goto('downloads')">
         <div class=ico>📥</div>
         <div class=name>Downloads</div>
         <div class=desc>Recent yt-dlp / gallery-dl jobs · file delivery links</div>
       </div>
-      <div class=home-tile onclick="goto('watchlist')">
+      <div class=home-tile data-tile=streams onclick="goto('watchlist')">
         <div class=ico>👁</div>
         <div class=name>Streams</div>
         <div class=desc>Auto-record streams from twitch · youtube · kick</div>
       </div>
-      <div class=home-tile onclick="location.href='/app/stremio'">
+      <div class=home-tile data-tile=theater onclick="location.href='/app/stremio'">
         <div class=ico>🎬</div>
         <div class=name>Theater</div>
         <div class=desc>Movies + series · stream &amp; cache to G:\</div>
       </div>
-      <div class=home-tile onclick="location.href='/iptv'">
+      <div class=home-tile data-tile=iptv onclick="location.href='/iptv'">
         <div class=ico>📺</div>
         <div class=name>IPTV</div>
         <div class=desc>11k+ public channels · EPG · scheduled DVR</div>
       </div>
-      <div class="home-tile admin-only" id=tile-files onclick="goto('files')">
+      <div class="home-tile admin-only" data-tile=files id=tile-files onclick="goto('files')">
         <div class=ico>📁</div>
         <div class=name>Files</div>
         <div class=desc>Browse + fetch from /downloads (SFTP-style)</div>
       </div>
-      <div class="home-tile admin-only" id=tile-scraper onclick="goto('scraper')">
+      <div class="home-tile admin-only" data-tile=scraper id=tile-scraper onclick="goto('scraper')">
         <div class=ico>🤖</div>
         <div class=name>Scraper</div>
         <div class=desc>Profile monitoring · age-gated platforms</div>
       </div>
-      <div class="home-tile admin-only" id=tile-admin onclick="goto('admin')">
+      <div class="home-tile admin-only" data-tile=server id=tile-admin onclick="goto('admin')">
         <div class=ico>🛡</div>
         <div class=name>Server</div>
         <div class=desc>Server settings · users · site blocklist · kill switch</div>
@@ -2839,6 +2966,84 @@ function toggleSidebar() {
 try {
   applySidebarState(localStorage.getItem('smdl_sidebar_collapsed') === '1');
 } catch {}
+
+// ── #41: drag-to-reorder home tiles ─────────────────────────────────────────
+// Pointer events (not HTML5 draggable) so it works under touch in the Telegram
+// WebView as well as with a mouse. Order is a per-device preference in
+// localStorage; it stores tile *keys* (data-tile) so it survives markup edits
+// and new tiles append at the end rather than breaking the saved layout.
+const TILE_ORDER_KEY = 'smdl_tile_order';
+let _tileEdit = false;
+let _tileDrag = null;
+
+function _tileContainer() { return document.getElementById('home-tiles'); }
+
+function applyTileOrder() {
+  const c = _tileContainer();
+  if (!c) return;
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem(TILE_ORDER_KEY) || '[]'); } catch {}
+  if (!Array.isArray(saved) || !saved.length) return;
+  const present = [...c.querySelectorAll('.home-tile')];
+  const byKey = new Map(present.map(el => [el.dataset.tile, el]));
+  const ordered = [];
+  saved.forEach(k => { if (byKey.has(k)) { ordered.push(byKey.get(k)); byKey.delete(k); } });
+  present.forEach(el => { if (byKey.has(el.dataset.tile)) ordered.push(el); }); // unsaved → keep at end
+  ordered.forEach(el => c.appendChild(el));
+}
+
+function saveTileOrder() {
+  const c = _tileContainer();
+  if (!c) return;
+  const order = [...c.querySelectorAll('.home-tile')].map(el => el.dataset.tile);
+  try { localStorage.setItem(TILE_ORDER_KEY, JSON.stringify(order)); } catch {}
+}
+
+function toggleTileEdit() {
+  _tileEdit = !_tileEdit;
+  const c = _tileContainer();
+  const btn = document.getElementById('tiles-arrange-btn');
+  if (c) c.classList.toggle('editing', _tileEdit);
+  if (btn) { btn.classList.toggle('on', _tileEdit); btn.textContent = _tileEdit ? '✓ Done' : '✥ Arrange'; }
+  if (!_tileEdit) saveTileOrder();
+}
+
+function initTileReorder() {
+  const c = _tileContainer();
+  if (!c) return;
+  applyTileOrder();
+  // Capture-phase click guard: in edit mode, swallow the click before it
+  // reaches a tile's inline onclick so dragging never navigates away.
+  c.addEventListener('click', e => {
+    if (_tileEdit) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+  c.addEventListener('pointerdown', e => {
+    if (!_tileEdit) return;
+    const tile = e.target.closest('.home-tile');
+    if (!tile) return;
+    _tileDrag = tile;
+    tile.classList.add('dragging');
+    try { tile.setPointerCapture(e.pointerId); } catch {}
+  });
+  c.addEventListener('pointermove', e => {
+    if (!_tileDrag) return;
+    e.preventDefault();
+    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.home-tile');
+    if (!over || over === _tileDrag || over.parentElement !== c) return;
+    const tiles = [...c.querySelectorAll('.home-tile')];
+    if (tiles.indexOf(_tileDrag) < tiles.indexOf(over)) c.insertBefore(_tileDrag, over.nextSibling);
+    else c.insertBefore(_tileDrag, over);
+  });
+  const endDrag = () => {
+    if (!_tileDrag) return;
+    _tileDrag.classList.remove('dragging');
+    _tileDrag = null;
+    saveTileOrder();
+  };
+  c.addEventListener('pointerup', endDrag);
+  c.addEventListener('pointercancel', endDrag);
+}
+
 let watchlistTimer = null;
 
 function api(path, opts = {}) {
@@ -3580,7 +3785,19 @@ async function loadSettings() {
         </div>
         <div class=set-pt-preview id=set-pt-preview></div>
         <div class=meta style="margin-top:6px">Root path: edit <code>DOWNLOADS_DIR</code> in docker-compose and restart.</div>
-        <div class=meta style="font-size:10px;color:var(--muted);margin-top:4px">Restructure existing files to a new layout? Coming soon — for now, only NEW downloads use the updated template.</div>
+        ${isOwner ? `
+        <div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--separator)">
+          <div class=field>🗂 Migrate existing files</div>
+          <div class=meta>Re-path files already on disk to match the template above. Preview is read-only; every move is journaled so you can undo it.</div>
+          <label class=meta style="display:flex;gap:6px;align-items:center;margin-top:8px;cursor:pointer">
+            <input type=checkbox id=rs-unmatched> Include files with no download record (best-effort)
+          </label>
+          <div class=btn-row style="margin-top:8px">
+            <button class=sec onclick="restructurePreview()">🔍 Preview</button>
+            <button class="small danger" onclick="restructureRollback()">↩ Undo last</button>
+          </div>
+          <div id=rs-result style="margin-top:10px"></div>
+        </div>` : ''}
       </div>`;
 
     const oneDriveTile = odHtml ? `<div class=set-tile>${odHtml.replace(/<div class=card>([\s\S]*?)<\/div>$/, '<div class=head>📁 OneDrive</div>$1')}</div>` : '';
@@ -3632,6 +3849,139 @@ function insertPtToken(tok) {
   el.focus();
   el.setSelectionRange(start + tok.length, start + tok.length);
   updatePathTemplatePreview();
+}
+
+// ── #41 Part 2: file-restructure migration (owner-only) ──────────────────────
+let _rsLastPlan = null;
+
+function _rsActClass(a) {
+  return a === 'move' ? 'rs-move' : a === 'conflict' ? 'rs-conflict' : 'rs-skip';
+}
+
+async function restructurePreview() {
+  const out = document.getElementById('rs-result');
+  if (!out) return;
+  const inc = document.getElementById('rs-unmatched')?.checked ? 'true' : 'false';
+  out.innerHTML = '<div class=meta>Scanning library…</div>';
+  try {
+    const r = await api('/api/miniapp/restructure/preview?include_unmatched=' + inc);
+    _rsLastPlan = r;
+    const s = r.summary || {};
+    const rows = (r.items || []).map(it => `
+      <div class="rs-row ${_rsActClass(it.action)}">
+        <span class=rs-act>${esc(it.action)}</span>
+        <span class=rs-path>
+          <span class=rs-src>${esc(it.src)}</span>
+          ${it.action === 'move' ? '<span class=rs-arrow>→</span><span class=rs-dst>' + esc(it.dst) + '</span>' : ''}
+          ${it.reason ? '<span class=rs-reason>' + esc(it.reason) + '</span>' : ''}
+        </span>
+      </div>`).join('');
+    const canApply = (s.move || 0) > 0;
+    out.innerHTML = `
+      <div class=rs-summary>
+        <b>${s.total || 0}</b> files ·
+        <span class=rs-move>${s.move || 0} to move</span> ·
+        <span class=rs-skip>${s.noop || 0} already correct</span> ·
+        <span class=rs-conflict>${s.conflict || 0} conflicts</span> ·
+        <span class=rs-skip>${s.skip || 0} skipped</span>
+      </div>
+      ${r.truncated ? '<div class=meta>Showing first ' + (r.items || []).length + ' of ' + s.total + '.</div>' : ''}
+      <div class=rs-list>${rows || '<div class=meta>Nothing to show.</div>'}</div>
+      ${canApply ? '<div class=btn-row style="margin-top:8px"><button class=danger onclick="restructureApply()">📦 Migrate ' + s.move + ' file' + (s.move === 1 ? '' : 's') + '</button></div>'
+                 : '<div class=meta style="margin-top:8px">No moves needed — library already matches the template.</div>'}`;
+  } catch (e) { out.innerHTML = '<div class="msg err">Preview failed: ' + esc(e) + '</div>'; }
+}
+
+function restructureApply() {
+  const inc = document.getElementById('rs-unmatched')?.checked;
+  const n = _rsLastPlan?.summary?.move || 0;
+  const msg = 'Move ' + n + ' file' + (n === 1 ? '' : 's') + ' to match the template?\n\nEvery move is journaled — you can undo it afterwards.';
+  const go = async () => {
+    const out = document.getElementById('rs-result');
+    try {
+      const r = await api('/api/miniapp/restructure/apply', {
+        method: 'POST', body: JSON.stringify({ include_unmatched: !!inc }),
+      });
+      if (out) out.innerHTML = '<div class=rs-summary>Migrating…</div><div class=rs-bar><div class=rs-bar-fill id=rs-bar-fill></div></div><div id=rs-prog class=meta></div>';
+      streamRestructureProgress(r.job_id);
+    } catch (e) { if (out) out.innerHTML = '<div class="msg err">Migrate failed: ' + esc(e) + '</div>'; }
+  };
+  if (tg?.showConfirm) tg.showConfirm(msg, ok => { if (ok) go(); });
+  else if (confirm(msg)) go();
+}
+
+async function streamRestructureProgress(jobId) {
+  // EventSource cannot send the X-Init-Data header the owner gate needs, so we
+  // consume the SSE stream over fetch()+ReadableStream and parse data: frames.
+  try {
+    const resp = await fetch('/api/miniapp/restructure/progress/' + encodeURIComponent(jobId), {
+      headers: { 'X-Init-Data': initData },
+    });
+    if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const line = frame.split('\n').find(l => l.startsWith('data:'));
+        if (!line) continue;
+        try { renderRsProgress(JSON.parse(line.slice(5).trim())); } catch {}
+      }
+    }
+  } catch (e) {
+    const out = document.getElementById('rs-prog');
+    if (out) out.innerHTML = '<span class="msg err">Progress stream lost: ' + esc(e) + '</span>';
+  }
+}
+
+function renderRsProgress(st) {
+  const fill = document.getElementById('rs-bar-fill');
+  const prog = document.getElementById('rs-prog');
+  if (st.status === 'unknown') {
+    if (prog) prog.innerHTML = '<span class="msg err">Job not found (service may have restarted).</span>';
+    return;
+  }
+  const total = st.total || 0;
+  const done = st.done || 0;
+  const pct = total ? Math.round((done / total) * 100) : (st.status === 'done' ? 100 : 0);
+  if (fill) fill.style.width = pct + '%';
+  const errs = Array.isArray(st.errors) ? st.errors.length : 0;
+  if (st.status === 'done') {
+    if (fill) fill.classList.add('ok');
+    if (prog) prog.innerHTML = '✅ Moved <b>' + (st.moved || 0) + '</b> of ' + total +
+      (errs ? ' · <span class=rs-conflict>' + errs + ' error' + (errs === 1 ? '' : 's') + '</span>' : '') +
+      '. <button class="small" onclick="restructurePreview()">Re-scan</button>';
+    showOk('Migration complete — ' + (st.moved || 0) + ' file(s) moved.');
+  } else if (st.status === 'error') {
+    if (fill) fill.classList.add('err');
+    if (prog) prog.innerHTML = '<span class="msg err">Migration failed' + (errs ? ' (' + errs + ' error(s))' : '') + '.</span>';
+  } else if (prog) {
+    prog.textContent = 'Moving… ' + done + ' / ' + total + (errs ? ' (' + errs + ' error(s))' : '');
+  }
+}
+
+function restructureRollback() {
+  const msg = 'Undo the most recent migration?\n\nFiles will be moved back to their original paths.';
+  const go = async () => {
+    const out = document.getElementById('rs-result');
+    if (out) out.innerHTML = '<div class=meta>Rolling back…</div>';
+    try {
+      const r = await api('/api/miniapp/restructure/rollback', { method: 'POST' });
+      if (!r.ok && r.error) { if (out) out.innerHTML = '<div class="msg err">' + esc(r.error) + '</div>'; return; }
+      const errs = Array.isArray(r.errors) ? r.errors.length : 0;
+      if (out) out.innerHTML = '<div class=rs-summary>↩ Reversed <b>' + (r.reversed || 0) + '</b> move(s)' +
+        (errs ? ' · <span class=rs-conflict>' + errs + ' skipped</span>' : '') + '.</div>';
+      showOk('Rolled back ' + (r.reversed || 0) + ' move(s).');
+    } catch (e) { if (out) out.innerHTML = '<div class="msg err">Rollback failed: ' + esc(e) + '</div>'; }
+  };
+  if (tg?.showConfirm) tg.showConfirm(msg, ok => { if (ok) go(); });
+  else if (confirm(msg)) go();
 }
 
 async function saveSettings(prefix) {
@@ -4476,6 +4826,8 @@ async function restartService() {
 
 // Surface the Admin tab if we're owner. Best-effort — failures stay silent.
 bootstrapWhoami();
+// Apply the saved home-tile order + wire up drag-to-reorder (#41).
+initTileReorder();
 // Boot navigation: land on Home. Earlier this was hardcoded to
 // 'watchlist' from when SMDL was primarily a stream-watcher; with the
 // Theater + IPTV + Files + Scraper modules in place, Home (the tile

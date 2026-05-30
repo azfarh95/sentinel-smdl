@@ -1,0 +1,201 @@
+"""qBittorrent WebUI client — the direct-torrent fallback for releases that
+Real-Debrid won't serve (HTTP 451 / "not cached").
+
+qBittorrent runs inside torrent-vpn's network namespace (gluetun → PIA), so
+every byte it sends or receives exits through PIA behind a kill-switch: if the
+tunnel drops, qBittorrent loses connectivity and the home IP never touches the
+swarm. SMDL reaches the WebUI at http://torrent-vpn:8080 over the shared
+metamcp-network. Auth is a subnet whitelist (no password) configured in the
+qBittorrent.conf inside the qbittorrent_config volume — see the qbittorrent
+service in metamcp-local/docker-compose.yml.
+
+Both containers mount the same media disk at /downloads, so a file qBittorrent
+finishes at /downloads/<name> is readable by SMDL at the identical path. The
+queue (stremio_queue._download_via_torrent) moves the picked video into the
+Stremio cache and records it like any other grab, after which the existing
+range-aware /file/<infohash> endpoint serves it.
+
+This is a thin, synchronous client (matching realdebrid.py); the queue calls it
+via asyncio.to_thread and owns the polling/orchestration.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# qBittorrent shares torrent-vpn's netns, so its WebUI answers on the
+# torrent-vpn container address. Resolvable by DNS now that SMDL is attached to
+# metamcp-network. Overridable for local testing.
+_BASE = os.environ.get("QBITTORRENT_URL", "http://torrent-vpn:8080").rstrip("/")
+_TIMEOUT = int(os.environ.get("QBITTORRENT_TIMEOUT", "20"))
+
+# A bare `magnet:?xt=urn:btih:<hash>` (built when a stream had no magnet) has no
+# trackers and would lean entirely on DHT. Sprinkle in a few well-known public
+# trackers so peer discovery is fast and reliable. These are open trackers, not
+# content sources.
+_PUBLIC_TRACKERS = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://tracker.openbittorrent.com:6969/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+]
+
+_VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts", ".wmv", ".flv", ".mpg", ".mpeg"}
+
+
+class QBittorrentError(RuntimeError):
+    """Any failure talking to the qBittorrent WebUI, or a torrent that the
+    client gave up on (dead magnet, no peers)."""
+
+
+# ── Low-level HTTP ──────────────────────────────────────────────────────────
+def _get(path: str, params: Optional[dict] = None) -> str:
+    url = f"{_BASE}{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"Referer": _BASE})
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
+            return r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        raise QBittorrentError(f"GET {path} → HTTP {e.code}") from e
+    except (urllib.error.URLError, OSError) as e:
+        raise QBittorrentError(f"GET {path} unreachable: {e}") from e
+
+
+def _post(path: str, data: dict) -> str:
+    url = f"{_BASE}{path}"
+    body = urllib.parse.urlencode(data).encode()
+    # Referer header satisfies any residual CSRF check; HostHeaderValidation is
+    # off in the conf, so a plain POST from the whitelisted subnet is accepted.
+    req = urllib.request.Request(url, data=body, headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": _BASE,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
+            return r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        raise QBittorrentError(f"POST {path} → HTTP {e.code}") from e
+    except (urllib.error.URLError, OSError) as e:
+        raise QBittorrentError(f"POST {path} unreachable: {e}") from e
+
+
+def _get_json(path: str, params: Optional[dict] = None):
+    import json
+    return json.loads(_get(path, params))
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+def infohash_from_magnet(magnet: str) -> Optional[str]:
+    """Pull the v1 btih out of a magnet URI, lowercased. Returns None for
+    base32 (32-char) hashes — qBittorrent will still accept the magnet, but we
+    can't pre-compute the v1 hex id, so the caller falls back to name-matching.
+    """
+    m = re.search(r"xt=urn:btih:([0-9a-fA-F]{40})", magnet or "")
+    return m.group(1).lower() if m else None
+
+
+def _enrich_magnet(magnet: str) -> str:
+    """Append public trackers to a trackerless magnet so DHT isn't the only
+    discovery path. Leaves magnets that already carry trackers untouched."""
+    if not magnet or "&tr=" in magnet or "tr=" in magnet.split("?", 1)[-1]:
+        return magnet
+    extra = "".join("&tr=" + urllib.parse.quote(t, safe="") for t in _PUBLIC_TRACKERS)
+    return magnet + extra
+
+
+def is_available() -> bool:
+    """True if the WebUI answers (torrent-vpn up + qB running + whitelist OK)."""
+    try:
+        _get("/api/v2/app/version")
+        return True
+    except QBittorrentError:
+        return False
+
+
+# ── Torrent lifecycle ───────────────────────────────────────────────────────
+def add_magnet(magnet: str, *, savepath: Optional[str] = None,
+               sequential: bool = True, category: str = "smdl") -> str:
+    """Add a magnet. Returns the v1 infohash (lowercased) we'll poll on.
+
+    Sets sequential download + first/last-piece priority so the head and tail
+    land early (lets a player start before the whole file is cached). Raises
+    QBittorrentError if qB rejects the add."""
+    if not magnet or not magnet.startswith("magnet:"):
+        raise QBittorrentError("not a magnet URI")
+    magnet = _enrich_magnet(magnet)
+    data = {
+        "urls": magnet,
+        "sequentialDownload": "true" if sequential else "false",
+        "firstLastPiecePrio": "true" if sequential else "false",
+        "category": category,
+    }
+    if savepath:
+        data["savepath"] = savepath
+    resp = _post("/api/v2/torrents/add", data).strip()
+    if resp.lower().startswith("fail"):
+        raise QBittorrentError(f"qB rejected magnet: {resp!r}")
+    ih = infohash_from_magnet(magnet)
+    if not ih:
+        raise QBittorrentError("magnet has no v1 btih (base32 unsupported)")
+    return ih
+
+
+def torrent(infohash: str) -> Optional[dict]:
+    """The torrents/info row for one infohash, or None if qB doesn't have it
+    (yet). Carries: progress (0..1), state, save_path, content_path, name,
+    size, dlspeed, eta, num_seeds, num_leechs."""
+    arr = _get_json("/api/v2/torrents/info", {"hashes": infohash.lower()})
+    return arr[0] if arr else None
+
+
+def files(infohash: str) -> list[dict]:
+    """Per-file rows: name (relative to save_path, incl. any root folder),
+    size, progress, index, priority."""
+    try:
+        return _get_json("/api/v2/torrents/files", {"hash": infohash.lower()})
+    except QBittorrentError:
+        return []
+
+
+def pick_video_file(file_rows: list[dict]) -> Optional[dict]:
+    """Largest video file in the torrent (skips samples/extras by size)."""
+    vids = [f for f in file_rows
+            if os.path.splitext(f.get("name", ""))[1].lower() in _VIDEO_EXTS]
+    pool = vids or file_rows
+    if not pool:
+        return None
+    return max(pool, key=lambda f: f.get("size", 0))
+
+
+def delete(infohash: str, *, with_files: bool = False) -> None:
+    """Remove a torrent from qB. with_files=False keeps the downloaded data on
+    disk (we move the picked file out first, so leftover data is the other
+    files in a multi-file torrent — those we DO want gone, so callers pass
+    with_files=True after the move)."""
+    try:
+        _post("/api/v2/torrents/delete", {
+            "hashes": infohash.lower(),
+            "deleteFiles": "true" if with_files else "false",
+        })
+    except QBittorrentError as e:
+        logger.warning("qB delete %s failed: %s", infohash, e)
+
+
+def is_complete(t: dict) -> bool:
+    """A torrent is done when progress hits 1.0 or it's in an upload/seed
+    state (qB flips to *UP states once the payload is fully written)."""
+    if (t.get("progress") or 0) >= 1.0:
+        return True
+    state = (t.get("state") or "").lower()
+    return state in {"uploading", "stalledup", "pausedup", "forcedup",
+                     "queuedup", "checkingup"}

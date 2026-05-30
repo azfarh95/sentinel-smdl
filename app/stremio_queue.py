@@ -34,6 +34,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import time
 import urllib.parse
@@ -48,12 +49,22 @@ import aiosqlite
 from .database import DB_PATH
 from . import realdebrid as _rd
 from . import stremio_cache as _cache
+from . import qbittorrent as _qb
 
 logger = logging.getLogger(__name__)
 
 # ── Tunables (read once at module load; smdl.json overrides) ────────────────
 MAX_CONCURRENT  = int(os.environ.get("STREMIO_MAX_CONCURRENT", "2"))
 RESOLVE_TIMEOUT = int(os.environ.get("STREMIO_RESOLVE_TIMEOUT", "300"))
+
+# Direct-torrent fallback (qBittorrent behind PIA) for releases RD won't serve.
+# On by default; set STREMIO_TORRENT_FALLBACK=0 to revert to "error + advance".
+_TORRENT_FALLBACK = (os.environ.get("STREMIO_TORRENT_FALLBACK", "1").strip().lower()
+                     not in ("0", "false", "no", "off"))
+# Give a magnet this long to find peers + metadata before declaring it dead.
+TORRENT_META_TIMEOUT = int(os.environ.get("STREMIO_TORRENT_META_TIMEOUT", "150"))
+# Absolute ceiling on a single torrent download before we give up.
+TORRENT_HARD_TIMEOUT = int(os.environ.get("STREMIO_TORRENT_HARD_TIMEOUT", "2400"))
 
 
 @dataclass
@@ -70,7 +81,7 @@ class StremioJob:
     expected_size: Optional[int] = None
 
     # State
-    status: str = "queued"          # queued|resolving|streaming|caching|cached|error
+    status: str = "queued"          # queued|resolving|streaming|downloading|caching|cached|error
     progress: float = 0.0           # 0..100
     direct_url: Optional[str] = None
     filename: Optional[str] = None
@@ -315,9 +326,16 @@ async def _process_job(job: StremioJob) -> None:
                 )
             except _rd.RealDebridError as e:
                 if e.is_infringing:
-                    # RD has taken this exact release down for copyright. It will
-                    # never resolve — block the infohash so it's not retried and
-                    # flag the job so the client can jump to another source.
+                    # RD won't serve this uncached release. Before giving up,
+                    # try pulling the magnet directly through qBittorrent behind
+                    # PIA (kill-switched). If that caches the file, the job is
+                    # already 'cached' and we're done — don't block the infohash.
+                    if _TORRENT_FALLBACK and await _download_via_torrent(job):
+                        return
+                    # Torrent fallback disabled or it failed (dead magnet, no
+                    # peers, qB down): fall back to the original behavior —
+                    # block the infohash so it greys out and the client jumps
+                    # to another source.
                     await block_infohash(job.infohash, reason="rd_infringing",
                                          title=job.title)
                     await _update(
@@ -411,6 +429,150 @@ async def _download_to_cache(job_id: int, url: str, filename: str,
     )
 
 
+async def _download_via_torrent(job: StremioJob) -> bool:
+    """RD-451 fallback: pull the magnet through qBittorrent (behind PIA) and
+    cache the result exactly like an RD grab.
+
+    Returns True if the file is now cached (job set to 'cached'), False if the
+    fallback couldn't deliver — qB unavailable, dead magnet / no peers, or
+    timeout. On False the caller restores the original block-and-advance path.
+
+    qBittorrent shares torrent-vpn's PIA-tunnelled namespace with a kill-switch,
+    so all swarm traffic exits via PIA; if the tunnel drops, qB simply can't
+    reach peers (no home-IP leak). It writes into the shared /downloads mount,
+    so the finished file is moved (instant rename, same filesystem) into the
+    Stremio cache folder and recorded for /file/<infohash> to serve."""
+    if not await asyncio.to_thread(_qb.is_available):
+        logger.warning("torrent fallback: qBittorrent unavailable (job %s)", job.id)
+        return False
+    magnet = job.magnet or (
+        f"magnet:?xt=urn:btih:{job.infohash.lower()}" if job.infohash else "")
+    if not magnet:
+        return False
+
+    # Run LRU before we start writing so a big torrent doesn't blow the disk.
+    await asyncio.to_thread(_cache.evict_if_needed)
+    await _update(job.id, status="downloading", progress=0.0,
+                  error=None, error_kind=None)
+
+    try:
+        ih = await asyncio.to_thread(_qb.add_magnet, magnet)
+    except _qb.QBittorrentError as e:
+        logger.warning("torrent fallback: add failed (job %s): %s", job.id, e)
+        return False
+
+    meta_deadline = time.time() + TORRENT_META_TIMEOUT
+    hard_deadline = time.time() + TORRENT_HARD_TIMEOUT
+    last_state = None
+    try:
+        while True:
+            if time.time() > hard_deadline:
+                logger.warning("torrent fallback: job %s hit hard timeout", job.id)
+                return False
+            t = await asyncio.to_thread(_qb.torrent, ih)
+            if t is None:
+                await asyncio.sleep(2)
+                continue
+            state = (t.get("state") or "").lower()
+            prog = float(t.get("progress") or 0.0)
+            peers = int(t.get("num_seeds") or 0) + int(t.get("num_leechs") or 0)
+            if state != last_state:
+                logger.info("torrent fallback: job %s state=%s prog=%.1f%% peers=%d",
+                            job.id, state, prog * 100, peers)
+                last_state = state
+            if state in {"error", "missingfiles"}:
+                logger.warning("torrent fallback: job %s torrent errored (%s)",
+                               job.id, state)
+                return False
+            # Dead-magnet guard: no metadata + no peers within the window.
+            if prog <= 0 and peers == 0 and time.time() > meta_deadline:
+                logger.warning("torrent fallback: job %s found no peers in %ds",
+                               job.id, TORRENT_META_TIMEOUT)
+                return False
+            await _update(job.id, progress=max(0.0, min(99.0, prog * 100.0)))
+            if _qb.is_complete(t):
+                break
+            await asyncio.sleep(2)
+
+        # Resolve the largest video file's on-disk path under the shared mount.
+        rows = await asyncio.to_thread(_qb.files, ih)
+        vid = _qb.pick_video_file(rows)
+        t = await asyncio.to_thread(_qb.torrent, ih) or {}
+        save_path = t.get("save_path") or "/downloads"
+        if not vid:
+            logger.warning("torrent fallback: job %s has no video file", job.id)
+            return False
+        src = Path(save_path) / vid["name"]
+        filename = Path(vid["name"]).name
+        filesize = int(vid.get("size") or 0)
+
+        # Remove the torrent from qB FIRST (keep files) so it releases the
+        # handle and stops seeding, then move the picked file into the cache.
+        await asyncio.to_thread(_qb.delete, ih, with_files=False)
+        entry = await asyncio.to_thread(
+            _cache.record,
+            imdb_id=job.imdb_id, infohash=job.infohash, magnet=magnet,
+            title=job.title, filename=filename, filesize=filesize,
+            mime=None, source_stream_title=job.source_stream_title,
+        )
+        moved = await asyncio.to_thread(_finalize_torrent_file, src, entry.file_path)
+        if not moved:
+            # No file landed where the cache expects it — drop the orphan meta.
+            await asyncio.to_thread(_cache._evict_one, entry)
+            return False
+        # Tidy leftover torrent data (other files in a multi-file torrent).
+        await asyncio.to_thread(_cleanup_torrent_dir, src.parent, save_path)
+        await _update(job.id, status="cached", progress=100.0,
+                      filename=filename, filesize=filesize,
+                      error=None, error_kind=None)
+        logger.info("torrent fallback: job %s cached %s (%d bytes) via PIA",
+                    job.id, filename, filesize)
+        return True
+    except Exception:
+        logger.exception("torrent fallback: job %s blew up", job.id)
+        # Best-effort cleanup so a failed run doesn't leave a seeding torrent.
+        try:
+            await asyncio.to_thread(_qb.delete, ih, with_files=True)
+        except Exception:
+            pass
+        return False
+
+
+def _finalize_torrent_file(src: Path, dest: Path) -> bool:
+    """Move a finished torrent file into its cache slot. Same /downloads mount
+    → os.replace is an instant rename; falls back to copy+unlink across devices.
+    Returns True if the destination exists afterwards."""
+    if not src.exists():
+        logger.warning("torrent fallback: source file missing: %s", src)
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(src, dest)
+    except OSError:
+        try:
+            shutil.copy2(src, dest)
+            src.unlink(missing_ok=True)
+        except OSError as ex:
+            logger.warning("torrent fallback: move failed %s → %s: %s",
+                           src, dest, ex)
+            return False
+    return dest.exists()
+
+
+def _cleanup_torrent_dir(folder: Path, save_path: str) -> None:
+    """Remove a multi-file torrent's leftover root folder after the main video
+    has been moved out. No-op (and never recursive on the whole downloads root)
+    when the torrent was single-file (folder == save_path)."""
+    try:
+        sp = Path(save_path).resolve()
+        f = folder.resolve()
+        if f == sp or sp not in f.parents:
+            return  # single-file torrent or path outside save root — leave it
+        shutil.rmtree(f, ignore_errors=True)
+    except Exception as ex:
+        logger.debug("torrent fallback: leftover cleanup skipped: %s", ex)
+
+
 def _progress_emit(job_id: int, pct: float) -> None:
     """Sync→async bridge. Schedules an UPDATE on the running loop."""
     try:
@@ -429,7 +591,7 @@ async def _scheduler_loop():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE stremio_jobs SET status='queued' "
-            "WHERE status IN ('resolving','streaming','caching')"
+            "WHERE status IN ('resolving','streaming','caching','downloading')"
         )
         await db.commit()
 

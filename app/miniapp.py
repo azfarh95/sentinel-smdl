@@ -34,6 +34,8 @@ from . import config as _cfg
 from . import database as _db
 from . import stream_monitor
 from . import auth as _auth
+from . import edition as _edition
+from . import profile as _profile
 from .database import DB_PATH
 from .live_downloader import (
     _PLATFORM_LABELS,    # we read but don't mutate
@@ -2250,6 +2252,28 @@ async def get_config(request: Request):
             "config_file": CONFIG_FILE,
         },
         "disk": _disk_usage_gb(DOWNLOADS_DIR),
+    }
+
+
+@router.get("/api/client/build")
+async def get_build_descriptor():
+    """Public, unauthenticated build descriptor for the app shell (PWA/TWA).
+
+    The store shell reads this BEFORE any auth to learn how to render itself:
+    which paid rail to offer (Play Billing vs license keys), whether to show a
+    key-redeem surface at all, and which media verticals this build fronts. A
+    play build must never show off-store pricing or a redeem field — the client
+    keys those off `allow_key_redeem` / `billing_rail` here, so policy posture
+    has a single server-side source of truth.
+    """
+    return {
+        "edition": _edition.EDITION,
+        "profile": _profile.PROFILE or "default",
+        "is_play": _profile.is_play(),
+        "billing_rail": _profile.billing_rail(),
+        "allow_key_redeem": _profile.allow_key_redeem(),
+        "allow_off_store_pricing": _profile.allow_off_store_pricing(),
+        "surfaces": sorted(_profile.surfaces()),
     }
 
 

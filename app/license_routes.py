@@ -19,6 +19,7 @@ from . import edition
 from . import entitlements
 from . import licensing
 from . import license_registry
+from . import profile
 from .miniapp import _require_owner, _verify, require_scope
 
 router = APIRouter()
@@ -172,6 +173,11 @@ async def license_validate(request: Request):
     device_id = (body.get("device_id") or "").strip() or None
     device_label = (body.get("device_label") or "").strip() or None
 
+    # A play-profile deployment serves the Play Store TWA, where Google Play
+    # Billing is the only permitted paid rail. Refuse external license keys here
+    # so there's no off-Play unlock path (the teeth behind allow_key_redeem).
+    if not profile.allow_key_redeem():
+        return {"valid": False, "reason": "play_build_uses_billing"}
     if not licensing.is_configured():
         return {"valid": False, "reason": "not_configured"}
     parsed = licensing.parse_key_code(key)

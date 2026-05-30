@@ -11,8 +11,8 @@ android {
         applicationId = "com.azsentinel.smdliptv"
         minSdk = 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.2.4"
+        versionCode = 7
+        versionName = "0.2.5"
     }
 
     // Pin debug signing to a committed-in-repo keystore so every CI /

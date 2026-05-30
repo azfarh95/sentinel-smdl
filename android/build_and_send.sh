@@ -130,12 +130,15 @@ else
   echo "WARN: $SENTINEL_APPS_DIR not present — skipping publish (build only)" >&2
 fi
 
-CAPTION=$'📺 SMDL IPTV v0.2.0 (debug-signed)\n\nWhat\'s new:\n• Stream URLs (HLS/DASH/TS) now intent-dispatch with proper MIME and prefer VLC > MX Player > chooser → no more browser-download for .mpd files.\n• Left drawer / sidebar with alphabetical Country list.\n• Filters persist across launches.\n• Sticky search bar no longer disappears after scroll.\n\nSideload over v0.1.0 — cookie + filters survive.'
+VER="${VER:-$(grep -E 'versionName\s*=' "$PROJECT_DIR/app/build.gradle.kts" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')}"
+CAPTION=$'SMDL IPTV v'"$VER"$' (debug-signed)\n\nWhat\'s new:\n- New app icon (Sentinel Media branding logo).\n- Theater video now goes fullscreen + landscape on phones: tap fullscreen on a movie/series and it rotates to widescreen; back exits.\n- Settings page now has a category top-nav (Accounts / Playback / Storage / Addons).\n\nSideload over the previous version - cookie + filters survive.'
 
 echo "==> sending to Telegram chat $CHAT_ID"
+# NB: keep the caption ASCII (no emoji/• bullets) and pass an explicit
+# filename — Telegram sendDocument 400s on some non-ASCII captions.
 curl -fsS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
      -F "chat_id=${CHAT_ID}" \
-     -F "document=@${APK}" \
+     -F "document=@${APK};filename=smdl-iptv-v${VER}.apk" \
      -F "caption=${CAPTION}" \
      -o /tmp/tg_send.json
 echo

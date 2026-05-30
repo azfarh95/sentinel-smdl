@@ -874,6 +874,40 @@ async def iptv_youtube_embed(channel_id: str, request: Request):
     return {"ok": True, "video_id": video_id, "embed_url": embed_url}
 
 
+@router.get("/api/iptv/channels/{channel_id}/youtube_live_status")
+async def iptv_youtube_live_status(channel_id: str, request: Request):
+    """Lightweight pre-flight: is this youtube-live channel broadcasting
+    right now? Some channels (e.g. RTM, BERNAMA) cycle their @handle/live
+    feed on and off, so the catalogue 'alive' flag (past probes) can say
+    yes while the channel is currently off-air. The play page calls this
+    before loading the player so it can show a clear 'off-air' message
+    instead of a broken player. Resolution is cached 30 min, so this is
+    cheap and the subsequent play reuses the cache. Accepts both id forms.
+
+    Always returns HTTP 200 with {live: bool}; reason='off_air' when the
+    channel simply isn't streaming, 'error' for anything else."""
+    await _verify_iptv(request)
+    page_url = await _hls_youtube_source_url(channel_id)
+    if not page_url:
+        raise HTTPException(status_code=404, detail="channel not found")
+    from . import iptv_youtube
+    try:
+        if _edition.is_community():
+            await iptv_youtube.resolve_live_video_id(page_url)
+        else:
+            await iptv_youtube.resolve_live_url(page_url)
+        return {"ok": True, "live": True}
+    except Exception as exc:
+        msg = str(exc)
+        off_air = ("not currently live" in msg) or ("no current live" in msg) \
+            or ("has no current live" in msg) or ("not live" in msg)
+        return {
+            "ok": True, "live": False,
+            "reason": "off_air" if off_air else "error",
+            "detail": msg[:160],
+        }
+
+
 class ProbeAllBody(BaseModel):
     source: str | None = None
     country: str | None = None
@@ -3318,6 +3352,44 @@ async function resolveStreamUrl() {
   return `/iptv/hls/${encodeURIComponent(CHANNEL_ID)}/index.m3u8`;
 }
 
+// Remove the off-air notice (if any) — called before a fresh play attempt.
+function clearOffAir() {
+  const el = document.getElementById('off-air-msg');
+  if (el) el.remove();
+}
+
+// Some youtube-live channels (RTM, BERNAMA, …) cycle their live feed on
+// and off air. When the pre-flight says the channel isn't broadcasting,
+// show a clear message in the player area instead of a broken player.
+function showOffAir(reason) {
+  const v = document.getElementById('inline-video');
+  v.style.display = 'none';
+  const frame = document.getElementById('inline-frame');
+  if (frame) frame.style.display = 'none';
+  clearOffAir();
+  const off_air = (reason === 'off_air');
+  const box = document.createElement('div');
+  box.id = 'off-air-msg';
+  box.style.cssText = 'margin-top:10px; padding:24px 18px; border-radius:12px;'
+    + 'background:#15191f; border:1px solid #2a313c; text-align:center;'
+    + 'color:#e6e9ef; font:14px/1.5 Inter,system-ui,sans-serif;';
+  const title = off_air
+    ? ((CHANNEL?.name || 'This channel') + ' isn’t broadcasting live right now')
+    : 'Couldn’t load this stream';
+  const sub = off_air
+    ? 'Some channels go off-air at times (often overnight). Try another channel, or check back a little later.'
+    : 'The stream could not be resolved. It may be temporarily unavailable.';
+  box.innerHTML =
+    '<div style="font-size:40px; line-height:1; margin-bottom:10px">📡</div>'
+    + '<div style="font-size:16px; font-weight:600; margin-bottom:6px">' + escapeHtml(title) + '</div>'
+    + '<div style="color:#aab2bf; max-width:420px; margin:0 auto 14px">' + escapeHtml(sub) + '</div>'
+    + '<button id="off-air-retry" style="padding:9px 18px; border:0; border-radius:9px;'
+    + 'background:#3a6df0; color:#fff; font-weight:600; cursor:pointer">Try again</button>';
+  v.insertAdjacentElement('afterend', box);
+  const retry = box.querySelector('#off-air-retry');
+  if (retry) retry.addEventListener('click', () => playInline());
+}
+
 // Community edition plays YouTube via the official IFrame Player (a
 // permitted embedding use) instead of the same-origin HLS relay. The
 // server resolves the channel's current live video id; we drop the
@@ -3347,6 +3419,14 @@ async function playYouTubeEmbed() {
 
 async function playInline() {
   if (!CHANNEL?.url) return toast('No URL');
+  if (CHANNEL.source === 'youtube-live') {
+    // Pre-flight: surface a clear off-air message instead of a broken player
+    // when the @handle/live feed isn't currently broadcasting.
+    let st = null;
+    try { st = await api(`/api/iptv/channels/${encodeURIComponent(CHANNEL_ID)}/youtube_live_status`); } catch(e) {}
+    if (st && st.live === false) { return showOffAir(st.reason); }
+  }
+  clearOffAir();
   if (EDITION === 'community' && CHANNEL.source === 'youtube-live') {
     return playYouTubeEmbed();
   }

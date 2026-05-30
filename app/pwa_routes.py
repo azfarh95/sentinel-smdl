@@ -172,6 +172,98 @@ async def offline_page():
     )
 
 
+# Public privacy policy — required for the Play listing's "privacy policy URL"
+# field and to back the Data Safety form. Plain public page, no auth. Content
+# mirrors what the app actually collects (account id, device id, app activity);
+# the contact line is templated so the operator sets a real address without a
+# code change.
+_PRIVACY_EFFECTIVE = "2026-05-31"
+
+
+def _privacy_contact() -> str:
+    return (os.environ.get("PRIVACY_CONTACT_EMAIL") or "privacy@az-sentinel.xyz").strip()
+
+
+def _privacy_html() -> str:
+    return f"""<!doctype html>
+<html lang=en><head>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<meta name=theme-color content="{_THEME}">
+<title>Privacy Policy — {_NAME}</title>
+<style>
+  html,body{{margin:0;background:{_THEME};color:#e6e6e6;
+    font:16px/1.6 Inter,system-ui,sans-serif}}
+  main{{max-width:760px;margin:0 auto;padding:32px 24px 64px}}
+  h1{{font-size:24px;margin:0 0 4px}} h2{{font-size:18px;margin:28px 0 8px}}
+  .muted{{color:#9aa4b2;font-size:14px}} a{{color:#5ad27a}}
+  ul{{padding-left:20px}} li{{margin:6px 0}}
+  code{{background:#161b26;padding:1px 6px;border-radius:6px;font-size:13px}}
+</style></head>
+<body><main>
+  <h1>{_NAME} — Privacy Policy</h1>
+  <p class=muted>Effective {_PRIVACY_EFFECTIVE}</p>
+
+  <p>{_NAME} lets you browse and watch publicly available live broadcasts. This
+  policy explains what the app collects, why, and the control you have over it.
+  We collect the minimum needed to run the service and we do not sell your data.</p>
+
+  <h2>What we collect</h2>
+  <ul>
+    <li><strong>Account identifier</strong> — when you register, an account id
+      (e.g. your Telegram user id) so favorites and settings persist across
+      sessions and devices.</li>
+    <li><strong>Device identifier</strong> (<code>device_id</code>) — a value
+      tied to your install, used to enforce per-plan seat limits and to deter
+      abuse of paid features.</li>
+    <li><strong>App activity</strong> — your watch/recording/download history,
+      stored against your account so the app can show it back to you.</li>
+  </ul>
+  <p>Anonymous browsing and watching of public channels does not require an
+  account. We do not collect contacts, precise location, or advertising ids.</p>
+
+  <h2>Why we use it</h2>
+  <p>Strictly for app functionality (favorites, sync, history), account
+  management, and seat/fraud enforcement on paid plans. We do not use your data
+  for advertising or profiling.</p>
+
+  <h2>Sharing</h2>
+  <p>We do not sell your data and we do not share it with third parties for
+  their own use. Video for YouTube-sourced channels is played through YouTube's
+  official player, which is governed by Google's privacy policy. Purchases made
+  through Google Play are processed by Google under its terms.</p>
+
+  <h2>Your choices &amp; deletion</h2>
+  <p>You can delete your account and its associated data at any time — in the
+  app, or on the web at <a href="/account/delete">/account/delete</a>. Deletion
+  removes your account record, history, and any saved stickers. Some records may
+  persist briefly in encrypted backups before being overwritten.</p>
+
+  <h2>Security &amp; retention</h2>
+  <p>Data is encrypted in transit (HTTPS). We retain account data while your
+  account is active and remove it on deletion.</p>
+
+  <h2>Children</h2>
+  <p>The service is not directed to children under 13, and we do not knowingly
+  collect their data.</p>
+
+  <h2>Changes</h2>
+  <p>If this policy changes, we will update the effective date above.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy or your data: <a href="mailto:{_privacy_contact()}">{_privacy_contact()}</a></p>
+</main></body></html>"""
+
+
+@router.get("/privacy")
+async def privacy_policy():
+    return Response(
+        _privacy_html(),
+        media_type="text/html",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 def _cert_fingerprints() -> list[str]:
     raw = (os.environ.get("TWA_SHA256_CERT_FINGERPRINTS") or "").strip()
     return [f.strip() for f in raw.split(",") if f.strip()]

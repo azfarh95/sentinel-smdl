@@ -48,7 +48,24 @@ _TOKEN_FILE = os.environ.get("RD_TOKEN_FILE", "/config/rd_token")
 
 
 class RealDebridError(Exception):
-    """Raised when the RD API rejects a request or returns malformed data."""
+    """Raised when the RD API rejects a request or returns malformed data.
+
+    Carries the HTTP status and RD's own `error_code` when the failure
+    came from an API error body, so callers can branch on specific
+    conditions (e.g. an infringing-file takedown) instead of string-matching."""
+
+    def __init__(self, message: str, *, http_status: int | None = None,
+                 error_code: int | None = None):
+        super().__init__(message)
+        self.http_status = http_status
+        self.error_code = error_code
+
+    @property
+    def is_infringing(self) -> bool:
+        """True when RD refused a file for legal/copyright reasons. RD signals
+        this as HTTP 451 (Unavailable For Legal Reasons) and/or error_code 35
+        (`infringing_file`). Permanent for that file — never worth retrying."""
+        return self.http_status == 451 or self.error_code == 35
 
 
 def _get_token() -> Optional[str]:
@@ -123,9 +140,14 @@ def _request(method: str, path: str, *, data: dict | None = None,
             err_body = json.loads(e.read().decode())
             msg = err_body.get("error") or str(e)
             code = err_body.get("error_code")
-            raise RealDebridError(f"HTTP {e.code} — {msg} (code {code})") from e
+            raise RealDebridError(
+                f"HTTP {e.code} — {msg} (code {code})",
+                http_status=e.code, error_code=code,
+            ) from e
         except json.JSONDecodeError:
-            raise RealDebridError(f"HTTP {e.code} — {e.reason}") from e
+            raise RealDebridError(
+                f"HTTP {e.code} — {e.reason}", http_status=e.code,
+            ) from e
     except urllib.error.URLError as e:
         raise RealDebridError(f"Network error: {e}") from e
 
@@ -280,12 +302,18 @@ def magnet_to_direct_urls(magnet: str, *,
     # files filtered by `selected==1`. Sanity-check.
     selected_files = [f for f in files if f.get("selected") == 1]
     out: list[RDDirectFile] = []
+    infringing_hit = False
     for f, rd_link in zip(selected_files, links):
         if (f.get("bytes") or 0) < min_size_bytes:
             continue
         try:
             unr = unrestrict_link(rd_link)
         except RealDebridError as e:
+            # A per-file takedown shouldn't be silently treated as "too small".
+            # Remember it so we can raise an infringing-flavoured error below
+            # if it turns out no file was playable.
+            if e.is_infringing:
+                infringing_hit = True
             logger.warning("RD unrestrict failed for %s: %s", f.get("path"), e)
             continue
         out.append(RDDirectFile(
@@ -295,6 +323,11 @@ def magnet_to_direct_urls(magnet: str, *,
             mime_type=unr.get("mimeType"),
         ))
     if not out:
+        if infringing_hit:
+            raise RealDebridError(
+                "Real-Debrid blocked this release (copyright takedown)",
+                http_status=451, error_code=35,
+            )
         raise RealDebridError(
             "No playable files emerged from RD (all under size threshold "
             f"of {min_size_bytes} bytes)"

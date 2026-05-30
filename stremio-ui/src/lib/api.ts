@@ -78,6 +78,7 @@ export interface StreamEntry {
   quality: string | null;
   source_addon: string;
   file_index: number | null;
+  rd_blocked?: boolean;   // RD has refused this release before — grey it out
 }
 
 export interface GrabFile {
@@ -103,6 +104,7 @@ export interface StremioJob {
   filename: string | null;
   filesize: number | null;
   error: string | null;
+  error_kind: string | null;   // 'rd_infringing' | 'rd_error' | null
   created_at: string;
   updated_at: string;
 }

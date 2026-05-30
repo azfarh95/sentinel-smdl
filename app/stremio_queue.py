@@ -76,6 +76,7 @@ class StremioJob:
     filename: Optional[str] = None
     filesize: Optional[int] = None
     error: Optional[str] = None
+    error_kind: Optional[str] = None   # None|'rd_infringing'|'rd_error' — lets the client auto-advance
 
     # Timestamps (ISO-8601 UTC)
     created_at: str = ""
@@ -101,11 +102,22 @@ CREATE TABLE IF NOT EXISTS stremio_jobs (
     filename TEXT,
     filesize INTEGER,
     error TEXT,
+    error_kind TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_stremio_jobs_status ON stremio_jobs(status);
 CREATE INDEX IF NOT EXISTS ix_stremio_jobs_infohash ON stremio_jobs(infohash);
+
+-- Releases Real-Debrid permanently refuses (HTTP 451 / error_code 35).
+-- Keyed by infohash so we never waste a resolve round-trip on a known-dead
+-- release and the client can skip straight to the next source.
+CREATE TABLE IF NOT EXISTS stremio_blocked_infohashes (
+    infohash TEXT PRIMARY KEY,
+    reason TEXT NOT NULL DEFAULT 'rd_infringing',
+    title TEXT,
+    blocked_at TEXT NOT NULL
+);
 """
 
 
@@ -113,6 +125,55 @@ async def init_schema() -> None:
     """Create tables if missing. Called at app startup."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(_SCHEMA)
+        # Migration: add error_kind to pre-existing stremio_jobs tables.
+        cols = [r[1] for r in await (await db.execute(
+            "PRAGMA table_info(stremio_jobs)")).fetchall()]
+        if "error_kind" not in cols:
+            await db.execute("ALTER TABLE stremio_jobs ADD COLUMN error_kind TEXT")
+        await db.commit()
+
+
+# ── Infringing-release blocklist ───────────────────────────────────────────
+async def is_infohash_blocked(infohash: str) -> Optional[str]:
+    """Return the block reason if this infohash is on the RD takedown list,
+    else None."""
+    if not infohash:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute(
+            "SELECT reason FROM stremio_blocked_infohashes WHERE infohash = ?",
+            (infohash.lower(),),
+        )).fetchone()
+    return row[0] if row else None
+
+
+async def blocked_infohashes(infohashes: list[str]) -> set[str]:
+    """Return the subset of the given infohashes that are RD-blocked. Used to
+    grey out dead sources in the streams list without probing RD."""
+    hashes = [h.lower() for h in infohashes if h]
+    if not hashes:
+        return set()
+    placeholders = ",".join("?" * len(hashes))
+    async with aiosqlite.connect(DB_PATH) as db:
+        rows = await (await db.execute(
+            f"SELECT infohash FROM stremio_blocked_infohashes "
+            f"WHERE infohash IN ({placeholders})", hashes,
+        )).fetchall()
+    return {r[0] for r in rows}
+
+
+async def block_infohash(infohash: str, *, reason: str = "rd_infringing",
+                         title: Optional[str] = None) -> None:
+    """Record a release as permanently RD-blocked. Idempotent."""
+    if not infohash:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO stremio_blocked_infohashes (infohash, reason, title, blocked_at) "
+            "VALUES (?,?,?,?) ON CONFLICT(infohash) DO UPDATE SET "
+            "reason=excluded.reason, blocked_at=excluded.blocked_at",
+            (infohash.lower(), reason, title, _now()),
+        )
         await db.commit()
 
 
@@ -129,6 +190,7 @@ def _row_to_job(r) -> StremioJob:
         expected_size=r["expected_size"], status=r["status"],
         progress=r["progress"], direct_url=r["direct_url"], filename=r["filename"],
         filesize=r["filesize"], error=r["error"],
+        error_kind=(r["error_kind"] if "error_kind" in r.keys() else None),
         created_at=r["created_at"], updated_at=r["updated_at"],
     )
 
@@ -142,6 +204,24 @@ async def enqueue(*, imdb_id: str, type_: str, title: str,
     """Add a new job. Returns job_id. If a previous successful grab for the
     same infohash exists in cache, returns a pseudo-job with status='cached'
     so the UI can skip directly to playback."""
+    # Known-takedown fast path: RD already refused this release once. Skip the
+    # round-trip and return a job already flagged so the client auto-advances.
+    if await is_infohash_blocked(infohash):
+        now = _now()
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "INSERT INTO stremio_jobs (imdb_id, type, title, infohash, magnet, "
+                "file_index, source_stream_title, quality, expected_size, status, "
+                "progress, error, error_kind, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'error',0,?,'rd_infringing',?,?)",
+                (imdb_id, type_, title, infohash, magnet, file_index,
+                 source_stream_title, quality, expected_size,
+                 "Real-Debrid blocked this release (copyright takedown) — try another source",
+                 now, now),
+            )
+            await db.commit()
+            return cur.lastrowid
+
     # Cache-hit fast path
     existing = _cache.find_by_infohash(infohash)
     if existing:
@@ -234,7 +314,19 @@ async def _process_job(job: StremioJob) -> None:
                     _rd.magnet_to_direct_urls, job.magnet, timeout=RESOLVE_TIMEOUT,
                 )
             except _rd.RealDebridError as e:
-                await _update(job.id, status="error", error=f"RD: {e}")
+                if e.is_infringing:
+                    # RD has taken this exact release down for copyright. It will
+                    # never resolve — block the infohash so it's not retried and
+                    # flag the job so the client can jump to another source.
+                    await block_infohash(job.infohash, reason="rd_infringing",
+                                         title=job.title)
+                    await _update(
+                        job.id, status="error", error_kind="rd_infringing",
+                        error="Real-Debrid blocked this release (copyright takedown) — try another source",
+                    )
+                else:
+                    await _update(job.id, status="error", error_kind="rd_error",
+                                  error=f"RD: {e}")
                 return
             if not files:
                 await _update(job.id, status="error", error="RD returned no files")

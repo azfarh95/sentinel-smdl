@@ -42,6 +42,14 @@
   let purging   = $state(false);
   let purgeMsg  = $state<string | null>(null);
   let pollHandle: ReturnType<typeof setInterval> | null = null;
+  // ── RD-blocked auto-advance ────────────────────────────────────────────
+  // RD only serves pre-cached releases; uncached ones 451 (infringing_file).
+  // We can't probe availability cheaply (instantAvailability is disabled), so
+  // on a 451 we mark the source dead, grey it out, and walk to the next one.
+  let grabbedIndex = $state<number>(-1);     // index in `streams` of the active grab
+  let autoAdvancing = $state(false);          // true while hopping past dead sources
+  let autoAdvanceTries = 0;                    // bounded so we don't cycle 40 sources
+  const MAX_AUTO_ADVANCE = 5;
 
   // ── P5 series state ───────────────────────────────────────────────────
   let episodes    = $state<EpisodeMeta[]>([]);   // for the selected series
@@ -197,8 +205,11 @@
   // URL we can play right now while caching continues in the background.
   // `cached` means the file is fully on G:\ and we should switch to the
   // local file URL (better for re-watch, instant seek).
-  async function grab(s: StreamEntry) {
+  async function grab(s: StreamEntry, index: number = -1) {
     if (!selected || !s.infohash) return;
+    if (index < 0) index = streams.findIndex((x) => x === s);
+    grabbedIndex = index;
+    if (!autoAdvancing) autoAdvanceTries = 0;   // fresh user-initiated grab
     view = "grab"; lastError = null; activeJob = null;
     // For series, the cache key is the episode-specific id (tt0903747:1:1)
     // so re-grabs of a single episode hit the cache, not the series root.
@@ -230,9 +241,31 @@
         activeJob = r.job;
         if (r.job.status === "cached" || r.job.status === "error") {
           stopPolling();
+          if (r.job.status === "error" && r.job.error_kind === "rd_infringing") {
+            handleInfringing();
+          } else {
+            autoAdvancing = false;
+          }
         }
       } catch (e) { /* keep polling — transient */ }
     }, 2000);
+  }
+
+  // RD refused this release (not cached). Mark the source dead so it greys out,
+  // then hop to the next still-live source — bounded so we don't grind through
+  // every dead mirror of an uncached title.
+  function handleInfringing() {
+    if (grabbedIndex >= 0 && streams[grabbedIndex]) {
+      streams[grabbedIndex] = { ...streams[grabbedIndex], rd_blocked: true };
+    }
+    if (autoAdvanceTries >= MAX_AUTO_ADVANCE) { autoAdvancing = false; return; }
+    const next = streams.findIndex(
+      (s, i) => i > grabbedIndex && s.has_magnet && !s.rd_blocked,
+    );
+    if (next < 0) { autoAdvancing = false; return; }   // nothing left to try
+    autoAdvancing = true;
+    autoAdvanceTries += 1;
+    grab(streams[next], next);
   }
   function stopPolling() {
     if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
@@ -649,7 +682,7 @@
 
       <div class="space-y-2">
         {#each streams as s, i (i)}
-          <Card>
+          <Card class={s.rd_blocked ? "opacity-50" : ""}>
             <CardContent class="p-3 flex items-center gap-3">
               <div class="flex flex-col items-center min-w-[64px]">
                 {#if s.quality}<Badge>{s.quality}</Badge>{/if}
@@ -660,11 +693,18 @@
               <div class="flex-1 min-w-0">
                 <div class="text-xs text-muted-foreground mb-1">{s.source_addon}</div>
                 <div class="text-sm truncate" title={s.title}>{s.title.split("\n")[0]}</div>
-                <div class="text-[10px] text-muted-foreground">{fmtSize(s.size_bytes)}</div>
+                <div class="text-[10px] text-muted-foreground">
+                  {fmtSize(s.size_bytes)}
+                  {#if s.rd_blocked}· <span class="text-destructive">RD can't serve this</span>{/if}
+                </div>
               </div>
-              <Button size="sm" disabled={!s.has_magnet} onclick={() => grab(s)}>
-                <Play class="size-3" /> Grab
-              </Button>
+              {#if s.rd_blocked}
+                <Button size="sm" variant="outline" disabled>Not cached</Button>
+              {:else}
+                <Button size="sm" disabled={!s.has_magnet} onclick={() => grab(s, i)}>
+                  <Play class="size-3" /> Grab
+                </Button>
+              {/if}
             </CardContent>
           </Card>
         {/each}
@@ -684,6 +724,8 @@
               <Badge>Streaming</Badge>
             {:else if activeJob.status === "resolving"}
               <Badge variant="outline">Resolving…</Badge>
+            {:else if activeJob.status === "error" && autoAdvancing}
+              <Badge variant="outline">Trying next source…</Badge>
             {:else if activeJob.status === "error"}
               <Badge variant="destructive">Error</Badge>
             {/if}
@@ -696,8 +738,23 @@
               <Loader2 class="animate-spin size-5" />
               <span class="text-sm">Asking Real-Debrid… (can take up to 5 min on uncached torrents)</span>
             </div>
+          {:else if activeJob.status === "error" && autoAdvancing}
+            <div class="flex items-center gap-3 py-6 justify-center text-muted-foreground">
+              <Loader2 class="animate-spin size-5" />
+              <span class="text-sm">Real-Debrid couldn't serve that release — trying the next source…</span>
+            </div>
           {:else if activeJob.status === "error"}
             <div class="text-sm text-destructive">{activeJob.error ?? "Unknown error"}</div>
+            {#if activeJob.error_kind === "rd_infringing"}
+              <div class="text-xs text-muted-foreground mt-2">
+                Real-Debrid only serves releases it has already cached. The sources it
+                can't serve are greyed out below — pick another, or try a different title.
+              </div>
+              <Button size="sm" variant="outline" class="mt-3"
+                       onclick={() => { autoAdvancing = false; view = "detail"; }}>
+                Back to sources
+              </Button>
+            {/if}
           {:else if url}
             {@const playId = pickedEpisode?.id ?? selected?.id ?? activeJob.imdb_id}
             <!-- svelte-ignore a11y_media_has_caption -->
@@ -744,7 +801,7 @@
             <div class="flex gap-2 mt-3">
               {#if activeJob.direct_url}
                 <Button variant="secondary" size="sm"
-                         onclick={() => navigator.clipboard.writeText(activeJob.direct_url!)}>
+                         onclick={() => activeJob?.direct_url && navigator.clipboard.writeText(activeJob.direct_url)}>
                   Copy URL
                 </Button>
               {/if}

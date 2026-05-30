@@ -641,11 +641,17 @@ async def stremio_streams(request: Request, imdb_id: str = "",
         logger.exception("stremio streams failed")
         raise HTTPException(500, f"streams failed: {e!s}")
     ranked = _st.rank_streams(raw, preferred_quality=quality)
+    top = ranked[:40]
+    # Annotate releases RD has already refused (learned from past grabs) so the
+    # client can grey them out — no live RD probe (instantAvailability is dead).
+    from . import stremio_queue as _sq
+    blocked = await _sq.blocked_infohashes([s.infohash for s in top if s.infohash])
     return {"streams": [
         {"title": s.title, "infohash": s.infohash, "has_magnet": bool(s.magnet),
          "size_bytes": s.size_bytes, "seeders": s.seeders, "quality": s.quality,
-         "source_addon": s.source_addon, "file_index": s.file_index}
-        for s in ranked[:40]
+         "source_addon": s.source_addon, "file_index": s.file_index,
+         "rd_blocked": bool(s.infohash and s.infohash.lower() in blocked)}
+        for s in top
     ]}
 
 
@@ -681,7 +687,17 @@ async def stremio_grab(body: _StremioGrabBody, request: Request):
         files = await asyncio.to_thread(_rd.magnet_to_direct_urls, magnet,
                                           timeout=300)
     except _rd.RealDebridError as e:
-        return {"ok": False, "error": str(e)}
+        if e.is_infringing:
+            from . import stremio_queue as _sq
+            ih = (body.infohash or "").lower()
+            if ih:
+                await _sq.block_infohash(ih, reason="rd_infringing")
+            return {
+                "ok": False,
+                "error_kind": "rd_infringing",
+                "error": "Real-Debrid blocked this release (copyright takedown) — try another source",
+            }
+        return {"ok": False, "error_kind": "rd_error", "error": str(e)}
     return {
         "ok": True,
         "files": [

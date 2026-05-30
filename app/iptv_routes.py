@@ -809,18 +809,36 @@ async def iptv_hls_segment(request: Request):
     return await _hls_relay(target)
 
 
+async def _hls_youtube_source_url(channel_id: str) -> str | None:
+    """Resolve the youtube-live @handle URL for a relay request. The id
+    may be a source-row id ("youtube-live:cna") OR a logical channel id
+    ("cna") — the in-app browser grid links use the logical form, the
+    Family page pins the source form. Try both."""
+    ch = await _iptv.get_channel(channel_id)
+    if ch and ch.url and ch.source == "youtube-live":
+        return ch.url
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT url FROM iptv_channels "
+            " WHERE channel_id = ? AND source = 'youtube-live' "
+            "   AND url IS NOT NULL AND url != '' LIMIT 1",
+            (channel_id,),
+        )
+        row = await cur.fetchone()
+    return row["url"] if row else None
+
+
 @router.get("/iptv/hls/{channel_id}/index.m3u8")
 async def iptv_hls_index(channel_id: str, request: Request):
     """Entry point the in-app player loads for a youtube-live channel:
     resolve the current googlevideo manifest server-side and relay it."""
-    ch = await _iptv.get_channel(channel_id)
-    if not ch or not ch.url:
+    page_url = await _hls_youtube_source_url(channel_id)
+    if not page_url:
         raise HTTPException(status_code=404, detail="channel not found")
-    if ch.source != "youtube-live":
-        raise HTTPException(status_code=400, detail="not a youtube-live channel")
     from . import iptv_youtube
     try:
-        target = await iptv_youtube.resolve_live_url(ch.url)
+        target = await iptv_youtube.resolve_live_url(page_url)
     except Exception as exc:
         logger.warning("hls index resolve %s failed: %s", channel_id, exc)
         raise HTTPException(status_code=502, detail=f"resolve failed: {exc}")

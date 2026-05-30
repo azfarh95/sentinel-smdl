@@ -119,3 +119,28 @@ async def clear_position(imdb_id: str) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM stremio_progress WHERE imdb_id = ?", (imdb_id,))
         await db.commit()
+
+
+async def list_progress(limit: int = 20) -> list[dict]:
+    """Recently-watched, still-in-progress titles for the Continue Watching
+    row. Skips fully-finished items (>92% watched) and ones under 30s in.
+    Most-recently-updated first."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        rows = await (await db.execute(
+            "SELECT imdb_id, position_seconds, duration_seconds, updated_at "
+            "FROM stremio_progress ORDER BY updated_at DESC LIMIT ?",
+            (max(1, limit) * 3,),
+        )).fetchall()
+    out: list[dict] = []
+    for imdb_id, pos, dur, updated in rows:
+        if pos is None or pos < 30:
+            continue
+        pct = (pos / dur * 100) if dur else 0.0
+        if dur and pct >= 92:
+            continue
+        out.append({"imdb_id": imdb_id, "position_seconds": pos,
+                    "duration_seconds": dur, "progress_pct": round(pct, 1),
+                    "updated_at": updated})
+        if len(out) >= limit:
+            break
+    return out

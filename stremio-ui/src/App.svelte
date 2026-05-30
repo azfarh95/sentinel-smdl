@@ -8,19 +8,22 @@
    *  No router — single-component view state machine. The TG BackButton
    *  is wired to navigate Detail → Search; on Search it closes the app. */
   import { onMount } from "svelte";
-  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive, Tv, Settings } from "@lucide/svelte";
+  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive, Tv, Settings, Home, Puzzle, Plus, Trash2, Check } from "@lucide/svelte";
   import { api, type MetaItem, type StreamEntry, type GrabFile, type RDAccount,
-            type StremioJob, type CacheEntry, type EpisodeMeta } from "$lib/api";
+            type StremioJob, type CacheEntry, type EpisodeMeta,
+            type DiscoverData, type DiscoverItem, type AddonSummary } from "$lib/api";
   import { fmtSize } from "$lib/utils";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "$lib/components/ui/card";
   import { Badge } from "$lib/components/ui/badge";
 
-  type View = "search" | "detail" | "grab" | "queue" | "library" | "settings";
+  type View = "discover" | "search" | "detail" | "grab" | "queue" | "library" | "addons" | "settings";
 
   // ── State (Svelte 5 runes) ─────────────────────────────────────────────
-  let view = $state<View>("search");
+  let view = $state<View>("discover");
+  // Where Detail returns to (the grid we opened it from).
+  let returnTo = $state<View>("discover");
   let query = $state("");
   let searching = $state(false);
   let results = $state<MetaItem[]>([]);
@@ -35,6 +38,9 @@
   let jobs      = $state<StremioJob[]>([]);          // queue view list
   let cache     = $state<CacheEntry[]>([]);
   let cacheDisk = $state<{ total: number; used: number; free: number; pct_used: number } | null>(null);
+  let cacheRoot = $state<string>("");
+  let purging   = $state(false);
+  let purgeMsg  = $state<string | null>(null);
   let pollHandle: ReturnType<typeof setInterval> | null = null;
 
   // ── P5 series state ───────────────────────────────────────────────────
@@ -43,13 +49,66 @@
   let activeSeason = $state<number>(1);
   let pickedEpisode = $state<EpisodeMeta | null>(null);   // episode whose streams are shown
 
+  // ── Discovery home ─────────────────────────────────────────────────────
+  let discover = $state<DiscoverData | null>(null);
+  let discoverLoading = $state(false);
+  async function loadDiscover() {
+    discoverLoading = true; lastError = null;
+    try { discover = await api.discover(); }
+    catch (e) { lastError = String(e); }
+    finally { discoverLoading = false; }
+  }
+  $effect(() => { if (view === "discover" && !discover && !discoverLoading) loadDiscover(); });
+
+  // ── Addons tab (#66) ───────────────────────────────────────────────────
+  let installedAddons = $state<AddonSummary[]>([]);
+  let catalogAddons = $state<AddonSummary[]>([]);
+  let usingDefaults = $state(true);
+  let addonsLoading = $state(false);
+  let addonUrl = $state("");
+  let addonBusy = $state<string | null>(null);   // url currently mutating
+  let addonError = $state<string | null>(null);
+
+  async function loadAddons() {
+    addonsLoading = true; addonError = null;
+    try {
+      const r = await api.addons.list();
+      installedAddons = r.installed;
+      catalogAddons = r.catalog;
+      usingDefaults = r.using_defaults;
+    } catch (e) { addonError = String(e); }
+    finally { addonsLoading = false; }
+  }
+  async function addAddon(url: string) {
+    const u = url.trim();
+    if (!u) return;
+    addonBusy = u; addonError = null;
+    try {
+      const r = await api.addons.add(u);
+      if (!r.ok) { addonError = r.error ?? "could not add addon"; return; }
+      addonUrl = "";
+      await loadAddons();
+    } catch (e) { addonError = String(e); }
+    finally { addonBusy = null; }
+  }
+  async function removeAddon(url: string) {
+    addonBusy = url; addonError = null;
+    try {
+      await api.addons.remove(url);
+      await loadAddons();
+    } catch (e) { addonError = String(e); }
+    finally { addonBusy = null; }
+  }
+  $effect(() => { if (view === "addons" && !installedAddons.length && !addonsLoading) loadAddons(); });
+
   // ── Boot: fetch RD account state (gives us premium badge) ──────────────
   onMount(async () => {
     try { account = await api.account(); } catch (e) { /* non-fatal */ }
     const tg = (window as any).Telegram?.WebApp;
     tg?.BackButton?.onClick(() => {
       if (view === "grab") { view = "detail"; }
-      else if (view === "detail") { view = "search"; selected = null; streams = []; }
+      else if (view === "detail") { view = returnTo; selected = null; streams = []; }
+      else if (view !== "discover") { view = "discover"; }
       else { tg.close?.(); }
     });
     updateBack();
@@ -58,10 +117,14 @@
   function updateBack() {
     const tg = (window as any).Telegram?.WebApp;
     if (!tg?.BackButton) return;
-    if (view === "search") tg.BackButton.hide();
+    if (view === "discover") tg.BackButton.hide();
     else tg.BackButton.show();
   }
   $effect(() => updateBack());
+
+  // Navigate back to the Sentinel Media home (#69) — the Theater is a
+  // full-page nav target, so leaving it means leaving the SPA.
+  function exitToHome() { window.location.href = "/app"; }
 
   // ── Search ─────────────────────────────────────────────────────────────
   // Cinemeta returns both movies and series for "top" catalog searches;
@@ -86,6 +149,7 @@
   // Series: fetch the episode list first; streams come AFTER user picks
   // a specific episode.
   async function openDetail(m: MetaItem) {
+    returnTo = (view === "search" || view === "discover") ? view : "discover";
     selected = m; streams = []; episodes = []; pickedEpisode = null;
     view = "detail"; lastError = null;
     if (m.type === "series") {
@@ -183,7 +247,18 @@
       const r = await api.cache();
       cache = r.entries;
       cacheDisk = r.disk;
+      cacheRoot = r.root;
     } catch (e) { /* ignore */ }
+  }
+  async function purgeCache() {
+    if (!confirm(`Delete all ${cache.length} cached file(s)? This cannot be undone.`)) return;
+    purging = true; purgeMsg = null;
+    try {
+      const r = await api.purgeCache();
+      purgeMsg = `Purged ${r.deleted} file(s) · ${fmtSize(r.bytes_freed)} freed.`;
+      await refreshCache();
+    } catch (e) { purgeMsg = String(e); }
+    finally { purging = false; }
   }
   $effect(() => {
     // Auto-refresh jobs list while on the queue view
@@ -315,16 +390,24 @@
   <!-- Header -->
   <header class="sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur
                  px-4 py-3 flex items-center gap-3">
-    {#if view !== "search"}
-      <button onclick={() => { view = "search"; selected = null; streams = []; }}
+    {#if view === "detail"}
+      <button onclick={() => { view = returnTo; selected = null; streams = []; }}
+              class="text-muted-foreground hover:text-foreground" aria-label="back">
+        <ArrowLeft class="size-5" />
+      </button>
+    {:else if view !== "discover"}
+      <button onclick={() => { view = "discover"; }}
               class="text-muted-foreground hover:text-foreground" aria-label="back">
         <ArrowLeft class="size-5" />
       </button>
     {:else}
-      <Film class="size-5 text-primary" />
+      <button onclick={exitToHome}
+              class="text-muted-foreground hover:text-foreground" aria-label="back to Sentinel Media" title="Back to Sentinel Media">
+        <ArrowLeft class="size-5" />
+      </button>
     {/if}
     <h1 class="text-base font-semibold flex-1">
-      {view === "search" ? "Theater" : selected?.name ?? "…"}
+      {view === "detail" ? (selected?.name ?? "…") : "Theater"}
     </h1>
     {#if account?.ok && account.is_premium}
       <Badge variant="secondary" class="text-[10px]">
@@ -339,6 +422,82 @@
     {#if lastError}
       <div class="mb-3 rounded-md border border-destructive/40 bg-destructive/10
                    px-3 py-2 text-sm text-destructive-foreground">{lastError}</div>
+    {/if}
+
+    {#snippet posterRow(title: string, items: DiscoverItem[], showProgress: boolean)}
+      <section class="mb-5">
+        <h2 class="text-sm font-semibold mb-2 text-foreground">{title}</h2>
+        <div class="flex gap-3 overflow-x-auto pb-2 -mx-4 px-4 snap-x">
+          {#each items as m (m.id)}
+            <button onclick={() => openDetail(m)}
+                    class="group shrink-0 w-28 sm:w-32 text-left snap-start">
+              <div class="aspect-[2/3] rounded-lg overflow-hidden bg-muted border border-border
+                          group-hover:border-primary group-hover:scale-105 group-hover:shadow-xl
+                          group-hover:shadow-primary/20 transition-all duration-200 relative">
+                {#if m.poster}
+                  <img src={m.poster} alt={m.name} loading="lazy"
+                       class="w-full h-full object-cover" />
+                {:else}
+                  <div class="w-full h-full flex items-center justify-center">
+                    <Film class="size-8 text-muted-foreground" />
+                  </div>
+                {/if}
+                {#if showProgress && m.progress_pct}
+                  <div class="absolute bottom-0 inset-x-0 h-1 bg-black/50 z-10">
+                    <div class="h-full bg-primary" style="width: {m.progress_pct}%"></div>
+                  </div>
+                {/if}
+                <!-- #70 hover preview overlay -->
+                <div class="absolute inset-0 flex flex-col justify-end p-2
+                            bg-gradient-to-t from-black/90 via-black/40 to-transparent
+                            opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                  <div class="flex items-center gap-1 text-[10px] text-white/90 mb-0.5">
+                    {#if m.year}<span>{m.year}</span>{/if}
+                    {#if m.imdb_rating}<span>★ {m.imdb_rating.toFixed(1)}</span>{/if}
+                  </div>
+                  {#if m.description}
+                    <p class="text-[9px] leading-tight text-white/80 line-clamp-4">{m.description}</p>
+                  {/if}
+                  <div class="mt-1.5 inline-flex items-center gap-1 text-[10px] font-semibold text-primary-foreground
+                              bg-primary rounded px-2 py-0.5 self-start">
+                    <Play class="size-3" /> Open
+                  </div>
+                </div>
+              </div>
+              <div class="mt-1 text-xs font-medium truncate">{m.name}</div>
+              <div class="text-[10px] text-muted-foreground truncate">
+                {#if m.year}{m.year}{/if}{#if m.imdb_rating} · ★ {m.imdb_rating.toFixed(1)}{/if}
+              </div>
+            </button>
+          {/each}
+        </div>
+      </section>
+    {/snippet}
+
+    <!-- ── DISCOVER VIEW (Stremio-style home rows) ─────────────────────── -->
+    {#if view === "discover"}
+      {#if discoverLoading && !discover}
+        <Card><CardContent class="py-12 text-center">
+          <Loader2 class="animate-spin size-6 mx-auto text-muted-foreground" />
+          <CardDescription class="mt-2">Loading discovery…</CardDescription>
+        </CardContent></Card>
+      {:else if discover}
+        {#if discover.continue_watching.length}
+          {@render posterRow("Continue Watching", discover.continue_watching, true)}
+        {/if}
+        {#if discover.popular_movies.length}
+          {@render posterRow("Popular Movies", discover.popular_movies, false)}
+        {/if}
+        {#if discover.popular_series.length}
+          {@render posterRow("Popular Series", discover.popular_series, false)}
+        {/if}
+        {#if !discover.continue_watching.length && !discover.popular_movies.length && !discover.popular_series.length}
+          <Card class="text-center py-12"><CardContent>
+            <Film class="size-12 text-muted-foreground mx-auto mb-3" />
+            <CardDescription>Nothing to show yet — try a search.</CardDescription>
+          </CardContent></Card>
+        {/if}
+      {/if}
     {/if}
 
     <!-- ── SEARCH VIEW ──────────────────────────────────────────────── -->
@@ -711,17 +870,43 @@
 
         <Card class="mb-3"><CardHeader>
           <CardTitle>Cache</CardTitle>
-          <CardDescription>Hard cap in GB on disk usage. Empty = disk-fraction LRU only (90% partition).</CardDescription>
-        </CardHeader><CardContent>
-          <div class="flex items-center justify-between">
-            <span class="text-sm">Hard cap (GB)</span>
+          <CardDescription>Where grabbed files live + how big the cache can grow.</CardDescription>
+        </CardHeader><CardContent class="space-y-3">
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-sm">Hard cap (GB)</div>
+              <div class="text-[10px] text-muted-foreground">
+                {#if settings.cache_max_gb}
+                  Capped at {settings.cache_max_gb} GB.
+                {:else}
+                  Default: no fixed cap — LRU evicts at 90% partition full.
+                {/if}
+              </div>
+            </div>
             <input type="number" min="1" placeholder="—"
-                   class="bg-secondary text-sm rounded px-3 py-1.5 w-24 text-right"
+                   class="bg-secondary text-sm rounded px-3 py-1.5 w-24 text-right shrink-0"
                    value={settings.cache_max_gb ?? ""}
                    onchange={(e) => {
                      const raw = (e.currentTarget as HTMLInputElement).value;
                      saveSettings({ cache_max_gb: raw ? Number(raw) : null });
                    }} />
+          </div>
+          <div>
+            <div class="text-sm mb-1">Cache folder</div>
+            <div class="text-[10px] text-muted-foreground mb-1">
+              Current: <span class="font-mono">{settings.cache_root ?? "—"}</span>
+              {#if settings.cache_path}<Badge variant="secondary" class="ml-1 text-[9px]">custom</Badge>
+              {:else}<Badge variant="outline" class="ml-1 text-[9px]">default</Badge>{/if}
+            </div>
+            <div class="flex gap-2">
+              <Input type="text" placeholder="/downloads/Stremio"
+                     value={settings.cache_path ?? ""}
+                     onchange={(e) => saveSettings({ cache_path: (e.currentTarget as HTMLInputElement).value.trim() })}
+                     class="text-xs font-mono" />
+            </div>
+            <p class="text-[10px] text-muted-foreground mt-1">
+              Must be under a mounted volume (e.g. <code>/downloads/…</code>). Empty = default. Existing files aren't moved.
+            </p>
           </div>
         </CardContent></Card>
 
@@ -758,18 +943,12 @@
         </CardContent></Card>
 
         <Card><CardHeader>
-          <CardTitle>Addons</CardTitle>
-          <CardDescription>Custom Stremio-protocol addon URLs. Leave empty for defaults (Cinemeta, Torrentio, Comet, MediaFusion, OpenSubtitles).</CardDescription>
+          <CardTitle class="flex items-center gap-2"><Puzzle class="size-4" /> Addons</CardTitle>
+          <CardDescription>Manage Stremio-protocol addons in the dedicated Addons tab.</CardDescription>
         </CardHeader><CardContent>
-          <textarea
-            class="w-full h-32 bg-secondary text-xs font-mono rounded p-3"
-            placeholder="https://example.com/manifest.json&#10;https://another.addon/manifest.json"
-            value={(settings.addons ?? []).join("\n")}
-            onchange={(e) => saveSettings({
-              addons: (e.currentTarget as HTMLTextAreaElement).value
-                .split("\n").map(s => s.trim()).filter(Boolean),
-            })}
-          ></textarea>
+          <Button variant="secondary" size="sm" onclick={() => { view = "addons"; }}>
+            <Puzzle class="size-3" /> Open Addons
+          </Button>
         </CardContent></Card>
       {/if}
     {/if}
@@ -777,15 +956,29 @@
     <!-- ── LIBRARY VIEW (cached files on G:\) ──────────────────────── -->
     {#if view === "library"}
       {#if cacheDisk}
-        <div class="mb-4 text-xs text-muted-foreground flex justify-between">
+        <div class="mb-2 text-xs text-muted-foreground flex justify-between">
           <span>
             {cache.length} cached · {fmtSize(cache.reduce((a, e) => a + e.filesize, 0))}
           </span>
           <span>
-            G:\ disk · {fmtSize(cacheDisk.free)} free of {fmtSize(cacheDisk.total)}
+            disk · {fmtSize(cacheDisk.free)} free of {fmtSize(cacheDisk.total)}
             ({cacheDisk.pct_used.toFixed(0)}% used)
           </span>
         </div>
+      {/if}
+      <div class="mb-4 flex items-center justify-between gap-2">
+        {#if cacheRoot}
+          <span class="text-[10px] font-mono text-muted-foreground truncate" title={cacheRoot}>{cacheRoot}</span>
+        {/if}
+        {#if cache.length}
+          <Button variant="destructive" size="sm" disabled={purging} onclick={purgeCache}>
+            {#if purging}<Loader2 class="animate-spin size-3" />{:else}<Trash2 class="size-3" />{/if}
+            Purge cache
+          </Button>
+        {/if}
+      </div>
+      {#if purgeMsg}
+        <p class="mb-3 text-xs text-muted-foreground">{purgeMsg}</p>
       {/if}
       {#if !cache.length}
         <Card class="text-center py-12"><CardContent>
@@ -811,11 +1004,103 @@
         {/each}
       </div>
     {/if}
+
+    <!-- ── ADDONS VIEW (#66) ───────────────────────────────────────── -->
+    {#if view === "addons"}
+      {#if addonError}
+        <div class="mb-3 rounded-md border border-destructive/40 bg-destructive/10
+                     px-3 py-2 text-sm text-destructive-foreground">{addonError}</div>
+      {/if}
+
+      <!-- Add via link -->
+      <form onsubmit={(e) => { e.preventDefault(); addAddon(addonUrl); }}
+            class="flex gap-2 mb-4">
+        <Input type="url" placeholder="https://addon.example/manifest.json"
+               bind:value={addonUrl} class="flex-1 text-sm font-mono" />
+        <Button type="submit" disabled={!!addonBusy || !addonUrl.trim()}>
+          {#if addonBusy === addonUrl.trim()}<Loader2 class="animate-spin size-4" />
+          {:else}<Plus class="size-4" />{/if}
+          Add
+        </Button>
+      </form>
+
+      {#if usingDefaults}
+        <p class="text-[11px] text-muted-foreground mb-3">
+          Using the built-in default addons. Adding one keeps the defaults and appends yours.
+        </p>
+      {/if}
+
+      <!-- Installed addons — one tile per addon -->
+      <h2 class="text-sm font-semibold mb-2">Installed</h2>
+      {#if addonsLoading && !installedAddons.length}
+        <Card><CardContent class="py-8 text-center">
+          <Loader2 class="animate-spin size-5 mx-auto text-muted-foreground" />
+        </CardContent></Card>
+      {:else}
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-6">
+          {#each installedAddons as a (a.url)}
+            <Card><CardContent class="p-3 flex items-center gap-3">
+              <div class="size-10 rounded-md bg-secondary overflow-hidden shrink-0 flex items-center justify-center">
+                {#if a.logo}<img src={a.logo} alt={a.name} class="w-full h-full object-cover" />
+                {:else}<Puzzle class="size-5 text-muted-foreground" />{/if}
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium truncate">{a.name}</div>
+                <div class="text-[10px] text-muted-foreground truncate">
+                  {a.resources.join(", ")}{#if a.version} · v{a.version}{/if}
+                </div>
+              </div>
+              <Button variant="ghost" size="sm" disabled={addonBusy === a.url}
+                      onclick={() => removeAddon(a.url)} aria-label="remove addon">
+                {#if addonBusy === a.url}<Loader2 class="animate-spin size-4" />
+                {:else}<Trash2 class="size-4 text-destructive" />{/if}
+              </Button>
+            </CardContent></Card>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- Discover: curated catalog to add from -->
+      {#if catalogAddons.length}
+        <h2 class="text-sm font-semibold mb-2">Discover</h2>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {#each catalogAddons as a (a.url)}
+            {@const isInstalled = installedAddons.some(x => x.url === a.url)}
+            <Card><CardContent class="p-3 flex items-center gap-3">
+              <div class="size-10 rounded-md bg-secondary overflow-hidden shrink-0 flex items-center justify-center">
+                {#if a.logo}<img src={a.logo} alt={a.name} class="w-full h-full object-cover" />
+                {:else}<Puzzle class="size-5 text-muted-foreground" />{/if}
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium truncate">{a.name}</div>
+                {#if a.description}
+                  <div class="text-[10px] text-muted-foreground line-clamp-2">{a.description}</div>
+                {/if}
+              </div>
+              {#if isInstalled}
+                <Badge variant="secondary" class="shrink-0"><Check class="size-3 mr-1" /> Added</Badge>
+              {:else}
+                <Button variant="secondary" size="sm" disabled={addonBusy === a.url}
+                        onclick={() => addAddon(a.url)}>
+                  {#if addonBusy === a.url}<Loader2 class="animate-spin size-4" />
+                  {:else}<Plus class="size-4" />{/if}
+                </Button>
+              {/if}
+            </CardContent></Card>
+          {/each}
+        </div>
+      {/if}
+    {/if}
   </main>
 
   <!-- Sticky bottom nav — quick switch between search / queue / library -->
   <nav class="fixed bottom-0 inset-x-0 border-t border-border bg-background/95 backdrop-blur
               flex items-stretch text-xs">
+    <button onclick={() => { view = "discover"; }}
+            class="flex-1 py-3 flex flex-col items-center gap-0.5
+                   {view === 'discover' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}">
+      <Home class="size-4" /><span>Home</span>
+    </button>
     <button onclick={() => { view = "search"; }}
             class="flex-1 py-3 flex flex-col items-center gap-0.5
                    {view === 'search' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}">
@@ -830,6 +1115,11 @@
             class="flex-1 py-3 flex flex-col items-center gap-0.5
                    {view === 'library' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}">
       <HardDrive class="size-4" /><span>Library</span>
+    </button>
+    <button onclick={() => { view = "addons"; }}
+            class="flex-1 py-3 flex flex-col items-center gap-0.5
+                   {view === 'addons' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}">
+      <Puzzle class="size-4" /><span>Addons</span>
     </button>
     <button onclick={() => { view = "settings"; }}
             class="flex-1 py-3 flex flex-col items-center gap-0.5

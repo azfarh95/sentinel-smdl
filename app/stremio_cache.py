@@ -51,9 +51,68 @@ logger = logging.getLogger(__name__)
 DOWNLOADS_DIR = Path(os.environ.get("DOWNLOADS_DIR", "/downloads"))
 STREMIO_ROOT = DOWNLOADS_DIR / "Stremio"
 
+# Runtime-overridable cache root (#68). The override is persisted to a tiny
+# file under the data dir (sync-readable, survives restarts) so the async
+# settings layer and this sync module agree without a circular import.
+# NOTE: the container can only write under mounted volumes (/downloads,
+# /data); set_root() validates writability before persisting.
+_DATA_DIR = Path(os.environ.get("DB_PATH", "/data/jobs.db")).parent
+_ROOT_OVERRIDE_FILE = _DATA_DIR / "stremio_cache_root.txt"
+
+
+def current_root() -> Path:
+    """The active cache root — the override if one is set + still valid,
+    otherwise the default STREMIO_ROOT."""
+    try:
+        if _ROOT_OVERRIDE_FILE.exists():
+            raw = _ROOT_OVERRIDE_FILE.read_text(encoding="utf-8").strip()
+            if raw:
+                return Path(raw)
+    except Exception as ex:
+        logger.warning("cache root override unreadable: %s", ex)
+    return STREMIO_ROOT
+
+
+def root_override() -> Optional[str]:
+    """The raw override string if set, else None (meaning 'using default')."""
+    try:
+        if _ROOT_OVERRIDE_FILE.exists():
+            raw = _ROOT_OVERRIDE_FILE.read_text(encoding="utf-8").strip()
+            return raw or None
+    except Exception:
+        pass
+    return None
+
+
+def set_root(path: Optional[str]) -> Path:
+    """Point the cache at a new directory. Pass a falsy value to clear the
+    override and revert to the default. Validates that the target is
+    creatable + writable (it must live under a mounted volume) — raises
+    ValueError otherwise. Existing cached files are NOT moved."""
+    if not path or not str(path).strip():
+        try:
+            _ROOT_OVERRIDE_FILE.unlink(missing_ok=True)
+        except Exception as ex:
+            logger.warning("could not clear cache root override: %s", ex)
+        return STREMIO_ROOT
+    target = Path(str(path).strip())
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        probe = target / ".smdl_write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except Exception as ex:
+        raise ValueError(
+            f"'{target}' is not writable inside the container — only paths "
+            f"under a mounted volume (e.g. /downloads/...) work. ({ex})"
+        )
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _ROOT_OVERRIDE_FILE.write_text(str(target), encoding="utf-8")
+    return target
+
 
 def _ensure_root() -> None:
-    STREMIO_ROOT.mkdir(parents=True, exist_ok=True)
+    current_root().mkdir(parents=True, exist_ok=True)
 
 
 def _folder_safe(imdb_id: str) -> str:
@@ -98,7 +157,7 @@ class CacheEntry:
         # The on-disk folder uses the colon-translated form. The dataclass's
         # `imdb_id` stays as the raw Stremio content_id (so lookups by
         # infohash still find it).
-        return STREMIO_ROOT / _folder_safe(self.imdb_id)
+        return current_root() / _folder_safe(self.imdb_id)
 
     @property
     def file_path(self) -> Path:
@@ -132,7 +191,7 @@ def list_entries() -> list[CacheEntry]:
     out: list[CacheEntry] = []
     # rglob is OK at our scale (dozens of entries); cap depth at 3 implicitly
     # by only looking for .meta.json files.
-    for meta in STREMIO_ROOT.rglob(".meta.json"):
+    for meta in current_root().rglob(".meta.json"):
         try:
             with open(meta, "r", encoding="utf-8") as f:
                 d = json.load(f)
@@ -195,9 +254,9 @@ def touch_last_played(infohash: str) -> None:
 
 # ── LRU eviction ───────────────────────────────────────────────────────────
 def _disk_usage_bytes() -> tuple[int, int, int]:
-    """(total, used, free) for the partition holding STREMIO_ROOT."""
+    """(total, used, free) for the partition holding the cache root."""
     _ensure_root()
-    u = shutil.disk_usage(str(STREMIO_ROOT))
+    u = shutil.disk_usage(str(current_root()))
     return u.total, u.used, u.free
 
 
@@ -255,3 +314,23 @@ def _evict_one(e: CacheEntry) -> None:
         logger.info("stremio cache: evicted %s (%s)", e.imdb_id, e.filename)
     except Exception as ex:
         logger.warning("failed to evict %s: %s", e.imdb_id, ex)
+
+
+def purge_all() -> dict:
+    """Delete every cached file + its .meta.json (#67 'Purge cache').
+    Returns {deleted, bytes_freed}. Best-effort — a single failed unlink
+    doesn't abort the rest."""
+    entries = list_entries()
+    bytes_freed = 0
+    deleted = 0
+    for e in entries:
+        try:
+            size = e.file_path.stat().st_size if e.file_path.exists() else (e.filesize or 0)
+        except Exception:
+            size = e.filesize or 0
+        _evict_one(e)
+        if not e.file_path.exists():
+            deleted += 1
+            bytes_freed += size
+    logger.info("stremio cache: purged %d entries (%d bytes)", deleted, bytes_freed)
+    return {"deleted": deleted, "bytes_freed": bytes_freed}

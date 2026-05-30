@@ -210,3 +210,105 @@ channels:
     handle: yonhapnewstv
     country: KR
     categories: [news]
+
+  # ── India (regional) ────────────────────────────────────────────
+  - id: ndtv-247
+    name: NDTV 24x7
+    handle: ndtv
+    country: IN
+    categories: [news]
+
+  - id: wion
+    name: WION
+    handle: WION
+    country: IN
+    categories: [news]
+
+  - id: india-today
+    name: India Today
+    handle: IndiaToday
+    country: IN
+    categories: [news]
+
+  - id: aaj-tak
+    name: Aaj Tak (Hindi)
+    handle: aajtak
+    country: IN
+    categories: [news]
+
+  - id: republic-world
+    name: Republic World
+    handle: republic
+    country: IN
+    categories: [news]
+
+  - id: times-now
+    name: Times Now
+    handle: TimesNow
+    country: IN
+    categories: [news]
+
+  # ── SE Asia (regional) ──────────────────────────────────────────
+  - id: thai-pbs
+    name: Thai PBS
+    handle: ThaiPBS
+    country: TH
+    categories: [news]
+
+  - id: ptv-ph
+    name: PTV Philippines
+    handle: ptvph
+    country: PH
+    categories: [news]
+
+  - id: rfa-burmese
+    name: RFA Burmese
+    handle: rfaburmese
+    country: MM
+    categories: [news]
+
+  # ── Spanish / LatAm ─────────────────────────────────────────────
+  - id: dw-espanol
+    name: DW Español
+    handle: dwespanol
+    country: DE
+    categories: [news]
+
+  - id: france24-es
+    name: France 24 Español
+    handle: France24_es
+    country: FR
+    categories: [news]
+
+  - id: euronews-es
+    name: Euronews (Español)
+    handle: euronewes
+    country: FR
+    categories: [news]
+
+  # ── Weather ─────────────────────────────────────────────────────
+  - id: fox-weather
+    name: Fox Weather
+    handle: FoxWeather
+    country: US
+    categories: [news, weather]
+
+  # ── Knowledge / Space ───────────────────────────────────────────
+  - id: nasa-tv
+    name: NASA (ISS Live)
+    handle: NASA
+    country: US
+    categories: [knowledge, space]
+
+  # ── Music (24/7) ────────────────────────────────────────────────
+  - id: lofi-girl
+    name: Lofi Girl — beats to relax/study
+    handle: LofiGirl
+    country: FR
+    categories: [music]
+
+  - id: chillhop
+    name: Chillhop Music
+    handle: ChillhopMusic
+    country: NL
+    categories: [music]

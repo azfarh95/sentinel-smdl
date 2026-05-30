@@ -140,6 +140,7 @@ SITEBUILDER_HTML = r"""<!doctype html>
 </head>
 <body>
 <div class="topbar">
+  <a class="btn sec" href="/app" style="text-decoration:none;flex:none">← Sentinel Media</a>
   <h1>⬡ Sentinel Sitebuilder</h1>
   <div class="grow"></div>
   <div id="status" class="status"></div>

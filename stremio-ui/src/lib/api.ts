@@ -56,6 +56,19 @@ export interface MetaItem {
   genres: string[];
 }
 
+export interface DiscoverItem extends MetaItem {
+  /** present on continue_watching rows — the raw resume content_id */
+  resume_id?: string;
+  progress_pct?: number;
+  position_seconds?: number | null;
+}
+
+export interface DiscoverData {
+  continue_watching: DiscoverItem[];
+  popular_movies: DiscoverItem[];
+  popular_series: DiscoverItem[];
+}
+
 export interface StreamEntry {
   title: string;
   infohash: string | null;
@@ -105,6 +118,16 @@ export interface CacheEntry {
   last_played: string;
 }
 
+export interface AddonSummary {
+  url: string;
+  name: string;
+  description: string | null;
+  types: string[];
+  resources: string[];
+  logo: string | null;
+  version: string | null;
+}
+
 export interface EpisodeMeta {
   /** Stremio addon content_id, e.g. "tt0903747:1:1" — feed into /streams */
   id: string;
@@ -125,6 +148,8 @@ export const api = {
     get<{ results: MetaItem[] }>(
       `/api/miniapp/stremio/search?q=${encodeURIComponent(q)}&type=${type}`,
     ),
+
+  discover: () => get<DiscoverData>("/api/miniapp/stremio/discover"),
 
   streams: (imdb_id: string, type: "movie" | "series" = "movie",
             quality: string = "1080p") =>
@@ -164,11 +189,32 @@ export const api = {
     get<{
       entries: CacheEntry[];
       disk: { total: number; used: number; free: number; pct_used: number };
+      root: string;
     }>("/api/miniapp/stremio/cache"),
+
+  /** Purge every cached file + its metadata (#67). */
+  purgeCache: () =>
+    post<{ ok: boolean; deleted: number; bytes_freed: number }>(
+      "/api/miniapp/stremio/cache/purge", {},
+    ),
 
   /** URL of a cached file (served range-aware by SMDL). */
   cachedFileUrl: (infohash: string) =>
     `/api/miniapp/stremio/file/${infohash}`,
+
+  // ── Addons (#66) ──────────────────────────────────────────────────────
+  addons: {
+    list: () =>
+      get<{ installed: AddonSummary[]; catalog: AddonSummary[];
+            using_defaults: boolean }>("/api/miniapp/stremio/addons"),
+    add: (url: string) =>
+      post<{ ok: boolean; error?: string; addon?: AddonSummary;
+             addons: string[] }>(
+        "/api/miniapp/stremio/addons/add", { url }),
+    remove: (url: string) =>
+      post<{ ok: boolean; addons: string[] }>(
+        "/api/miniapp/stremio/addons/remove", { url }),
+  },
 
   // ── P7 settings + resume position ────────────────────────────────────
   settings: {

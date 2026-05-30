@@ -50,6 +50,15 @@ DEFAULT_ADDONS: list[str] = [
     "https://opensubtitles-v3.strem.io/manifest.json",   # multilingual subs
 ]
 
+# Curated set shown in the Addons tab "discovery" picker — the defaults plus
+# a few well-known, no-auth public addons. Unreachable ones are dropped from
+# the picker at resolve time, so a dead entry degrades gracefully.
+CURATED_ADDONS: list[str] = [
+    *DEFAULT_ADDONS,
+    "https://anime-kitsu.strem.fun/manifest.json",       # anime catalog
+    "https://watchhub.strem.io/manifest.json",           # where-to-watch
+]
+
 
 # ── HTTP helpers ────────────────────────────────────────────────────────────
 _DEFAULT_TIMEOUT = 12  # seconds — Stremio addons usually respond in 1-3s
@@ -211,6 +220,79 @@ def get_meta(imdb_id: str, type_: str = "movie",
         if data and "meta" in data:
             return MetaItem.from_addon_json(data["meta"])
     return None
+
+
+def manifest_summary(manifest_url: str) -> Optional[dict]:
+    """Light resolved view of an addon manifest for the Addons tab tiles.
+    Returns None when the manifest can't be fetched/parsed."""
+    m = get_manifest(manifest_url)
+    if not m:
+        return None
+    res: list[str] = []
+    for r in (m.get("resources") or []):
+        name = r if isinstance(r, str) else (r.get("name") if isinstance(r, dict) else None)
+        if name:
+            res.append(name)
+    return {
+        "url": manifest_url,
+        "name": m.get("name") or manifest_url,
+        "description": m.get("description"),
+        "types": m.get("types") or [],
+        "resources": res,
+        "logo": m.get("logo"),
+        "version": m.get("version"),
+    }
+
+
+def get_catalog(type_: str = "movie", catalog_id: Optional[str] = None,
+                addons: Optional[Iterable[str]] = None,
+                limit: int = 20) -> list[MetaItem]:
+    """Browse a non-search catalog — powers the discovery home rows.
+
+    Defaults to Cinemeta's "top" catalog for the given type, which returns
+    the popular/trending titles. Mirrors search()'s addon discovery but hits
+    the plain `{root}/catalog/{type}/{catalog_id}.json` endpoint (no
+    search= segment). Returns from the first addon that yields metas."""
+    addons = list(addons) if addons else DEFAULT_ADDONS
+    results: list[MetaItem] = []
+    seen_ids: set[str] = set()
+    for manifest_url in addons:
+        manifest = get_manifest(manifest_url)
+        if not manifest:
+            continue
+        if type_ not in (manifest.get("types") or []):
+            continue
+        catalogs = manifest.get("catalogs") or []
+        cid = catalog_id
+        if cid is None:
+            # Prefer a catalog literally named "top"; else first of this type.
+            for c in catalogs:
+                if c.get("type") == type_ and c.get("id") == "top":
+                    cid = "top"
+                    break
+            if cid is None:
+                for c in catalogs:
+                    if c.get("type") == type_:
+                        cid = c.get("id")
+                        break
+        if not cid:
+            continue
+        root = _addon_root(manifest_url)
+        url = f"{root}/catalog/{type_}/{cid}.json"
+        data = _http_get_json(url)
+        if not data or "metas" not in data:
+            continue
+        for m in data["metas"]:
+            mid = m.get("id")
+            if not mid or mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            results.append(MetaItem.from_addon_json(m))
+            if len(results) >= limit:
+                return results
+        if results:
+            return results
+    return results
 
 
 # ── Series episode metadata ────────────────────────────────────────────────

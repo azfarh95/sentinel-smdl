@@ -27,7 +27,7 @@ from urllib.parse import parse_qsl
 
 import aiosqlite
 from fastapi import APIRouter, HTTPException, Request, Header
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 from . import config as _cfg
@@ -42,6 +42,34 @@ from .recorder_bridge import bridge
 
 CONFIG_FILE = os.environ.get("CONFIG_FILE", "/config/smdl.json")
 DOWNLOADS_DIR = os.environ.get("DOWNLOADS_DIR", "/downloads")
+
+# ── Branding (#74): owner-uploadable app logo ───────────────────────────────
+# Stored under /data (bind-mounted, survives container restarts). The file is
+# served by a PUBLIC GET so the WebView <img> can load it without an
+# X-Init-Data header (same reasoning as cached-file serving). Upload + delete
+# are owner-only. SVG is intentionally excluded (XSS via inline <script>).
+from pathlib import Path as _Path
+_BRANDING_DIR = _Path(DB_PATH).parent / "branding"
+_LOGO_STEM = "app_logo"
+_LOGO_MIME_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+}
+_LOGO_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
+
+
+def _logo_file() -> "_Path | None":
+    """The on-disk logo path if one exists, else None."""
+    try:
+        for ext in ("png", "jpg", "webp", "gif"):
+            p = _BRANDING_DIR / f"{_LOGO_STEM}.{ext}"
+            if p.exists():
+                return p
+    except Exception:
+        pass
+    return None
 
 # config.py exposes UPPER_SNAKE module constants, not a .get() function.
 # Some keys also rename between the JSON schema and the module constants.
@@ -484,12 +512,13 @@ async def stremio_search(request: Request, q: str = "", type: str = "movie",
     imdb_rating, genres). The Svelte UI renders these as poster tiles."""
     p = await _verify(request)
     _require_owner(p)
-    from . import stremio as _st
+    from . import stremio as _st, stremio_settings as _ss
     q = (q or "").strip()
     if not q:
         return {"results": []}
+    addons = _effective_addons(await _ss.get_all())
     try:
-        items = await asyncio.to_thread(_st.search, q, type, None, limit)
+        items = await asyncio.to_thread(_st.search, q, type, addons, limit)
     except Exception as e:
         logger.exception("stremio search failed")
         raise HTTPException(500, f"search failed: {e!s}")
@@ -501,6 +530,71 @@ async def stremio_search(request: Request, q: str = "", type: str = "movie",
     ]}
 
 
+def _meta_to_dict(m) -> dict:
+    return {"id": m.id, "type": m.type, "name": m.name, "year": m.year,
+            "poster": m.poster, "description": m.description,
+            "imdb_rating": m.imdb_rating, "genres": m.genres}
+
+
+@router.get("/api/miniapp/stremio/discover")
+async def stremio_discover(request: Request):
+    """Stremio-style discovery home. Returns three rows:
+      • continue_watching — in-progress titles from the resume table,
+        enriched with poster/name via Cinemeta meta (each carries a
+        progress_pct + resume_id for one-tap continue).
+      • popular_movies / popular_series — Cinemeta "top" catalog.
+    Each row is independent: a failure in one returns [] for that row
+    rather than failing the whole page."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio as _st
+    from . import stremio_settings as _ss
+
+    addons = _effective_addons(await _ss.get_all())
+
+    async def _popular(type_: str) -> list[dict]:
+        try:
+            items = await asyncio.to_thread(_st.get_catalog, type_, None, addons, 20)
+            return [_meta_to_dict(m) for m in items]
+        except Exception:
+            logger.exception("discover popular %s failed", type_)
+            return []
+
+    async def _continue() -> list[dict]:
+        try:
+            prog = await _ss.list_progress(limit=12)
+        except Exception:
+            logger.exception("discover continue-watching list failed")
+            return []
+
+        async def _enrich(row: dict) -> Optional[dict]:
+            rid = row["imdb_id"]
+            parent = rid.split(":")[0]
+            type_ = "series" if ":" in rid else "movie"
+            if not parent.startswith("tt"):
+                return None
+            try:
+                m = await asyncio.to_thread(_st.get_meta, parent, type_, None)
+            except Exception:
+                return None
+            if not m:
+                return None
+            d = _meta_to_dict(m)
+            d["resume_id"] = rid
+            d["progress_pct"] = row.get("progress_pct", 0.0)
+            d["position_seconds"] = row.get("position_seconds")
+            return d
+
+        enriched = await asyncio.gather(*[_enrich(r) for r in prog])
+        return [d for d in enriched if d]
+
+    cont, movies, series = await asyncio.gather(
+        _continue(), _popular("movie"), _popular("series"))
+    return {"continue_watching": cont,
+            "popular_movies": movies,
+            "popular_series": series}
+
+
 @router.get("/api/miniapp/stremio/episodes")
 async def stremio_episodes(request: Request, imdb_id: str = ""):
     """Series episode list. Used by the Detail view when type='series'.
@@ -510,12 +604,13 @@ async def stremio_episodes(request: Request, imdb_id: str = ""):
     /streams for resolution."""
     p = await _verify(request)
     _require_owner(p)
-    from . import stremio as _st
+    from . import stremio as _st, stremio_settings as _ss
     imdb_id = (imdb_id or "").strip()
     if not imdb_id.startswith("tt"):
         raise HTTPException(400, "imdb_id must start with 'tt'")
+    addons = _effective_addons(await _ss.get_all())
     try:
-        eps = await asyncio.to_thread(_st.get_series_episodes, imdb_id, None)
+        eps = await asyncio.to_thread(_st.get_series_episodes, imdb_id, addons)
     except Exception as e:
         logger.exception("stremio episodes failed")
         raise HTTPException(500, f"episodes failed: {e!s}")
@@ -535,12 +630,13 @@ async def stremio_streams(request: Request, imdb_id: str = "",
     re-rank by preferred quality + seeders, return the top N for the UI."""
     p = await _verify(request)
     _require_owner(p)
-    from . import stremio as _st
+    from . import stremio as _st, stremio_settings as _ss
     imdb_id = (imdb_id or "").strip()
     if not imdb_id.startswith("tt"):
         raise HTTPException(400, "imdb_id must start with 'tt'")
+    addons = _effective_addons(await _ss.get_all())
     try:
-        raw = await asyncio.to_thread(_st.get_streams, imdb_id, type, None)
+        raw = await asyncio.to_thread(_st.get_streams, imdb_id, type, addons)
     except Exception as e:
         logger.exception("stremio streams failed")
         raise HTTPException(500, f"streams failed: {e!s}")
@@ -598,17 +694,24 @@ async def stremio_grab(body: _StremioGrabBody, request: Request):
 
 # ── Theater P7 — Settings + resume position routes ─────────────────────────
 
+async def _settings_with_cache(_ss, _sc) -> dict:
+    s = await _ss.get_all()
+    return {**s, "cache_root": str(_sc.current_root()),
+            "cache_path": _sc.root_override()}
+
+
 @router.get("/api/miniapp/stremio/settings")
 async def stremio_settings_get(request: Request):
     p = await _verify(request)
     _require_owner(p)
-    from . import stremio_settings as _ss
-    return {"settings": await _ss.get_all()}
+    from . import stremio_settings as _ss, stremio_cache as _sc
+    return {"settings": await _settings_with_cache(_ss, _sc)}
 
 
 class _StremioSettingsPatch(BaseModel):
     default_quality: Optional[str] = None
     cache_max_gb: Optional[float] = None
+    cache_path: Optional[str] = None
     addons: Optional[list[str]] = None
     auto_grab_top_seeded: Optional[bool] = None
 
@@ -617,9 +720,93 @@ class _StremioSettingsPatch(BaseModel):
 async def stremio_settings_set(body: _StremioSettingsPatch, request: Request):
     p = await _verify(request)
     _require_owner(p)
-    from . import stremio_settings as _ss
-    patch = {k: v for k, v in body.model_dump().items() if v is not None}
-    return {"settings": await _ss.update(patch)}
+    from . import stremio_settings as _ss, stremio_cache as _sc
+    # exclude_unset keeps explicitly-sent nulls (e.g. clearing the hard cap)
+    # while dropping keys the client didn't touch.
+    patch = body.model_dump(exclude_unset=True)
+    # cache_path is not a stored setting — it drives the cache root override.
+    if "cache_path" in patch:
+        new_path = patch.pop("cache_path")
+        try:
+            await asyncio.to_thread(_sc.set_root, new_path)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+    if patch:
+        await _ss.update(patch)
+    return {"settings": await _settings_with_cache(_ss, _sc)}
+
+
+# ── Theater — Addons tab (#66) ──────────────────────────────────────────────
+def _effective_addons(settings: dict):
+    """The addon set actually used for queries: the owner's configured list,
+    or None (→ stremio.DEFAULT_ADDONS) when they haven't customised it."""
+    return (settings.get("addons") or None)
+
+
+@router.get("/api/miniapp/stremio/addons")
+async def stremio_addons_list(request: Request):
+    """Installed addons (resolved to name/logo/resources) + a curated
+    discovery catalog to add from."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio as _st, stremio_settings as _ss
+    s = await _ss.get_all()
+    installed_urls = s.get("addons") or list(_st.DEFAULT_ADDONS)
+    using_defaults = not s.get("addons")
+    resolved = await asyncio.gather(
+        *[asyncio.to_thread(_st.manifest_summary, u) for u in installed_urls])
+    installed = [x for x in resolved if x]
+    installed_set = {x["url"] for x in installed}
+    cat_resolved = await asyncio.gather(
+        *[asyncio.to_thread(_st.manifest_summary, u) for u in _st.CURATED_ADDONS])
+    catalog = [{**x, "installed": x["url"] in installed_set}
+               for x in cat_resolved if x]
+    return {"installed": installed, "catalog": catalog,
+            "using_defaults": using_defaults}
+
+
+class _AddonBody(BaseModel):
+    url: str
+
+
+@router.post("/api/miniapp/stremio/addons/add")
+async def stremio_addons_add(body: _AddonBody, request: Request):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio as _st, stremio_settings as _ss
+    url = (body.url or "").strip()
+    if not url:
+        return JSONResponse({"ok": False, "error": "empty url"}, status_code=400)
+    if not url.endswith("manifest.json"):
+        url = url.rstrip("/") + "/manifest.json"
+    summ = await asyncio.to_thread(_st.manifest_summary, url)
+    if not summ:
+        return JSONResponse(
+            {"ok": False, "error": "no valid Stremio manifest at that URL"},
+            status_code=400)
+    s = await _ss.get_all()
+    current = s.get("addons") or []
+    if not current:
+        # Seed with the defaults so adding a custom addon doesn't silently
+        # drop Cinemeta (metadata) and break search.
+        current = list(_st.DEFAULT_ADDONS)
+    if url not in current:
+        current.append(url)
+    s2 = await _ss.update({"addons": current})
+    return {"ok": True, "addon": summ, "addons": s2.get("addons")}
+
+
+@router.post("/api/miniapp/stremio/addons/remove")
+async def stremio_addons_remove(body: _AddonBody, request: Request):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio as _st, stremio_settings as _ss
+    url = (body.url or "").strip()
+    s = await _ss.get_all()
+    current = s.get("addons") or list(_st.DEFAULT_ADDONS)
+    current = [u for u in current if u != url]
+    s2 = await _ss.update({"addons": current})
+    return {"ok": True, "addons": s2.get("addons")}
 
 
 @router.get("/api/miniapp/stremio/rd-token")
@@ -916,7 +1103,105 @@ async def stremio_cache_list(request: Request):
         ],
         "disk": {"total": total, "used": used, "free": free,
                   "pct_used": (used / total * 100) if total else 0},
+        "root": str(_cache.current_root()),
     }
+
+
+@router.post("/api/miniapp/stremio/cache/purge")
+async def stremio_cache_purge(request: Request):
+    """Delete every cached file (#67). Returns count + bytes freed."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import stremio_cache as _cache
+    result = await asyncio.to_thread(_cache.purge_all)
+    return {"ok": True, **result}
+
+
+# ── #74: editable app logo (branding) ───────────────────────────────────────
+# GET is PUBLIC (no auth) so the WebView <img> tag can load it directly.
+# POST/DELETE are owner-only.
+
+@router.get("/api/miniapp/branding/logo")
+async def branding_logo_get():
+    """Serve the uploaded app logo, or 404 if none set. Public — the page
+    <img> loads this without an X-Init-Data header."""
+    p = _logo_file()
+    if p is None:
+        raise HTTPException(status_code=404, detail="no logo")
+    ext = p.suffix.lstrip(".").lower()
+    mime = {"png": "image/png", "jpg": "image/jpeg",
+            "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/png")
+    try:
+        data = p.read_bytes()
+    except Exception:
+        raise HTTPException(status_code=404, detail="no logo")
+    return Response(content=data, media_type=mime,
+                    headers={"Cache-Control": "no-cache"})
+
+
+@router.get("/api/miniapp/branding/status")
+async def branding_status(request: Request):
+    """Whether a logo is set (drives the Settings tile preview)."""
+    await _verify(request)
+    return {"has_logo": _logo_file() is not None}
+
+
+@router.post("/api/miniapp/branding/logo")
+async def branding_logo_set(request: Request):
+    """Owner-only. Body: {data_url: "data:image/png;base64,...."}.
+    Validates mime (png/jpg/webp/gif — no svg) + 2 MB cap. Replaces any
+    existing logo (only one is kept)."""
+    p = await _verify(request)
+    _require_owner(p)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON")
+    data_url = (body or {}).get("data_url") or ""
+    if not isinstance(data_url, str) or not data_url.startswith("data:"):
+        raise HTTPException(status_code=400, detail="expected a data: URL")
+    try:
+        header, b64 = data_url.split(",", 1)
+        mime = header[5:].split(";", 1)[0].strip().lower()
+    except Exception:
+        raise HTTPException(status_code=400, detail="malformed data URL")
+    ext = _LOGO_MIME_EXT.get(mime)
+    if not ext:
+        raise HTTPException(status_code=400,
+                            detail="unsupported image type (png/jpg/webp/gif only)")
+    import base64 as _b64
+    try:
+        raw = _b64.b64decode(b64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad base64 payload")
+    if len(raw) > _LOGO_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="logo exceeds 2 MB")
+    try:
+        _BRANDING_DIR.mkdir(parents=True, exist_ok=True)
+        # Remove any prior logo (different extension) before writing the new one.
+        for old_ext in ("png", "jpg", "webp", "gif"):
+            (_BRANDING_DIR / f"{_LOGO_STEM}.{old_ext}").unlink(missing_ok=True)
+        (_BRANDING_DIR / f"{_LOGO_STEM}.{ext}").write_bytes(raw)
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"could not save logo: {ex}")
+    return {"ok": True, "has_logo": True}
+
+
+@router.delete("/api/miniapp/branding/logo")
+async def branding_logo_delete(request: Request):
+    """Owner-only. Remove the uploaded logo (revert to text wordmark)."""
+    p = await _verify(request)
+    _require_owner(p)
+    removed = False
+    try:
+        for ext in ("png", "jpg", "webp", "gif"):
+            fp = _BRANDING_DIR / f"{_LOGO_STEM}.{ext}"
+            if fp.exists():
+                fp.unlink(missing_ok=True)
+                removed = True
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"could not remove logo: {ex}")
+    return {"ok": True, "removed": removed, "has_logo": False}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -2414,6 +2699,10 @@ HTML = """<!doctype html>
 <html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>SM-DL</title>
+<!-- #77b favicon reuses the owner-uploaded app logo (#74). 404s to the browser
+     default when no logo is set; refreshed live by applyBrandLogo(). -->
+<link rel="icon" id="favicon" href="/api/miniapp/branding/logo">
+<link rel="apple-touch-icon" id="favicon-apple" href="/api/miniapp/branding/logo">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script>
 /* Apply the saved appearance before first paint (no flash-of-default-theme).
@@ -2495,8 +2784,14 @@ body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
 .home-tile:hover { border-color: var(--accent-line); box-shadow: var(--glow-strong); }
 .home-tile:active { transform: scale(0.98); }
 .home-tile .ico { font-size: 30px; line-height: 1; margin-bottom: 8px; position: relative; }
+/* #72 futuristic line-icons: neon accent stroke + soft glow. */
+.home-tile .ico svg { width: 30px; height: 30px; display: block; color: var(--accent);
+  filter: drop-shadow(0 0 4px var(--accent-line)); transition: filter .15s, transform .15s; }
+.home-tile:hover .ico svg { filter: drop-shadow(0 0 7px var(--accent)); transform: translateY(-1px); }
 .home-tile .name { font-size: 14px; font-weight: 600; margin-bottom: 2px; position: relative; }
 .home-tile .desc { font-size: 11px; color: var(--muted); line-height: 1.3; position: relative; }
+.sidebar-item .icon svg { width: 21px; height: 21px; display: block; }
+body.sidebar-collapsed .sidebar-item .icon svg { width: 17px; height: 17px; }
 .sidebar-item.admin-only { display: none; }
 .sidebar-item.admin-only.show { display: flex; }
 .home-tile.admin-only { display: none; }
@@ -2510,8 +2805,14 @@ body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
   animation: tile-wiggle 0.45s ease-in-out infinite alternate; }
 .home-tiles.editing .home-tile::after { content: '⠿'; position: absolute;
   top: 6px; right: 9px; color: var(--muted); font-size: 15px; line-height: 1; }
-.home-tile.dragging { opacity: 0.65; transform: scale(1.05); z-index: 5;
-  cursor: grabbing; box-shadow: 0 8px 22px rgba(0,0,0,0.45); animation: none; }
+/* #76 free hold-and-carry: the grabbed tile lifts into a fixed-position
+   ghost that tracks the finger, while the original stays in the grid as an
+   invisible placeholder so the remaining tiles reflow around the gap. */
+.home-tile.dragging { visibility: hidden; animation: none; }
+.home-tiles.editing .home-tile.dragging::after { display: none; }
+.tile-ghost { box-shadow: 0 12px 30px rgba(0,0,0,0.5); cursor: grabbing;
+  border-color: var(--accent-line); opacity: 0.97; will-change: transform;
+  animation: none; transition: none; pointer-events: none; }
 @keyframes tile-wiggle { from { transform: rotate(-0.7deg); } to { transform: rotate(0.7deg); } }
 .page { display: none; padding: max(12px, calc(env(safe-area-inset-top, 0px) + 4px)) 12px 12px; }
 .page.active { display: block; }
@@ -2717,6 +3018,10 @@ button.warn { background: #ff9500; color: #fff; }
 .scraper-row:first-child { border-top: 0; }
 .scraper-row .uname { font-weight: 600; font-size: 14px; flex: 1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scraper-row a.uname { color: var(--fg); text-decoration: none; cursor: pointer;
+    -webkit-tap-highlight-color: rgba(41,151,255,0.2); }
+.scraper-row a.uname:hover { color: var(--button); }
+.scraper-row a.uname:active { color: var(--accent); }
 .scraper-row .chips { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .scraper-row .chip { background: var(--separator); color: var(--muted); border-radius: 10px;
     padding: 1px 7px; font-size: 10px; font-weight: 600; letter-spacing: 0.2px; line-height: 1.5;
@@ -2762,6 +3067,7 @@ button.warn { background: #ff9500; color: #fff; }
 /* Page header — h1 + actions on the right (e.g. Downloads clear button) */
 .page-header { display: flex; align-items: center; gap: 10px; margin: 6px 0 14px; }
 .page-header h1 { margin: 0; flex: 1; }
+.page-header #brand-logo { max-height: 40px; max-width: 60%; flex: 1; object-fit: contain; object-position: left center; }
 /* Simplified download row — single clickable line: @user · description */
 .dl-row { padding: 10px 12px; border-radius: 8px; background: var(--section);
           margin-bottom: 6px; }
@@ -2842,6 +3148,17 @@ button.warn { background: #ff9500; color: #fff; }
                                           object-fit: contain; }
 .preview-body audio { width: 90%; max-width: 500px; }
 .preview-body .non-media { color: var(--muted); text-align: center; padding: 40px 20px; }
+/* #77 gallery nav: prev/next chevrons + position counter. */
+.preview-count { color: var(--muted); font-size: 12px; flex: none; font-variant-numeric: tabular-nums; }
+.preview-nav { display: none; position: absolute; top: 50%; transform: translateY(-50%);
+               width: 46px; height: 70px; align-items: center; justify-content: center;
+               background: rgba(0,0,0,0.34); color: #fff; border: none; border-radius: 12px;
+               font-size: 36px; line-height: 1; cursor: pointer; z-index: 3;
+               -webkit-tap-highlight-color: transparent; user-select: none; }
+.preview-nav:active { background: rgba(0,0,0,0.6); }
+.preview-modal.gallery #preview-prev, .preview-modal.gallery #preview-next { display: flex; }
+#preview-prev { left: 8px; }
+#preview-next { right: 8px; }
 </style>
 </head><body>
 
@@ -2850,42 +3167,43 @@ button.warn { background: #ff9500; color: #fff; }
 
   <div class="page active" id=page-home>
     <div class=page-header>
-      <h1>Sentinel Media</h1>
+      <img id=brand-logo alt="" style="display:none" />
+      <h1 id=brand-text>Sentinel Media</h1>
       <button class="small sec" id=tiles-arrange-btn onclick="toggleTileEdit()" title="Drag tiles to reorder · saved on this device">✥ Arrange</button>
     </div>
     <div class=home-tiles id=home-tiles>
       <div class=home-tile data-tile=downloads onclick="goto('downloads')">
-        <div class=ico>📥</div>
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div>
         <div class=name>Downloads</div>
         <div class=desc>Recent yt-dlp / gallery-dl jobs · file delivery links</div>
       </div>
       <div class=home-tile data-tile=streams onclick="goto('watchlist')">
-        <div class=ico>👁</div>
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8.5a5 5 0 0 0 0 7"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M5 5.5a9 9 0 0 0 0 13"/><path d="M19 5.5a9 9 0 0 1 0 13"/></svg></div>
         <div class=name>Streams</div>
         <div class=desc>Auto-record streams from twitch · youtube · kick</div>
       </div>
       <div class=home-tile data-tile=theater onclick="location.href='/app/stremio'">
-        <div class=ico>🎬</div>
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m10 9 5 3-5 3z"/></svg></div>
         <div class=name>Theater</div>
         <div class=desc>Movies + series · stream &amp; cache to G:\</div>
       </div>
       <div class=home-tile data-tile=iptv onclick="location.href='/iptv'">
-        <div class=ico>📺</div>
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/><path d="M6 12a4 4 0 0 1 4-4"/></svg></div>
         <div class=name>IPTV</div>
         <div class=desc>11k+ public channels · EPG · scheduled DVR</div>
       </div>
       <div class="home-tile admin-only" data-tile=files id=tile-files onclick="goto('files')">
-        <div class=ico>📁</div>
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
         <div class=name>Files</div>
         <div class=desc>Browse + fetch from /downloads (SFTP-style)</div>
       </div>
       <div class="home-tile admin-only" data-tile=scraper id=tile-scraper onclick="goto('scraper')">
-        <div class=ico>🤖</div>
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></div>
         <div class=name>Scraper</div>
         <div class=desc>Profile monitoring · age-gated platforms</div>
       </div>
       <div class="home-tile admin-only" data-tile=server id=tile-admin onclick="goto('admin')">
-        <div class=ico>🛡</div>
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
         <div class=name>Server</div>
         <div class=desc>Server settings · users · site blocklist · kill switch</div>
       </div>
@@ -2959,10 +3277,13 @@ button.warn { background: #ff9500; color: #fff; }
 <div class=preview-modal id=preview-modal>
   <div class=preview-head>
     <div class=name id=preview-name></div>
+    <span class=preview-count id=preview-count></span>
     <button onclick="downloadCurrentPreview()">⬇ Download</button>
     <button onclick="closePreview()">✕</button>
   </div>
   <div class=preview-body id=preview-body></div>
+  <button class=preview-nav id=preview-prev onclick="galleryNav(-1)" aria-label="Previous">‹</button>
+  <button class=preview-nav id=preview-next onclick="galleryNav(1)" aria-label="Next">›</button>
 </div>
 
 <div class=sidebar>
@@ -2970,33 +3291,33 @@ button.warn { background: #ff9500; color: #fff; }
     <span id=nav-toggle-icon>«</span>
   </div>
   <div class="sidebar-item active" id=nav-home onclick="goto('home')">
-    <div class=icon>🏠</div><div class=label>Home</div>
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9"/><path d="M9 21v-6h6v6"/></svg></div><div class=label>Home</div>
   </div>
   <div class=sidebar-item id=nav-downloads onclick="goto('downloads')">
-    <div class=icon>📥</div><div class=label>DL</div>
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div><div class=label>DL</div>
   </div>
   <div class=sidebar-item id=nav-watchlist onclick="goto('watchlist')">
-    <div class=icon>👁</div><div class=label>Streams</div>
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8.5a5 5 0 0 0 0 7"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M5 5.5a9 9 0 0 0 0 13"/><path d="M19 5.5a9 9 0 0 1 0 13"/></svg></div><div class=label>Streams</div>
   </div>
   <div class=sidebar-item id=nav-live onclick="location.href='/iptv'">
-    <div class=icon>📺</div><div class=label>IPTV</div>
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/><path d="M6 12a4 4 0 0 1 4-4"/></svg></div><div class=label>IPTV</div>
   </div>
   <div class="sidebar-item admin-only" id=nav-files onclick="goto('files')">
-    <div class=icon>📁</div><div class=label>Files</div>
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class=label>Files</div>
   </div>
   <div class="sidebar-item admin-only" id=tab-scraper onclick="goto('scraper')">
-    <div class=icon>🤖</div><div class=label>Scrape</div>
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></div><div class=label>Scrape</div>
   </div>
   <div class="sidebar-item admin-only" id=tab-admin onclick="goto('admin')">
-    <div class=icon>🛡</div><div class=label>Server</div>
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div><div class=label>Server</div>
   </div>
   <div class=sidebar-spacer></div>
   <div class=sidebar-divider></div>
   <div class=sidebar-item id=nav-account onclick="location.href='/account'">
-    <div class=icon>👤</div><div class=label>Account</div>
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0 1 16 0"/></svg></div><div class=label>Account</div>
   </div>
   <div class=sidebar-item id=nav-settings onclick="goto('settings')">
-    <div class=icon>⚙️</div><div class=label>Settings</div>
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h8M16 6h4"/><path d="M4 12h4M12 12h8"/><path d="M4 18h8M16 18h4"/><circle cx="14" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="14" cy="18" r="2"/></svg></div><div class=label>Settings</div>
   </div>
 </div>
 
@@ -3084,7 +3405,9 @@ try {
 // and new tiles append at the end rather than breaking the saved layout.
 const TILE_ORDER_KEY = 'smdl_tile_order';
 let _tileEdit = false;
-let _tileDrag = null;
+let _tileDrag = null;    // original tile — hidden placeholder during a carry
+let _tileGhost = null;   // fixed-position clone that follows the pointer
+let _grabDX = 0, _grabDY = 0;
 
 function _tileContainer() { return document.getElementById('home-tiles'); }
 
@@ -3132,12 +3455,32 @@ function initTileReorder() {
     const tile = e.target.closest('.home-tile');
     if (!tile) return;
     _tileDrag = tile;
-    tile.classList.add('dragging');
+    const r = tile.getBoundingClientRect();
+    _grabDX = e.clientX - r.left;
+    _grabDY = e.clientY - r.top;
+    // Build the floating ghost that the finger carries around. It lives on
+    // <body> (escaping the grid) and is pointer-events:none so elementFromPoint
+    // sees the tiles underneath it.
+    const g = tile.cloneNode(true);
+    g.classList.add('tile-ghost');
+    g.style.position = 'fixed';
+    g.style.left = '0'; g.style.top = '0';
+    g.style.width = r.width + 'px'; g.style.height = r.height + 'px';
+    g.style.margin = '0'; g.style.zIndex = '60';
+    g.style.transform = 'translate(' + r.left + 'px,' + r.top + 'px) scale(1.05)';
+    document.body.appendChild(g);
+    _tileGhost = g;
+    tile.classList.add('dragging');   // becomes the invisible placeholder
     try { tile.setPointerCapture(e.pointerId); } catch {}
+    e.preventDefault();
   });
   c.addEventListener('pointermove', e => {
     if (!_tileDrag) return;
     e.preventDefault();
+    if (_tileGhost) {
+      _tileGhost.style.transform =
+        'translate(' + (e.clientX - _grabDX) + 'px,' + (e.clientY - _grabDY) + 'px) scale(1.05)';
+    }
     const over = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.home-tile');
     if (!over || over === _tileDrag || over.parentElement !== c) return;
     const tiles = [...c.querySelectorAll('.home-tile')];
@@ -3147,6 +3490,7 @@ function initTileReorder() {
   const endDrag = () => {
     if (!_tileDrag) return;
     _tileDrag.classList.remove('dragging');
+    if (_tileGhost) { _tileGhost.remove(); _tileGhost = null; }
     _tileDrag = null;
     saveTileOrder();
   };
@@ -3358,9 +3702,18 @@ async function loadFiles(path) {
       return {ico:'📄', isImg:false, thumbable:false};
     };
 
-    const onClickFile = (f) => f.share_url
-      ? `openPreview('${encodeURIComponent(f.share_url)}', '${encodeURIComponent(f.name)}')`
-      : `showErr('No share URL — SHARE_SECRET/PUBLIC_BASE_URL not configured')`;
+    // #77 — gallery list (images + videos, in render order) so the preview
+    // lightbox can swipe / arrow between them. thumbable == image|video.
+    _galleryItems = j.files
+      .filter(f => f.share_url && kindOf(f.name).thumbable)
+      .map(f => ({ url: f.share_url, name: f.name }));
+
+    const onClickFile = (f) => {
+      if (!f.share_url) return `showErr('No share URL — SHARE_SECRET/PUBLIC_BASE_URL not configured')`;
+      const gi = _galleryItems.findIndex(g => g.url === f.share_url);
+      if (gi >= 0) return `openPreviewAt(${gi})`;
+      return `openPreview('${encodeURIComponent(f.share_url)}', '${encodeURIComponent(f.name)}')`;
+    };
 
     if (j.folders.length === 0 && j.files.length === 0) {
       listRoot.innerHTML = '<div class=empty>Folder is empty.</div>';
@@ -3643,22 +3996,27 @@ async function saveEdit(i, encodedOldUrl) {
 // download button" message + still gives access via the modal header.
 let _previewUrl = '';
 let _previewName = '';
+let _galleryItems = [];   // #77 — [{url,name}] previewable media in the folder
+let _galleryIndex = -1;   // index into _galleryItems, or -1 for a standalone open
 
-function openPreview(encodedUrl, encodedName) {
-  _previewUrl  = decodeURIComponent(encodedUrl);
-  _previewName = decodeURIComponent(encodedName);
-  const ext = (_previewName.split('.').pop() || '').toLowerCase();
+// Render the media for one item into the open modal. Shared by the standalone
+// openPreview() and the gallery openPreviewAt().
+function _renderPreview(url, name) {
+  _previewUrl = url; _previewName = name;
+  const ext = (name.split('.').pop() || '').toLowerCase();
   const body = document.getElementById('preview-body');
   const nameEl = document.getElementById('preview-name');
-  nameEl.textContent = _previewName;
+  nameEl.textContent = name;
+  // Stop any media still playing from the previous gallery item.
+  body.querySelectorAll('video, audio').forEach(el => { try { el.pause(); el.src = ''; } catch{} });
 
   let inner;
   if (['mp4','mov','mkv','webm','m4v'].includes(ext)) {
-    inner = `<video src="${_previewUrl}" controls autoplay playsinline></video>`;
+    inner = `<video src="${url}" controls autoplay playsinline></video>`;
   } else if (['jpg','jpeg','png','gif','webp','heic','avif','bmp'].includes(ext)) {
-    inner = `<img src="${_previewUrl}" alt="${esc(_previewName)}">`;
+    inner = `<img src="${url}" alt="${esc(name)}">`;
   } else if (['mp3','m4a','aac','flac','wav','opus','ogg'].includes(ext)) {
-    inner = `<audio src="${_previewUrl}" controls autoplay></audio>`;
+    inner = `<audio src="${url}" controls autoplay></audio>`;
   } else {
     inner = `<div class=non-media>
       No inline preview for <code>.${esc(ext || 'file')}</code> files.<br>
@@ -3666,7 +4024,40 @@ function openPreview(encodedUrl, encodedName) {
     </div>`;
   }
   body.innerHTML = inner;
+}
+
+function _updateGalleryNav() {
+  const modal = document.getElementById('preview-modal');
+  const count = document.getElementById('preview-count');
+  const show = _galleryIndex >= 0 && _galleryItems.length > 1;
+  if (modal) modal.classList.toggle('gallery', show);
+  if (count) count.textContent = show ? (_galleryIndex + 1) + ' / ' + _galleryItems.length : '';
+}
+
+// Standalone open (audio / docs / non-gallery files).
+function openPreview(encodedUrl, encodedName) {
+  _galleryIndex = -1;
+  _renderPreview(decodeURIComponent(encodedUrl), decodeURIComponent(encodedName));
+  _updateGalleryNav();
   document.getElementById('preview-modal').classList.add('open');
+}
+
+// Open the gallery at a given index (image / video files).
+function openPreviewAt(idx) {
+  if (idx < 0 || idx >= _galleryItems.length) return;
+  _galleryIndex = idx;
+  const it = _galleryItems[idx];
+  _renderPreview(it.url, it.name);
+  _updateGalleryNav();
+  document.getElementById('preview-modal').classList.add('open');
+}
+
+// Step through the gallery (wraps at both ends). delta is -1 / +1.
+function galleryNav(delta) {
+  if (_galleryIndex < 0 || _galleryItems.length < 2) return;
+  let n = (_galleryIndex + delta) % _galleryItems.length;
+  if (n < 0) n += _galleryItems.length;
+  openPreviewAt(n);
 }
 
 function closePreview() {
@@ -3674,9 +4065,40 @@ function closePreview() {
   // Stop any playing media before the modal closes
   body.querySelectorAll('video, audio').forEach(el => { try { el.pause(); el.src = ''; } catch{} });
   body.innerHTML = '';
-  document.getElementById('preview-modal').classList.remove('open');
+  const modal = document.getElementById('preview-modal');
+  modal.classList.remove('open');
+  modal.classList.remove('gallery');
   _previewUrl = '';
   _previewName = '';
+  _galleryIndex = -1;
+}
+
+// #77 — arrow keys + horizontal swipe move through the gallery; Esc closes.
+function initPreviewGestures() {
+  document.addEventListener('keydown', e => {
+    const modal = document.getElementById('preview-modal');
+    if (!modal || !modal.classList.contains('open')) return;
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); galleryNav(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); galleryNav(1); }
+    else if (e.key === 'Escape') { closePreview(); }
+  });
+  const body = document.getElementById('preview-body');
+  if (!body) return;
+  let x0 = null, y0 = null;
+  body.addEventListener('touchstart', e => {
+    if (_galleryIndex < 0) { x0 = null; return; }
+    const t = e.changedTouches[0]; x0 = t.clientX; y0 = t.clientY;
+  }, { passive: true });
+  body.addEventListener('touchend', e => {
+    if (x0 === null) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - x0, dy = t.clientY - y0;
+    x0 = null;
+    // Only count clearly-horizontal swipes so we don't fight scroll/zoom.
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      galleryNav(dx < 0 ? 1 : -1);
+    }
+  }, { passive: true });
 }
 
 function downloadCurrentPreview() {
@@ -3912,6 +4334,22 @@ async function loadSettings() {
 
     const oneDriveTile = odHtml ? `<div class=set-tile>${odHtml.replace(/<div class=card>([\s\S]*?)<\/div>$/, '<div class=head>📁 OneDrive</div>$1')}</div>` : '';
 
+    // Branding tile (#74) — owner-only app-logo upload.
+    const brandingTile = isOwner ? `
+      <div class=set-tile id=branding-tile>
+        <div class=head>✦ Branding</div>
+        <div class=meta>Replace the “Sentinel Media” wordmark on the home header with your own logo. PNG / JPG / WebP / GIF · max 2&nbsp;MB.</div>
+        <div id=brand-preview style="margin-top:10px;min-height:46px;display:flex;align-items:center">
+          <span class=meta>Loading…</span>
+        </div>
+        <input type=file id=brand-file accept="image/png,image/jpeg,image/webp,image/gif" style="display:none" onchange="uploadLogo(this)">
+        <div class=btn-row style="margin-top:10px">
+          <button class=sec onclick="document.getElementById('brand-file').click()">⬆ Upload logo</button>
+          <button class="small danger" id=brand-remove onclick="removeLogo()" style="display:none">🗑 Remove</button>
+        </div>
+        <div id=brand-msg class=meta style="margin-top:6px"></div>
+      </div>` : '';
+
     root.innerHTML = `
       <div class=set-tile class=full>
         <div class=head>⚙ General</div>
@@ -3929,12 +4367,92 @@ async function loadSettings() {
           <div class=head>🎨 Appearance</div>
           ${appearanceInner()}
         </div>
+        ${brandingTile}
         ${oneDriveTile}
         ${downloadsTile}
       </div>
     `;
     updatePathTemplatePreview();
+    refreshBrandPreview();
   } catch(e) { showErr('Load failed: '+e); }
+}
+
+// ── #74: app-logo branding ───────────────────────────────────────────────────
+const BRAND_LOGO_URL = '/api/miniapp/branding/logo';
+
+// Apply the logo to the home header (called on boot + after upload/remove).
+function applyBrandLogo() {
+  const img = document.getElementById('brand-logo');
+  const txt = document.getElementById('brand-text');
+  if (!img || !txt) return;
+  const bust = BRAND_LOGO_URL + '?t=' + Date.now();
+  const probe = new Image();
+  probe.onload = () => {
+    img.src = probe.src; img.style.display = 'block'; txt.style.display = 'none';
+    // Point the favicon + apple-touch-icon at the (now-confirmed) logo.
+    ['favicon', 'favicon-apple'].forEach(id => {
+      const link = document.getElementById(id);
+      if (link) link.href = bust;
+    });
+  };
+  probe.onerror = () => { img.style.display = 'none'; txt.style.display = ''; };
+  probe.src = bust;
+}
+
+function refreshBrandPreview() {
+  const box = document.getElementById('brand-preview');
+  const rm  = document.getElementById('brand-remove');
+  if (!box) return;
+  const probe = new Image();
+  probe.onload = () => {
+    box.innerHTML = '<img src="' + probe.src + '" style="max-height:46px;max-width:100%;object-fit:contain">';
+    if (rm) rm.style.display = '';
+  };
+  probe.onerror = () => {
+    box.innerHTML = '<span class=meta>No logo set — showing the “Sentinel Media” wordmark.</span>';
+    if (rm) rm.style.display = 'none';
+  };
+  probe.src = BRAND_LOGO_URL + '?t=' + Date.now();
+}
+
+async function uploadLogo(input) {
+  const file = input.files && input.files[0];
+  input.value = '';
+  const msg = document.getElementById('brand-msg');
+  if (!file) return;
+  const okTypes = ['image/png','image/jpeg','image/webp','image/gif'];
+  if (okTypes.indexOf(file.type) < 0) {
+    if (msg) msg.textContent = 'Unsupported type — use PNG, JPG, WebP or GIF.';
+    return;
+  }
+  if (file.size > 2*1024*1024) {
+    if (msg) msg.textContent = 'Too large — keep it under 2 MB.';
+    return;
+  }
+  if (msg) msg.textContent = 'Uploading…';
+  const reader = new FileReader();
+  reader.onload = () => {
+    api('/api/miniapp/branding/logo', {
+      method: 'POST',
+      body: JSON.stringify({ data_url: reader.result }),
+    }).then(() => {
+      if (msg) msg.textContent = 'Saved.';
+      refreshBrandPreview();
+      applyBrandLogo();
+    }).catch(e => { if (msg) msg.textContent = 'Upload failed: ' + e; });
+  };
+  reader.onerror = () => { if (msg) msg.textContent = 'Could not read file.'; };
+  reader.readAsDataURL(file);
+}
+
+function removeLogo() {
+  if (!confirm('Remove the custom logo and revert to the Sentinel Media wordmark?')) return;
+  const msg = document.getElementById('brand-msg');
+  api('/api/miniapp/branding/logo', { method: 'DELETE' }).then(() => {
+    if (msg) msg.textContent = 'Removed.';
+    refreshBrandPreview();
+    applyBrandLogo();
+  }).catch(e => { if (msg) msg.textContent = 'Remove failed: ' + e; });
 }
 
 // ── Appearance: black/metallic/futuristic theme engine (per-device) ──────────
@@ -4599,13 +5117,14 @@ async function loadScraper() {
         ? `<span class="chip err" title="${esc(String(p.last_error || '').slice(0, 220))}">⚠${p.failure_count}</span>`
         : '';
       const u = JSON.stringify(p.url);
+      const ue = encodeURIComponent(p.url);
       const pauseBtn = enabled
         ? `<button class="icon-btn" title="Pause" onclick='scraperPause(${u})'>⏸</button>`
         : `<button class="icon-btn primary" title="Resume" onclick='scraperResume(${u})'>▶</button>`;
       return `
       <div class="scraper-row" title="${esc(p.url)}">
         <span class="dot" style="background:${dotColor};margin-right:0"></span>
-        <span class="uname">@${esc(uname)}</span>
+        <a class="uname u-link" onclick="openExternal('${ue}')" title="Open profile · ${esc(p.url)}">@${esc(uname)}</a>
         <span class="chips">${pulledChip}${dueChip}${failChip}</span>
         <span class="actions">
           <button class="icon-btn" title="Probe now" onclick='scraperProbeNow(${u})'>🔄</button>
@@ -4983,8 +5502,12 @@ async function restartService() {
 
 // Surface the Admin tab if we're owner. Best-effort — failures stay silent.
 bootstrapWhoami();
+// Apply the custom app logo to the home header if one is set (#74).
+applyBrandLogo();
 // Apply the saved home-tile order + wire up drag-to-reorder (#41).
 initTileReorder();
+// Wire arrow-key + swipe nav for the file-preview gallery (#77).
+initPreviewGestures();
 // Boot navigation: land on Home. Earlier this was hardcoded to
 // 'watchlist' from when SMDL was primarily a stream-watcher; with the
 // Theater + IPTV + Files + Scraper modules in place, Home (the tile

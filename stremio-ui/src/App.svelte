@@ -8,7 +8,7 @@
    *  No router — single-component view state machine. The TG BackButton
    *  is wired to navigate Detail → Search; on Search it closes the app. */
   import { onMount } from "svelte";
-  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive, Tv, Settings, Home, Puzzle, Plus, Trash2, Check } from "@lucide/svelte";
+  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive, Tv, Settings, Home, Puzzle, Plus, Trash2, Check, Shield } from "@lucide/svelte";
   import { api, type MetaItem, type StreamEntry, type GrabFile, type RDAccount,
             type StremioJob, type CacheEntry, type EpisodeMeta,
             type DiscoverData, type DiscoverItem, type AddonSummary } from "$lib/api";
@@ -730,6 +730,8 @@
               <Badge variant="secondary"><HardDrive class="size-3 mr-1" /> Cached</Badge>
             {:else if activeJob.status === "streaming"}
               <Badge>Streaming</Badge>
+            {:else if activeJob.status === "downloading"}
+              <Badge variant="outline"><Shield class="size-3 mr-1" /> Downloading via VPN…</Badge>
             {:else if activeJob.status === "resolving"}
               <Badge variant="outline">Resolving…</Badge>
             {:else if activeJob.status === "error" && autoAdvancing}
@@ -745,6 +747,23 @@
             <div class="flex items-center gap-3 py-6 justify-center text-muted-foreground">
               <Loader2 class="animate-spin size-5" />
               <span class="text-sm">Asking Real-Debrid… (can take up to 5 min on uncached torrents)</span>
+            </div>
+          {:else if activeJob.status === "downloading"}
+            <div class="py-4">
+              <div class="flex items-center gap-3 mb-3 text-muted-foreground">
+                <Loader2 class="animate-spin size-5" />
+                <span class="text-sm">
+                  Not on Real-Debrid — pulling it directly over your PIA VPN.
+                  This downloads the whole file before it plays; large releases take a while.
+                </span>
+              </div>
+              <div class="flex justify-between items-center text-xs text-muted-foreground mb-1">
+                <span class="flex items-center gap-1"><Shield class="size-3" /> Downloading via VPN</span>
+                <span>{fmtPct(activeJob.progress)}%</span>
+              </div>
+              <div class="w-full h-1.5 bg-secondary rounded-full overflow-hidden">
+                <div class="h-full bg-primary transition-all" style="width: {activeJob.progress}%"></div>
+              </div>
             </div>
           {:else if activeJob.status === "error" && autoAdvancing}
             <div class="flex items-center gap-3 py-6 justify-center text-muted-foreground">
@@ -848,6 +867,7 @@
                 {#if j.status === "cached"}
                   <Badge variant="secondary"><HardDrive class="size-3 mr-1" /> Cached</Badge>
                 {:else if j.status === "streaming"}<Badge>Streaming · {fmtPct(j.progress)}%</Badge>
+                {:else if j.status === "downloading"}<Badge variant="outline">VPN · {fmtPct(j.progress)}%</Badge>
                 {:else if j.status === "caching"}<Badge variant="outline">Caching · {fmtPct(j.progress)}%</Badge>
                 {:else if j.status === "resolving"}<Badge variant="outline">Resolving</Badge>
                 {:else if j.status === "queued"}<Badge variant="outline">Queued</Badge>

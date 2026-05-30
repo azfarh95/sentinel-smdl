@@ -98,7 +98,7 @@ export interface StremioJob {
   source_stream_title: string | null;
   quality: string | null;
   expected_size: number | null;
-  status: "queued" | "resolving" | "streaming" | "caching" | "cached" | "error";
+  status: "queued" | "resolving" | "streaming" | "downloading" | "caching" | "cached" | "error";
   progress: number;
   direct_url: string | null;
   filename: string | null;

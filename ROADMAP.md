@@ -17,7 +17,8 @@ in the codebase. Updated as each version ships.
 
 - **MAJOR** — a new pillar / a fundamentally new capability category.
   v1 = downloader, v2 = stream tracker, v3 = IPTV, v4 = apps store, v5
-  = projector. Existing pillars keep working; new MAJORs ride alongside.
+  = projector, v9 = monetization/licensing. Existing pillars keep working;
+  new MAJORs ride alongside.
 - **MINOR** — a phase or sub-feature within a pillar. v3.0 = initial
   IPTV browser, v3.1 = EPG, v3.2 = recording, v3.3 = aggregator
   refactor, etc.
@@ -49,6 +50,13 @@ Telegram bot wrapping yt-dlp + a few hundred extractor sites.
 - Notification on "went live" via Telegram message
 - Stripchat / Chaturbate / other adult-platform support gated behind
   `auth.is_platform_blocked` (default-blocked, owner-toggleable)
+
+### v1.6 · Torrent / Real-Debrid fallback + progressive streaming (late May 2026)
+- Download fallback chain: Real-Debrid (RD-451) → qBittorrent-behind-PIA → cache
+- Default-on; **progressive streaming** (watch-while-downloading)
+- qB auth via subnet whitelist (volume conf, not git); SMDL joins
+  `metamcp-network` for container DNS
+- Commit `a3247a7`
 
 ### v2.0 · Mini App + multi-user scaffolding (early 2026)
 - Telegram WebApp Mini App at `/app`
@@ -107,6 +115,15 @@ Telegram bot wrapping yt-dlp + a few hundred extractor sites.
 - Bind-mount `data/` so YAML mutations persist to host repo
 - Per-source filter restored on v2 channel listing
 
+### v3.5 · IPTV in-app playback + Family TV (late May 2026)
+- **Server-side HLS relay** so YouTube-live plays inline in-app (no VLC
+  handoff) — `_hls_relay` in `iptv_routes.py`
+- HLS relay 404 fix for logical channel ids
+- **Family TV** — parent-friendly MY/SG/ID channel picker
+- Expanded + fixed Malaysia YouTube-live channel list
+- Gentler auto-probe so health sweeps don't starve live playback
+- Commits `8bfa21e`, `e55e08c`, `0cd312d`, `3d0a11a`, `d26a8f7`
+
 ### v4.0 · Apps distribution + Auth-perms v2 Phase 1 (late May 2026)
 - Sentinel Suite "📦 Apps" tile → self-hosted Play Store for sideload
   APKs (replaces TG-bot delivery)
@@ -118,7 +135,28 @@ Telegram bot wrapping yt-dlp + a few hundred extractor sites.
 - `require_scope("smdl.iptv")` enforcement on `/iptv/*` routes
 - Spec: `metamcp-local/docs/auth-perms-v2.md`
 
-**Current state of SMDL** is **v4.0**.
+### v9.0 · Editions + license authority — Monetization pillar Phase 1 (late May 2026)
+**New pillar: commercialization.** Rides alongside the feature pillars
+(v1–v8); this is the "make it shareable / sellable" track.
+
+- **Edition split** — `SENTINEL_MEDIA_EDITION` = `community` (default,
+  safe: ships no content/grey plumbing) / `private` (operator's full box)
+- **Middleware edition gate** (`app/main.py`) — community 404s the
+  legal-boundary surfaces: torrent/RD pipeline, same-origin HLS relay,
+  aggregator country slices
+- Community YouTube via the **official IFrame Player** + first-run legal
+  acknowledgement
+- **SMDL-local license-key authority** (`app/licensing.py`) — `SMDL-FAM` /
+  `SMDL-COM` keys, HMAC-stored secrets (plaintext shown once), online
+  `/api/license/validate` + 7-day offline grace, seat limits
+- Owner console at `/app/licenses`; best-effort metadata mirror to the
+  central Sentinel License Registry (watchdog `:8200`)
+- Commits `c1bdc11`, `be47546`, `3e1f327`, `517cbab`, `eff044c`
+- ⚠️ Today the FAM/COM tier is an **unenforced label** — features are
+  gated by the deployment `EDITION` flag, not the key. v9.1 wires them.
+
+**Current state of SMDL**: downloader **v1.6** · IPTV **v3.5** ·
+distribution **v4.0** · monetization **v9.0**.
 
 ---
 
@@ -283,6 +321,40 @@ sync between them via cryptographic mutual auth. Stremio-addon-like
 discovery: "here's my SMDL catalogue, federate me into your
 recommendations".
 
+### v9.1 · Entitlement model — Monetization Phase 2 (~1 week)
+**Status**: planned (design locked 2026-05-31)
+**Depends on**: v9.0
+**Spec**: [`sentinel-docs/planning/media-licensing-entitlements.md`](https://docs.az-sentinel.xyz/planning/media-licensing-entitlements/)
+
+Replace the unenforced FAM/COM label with a real **plan → entitlement**
+model:
+- Registry-keyed plans (key = identity, registry = entitlement SoT) +
+  **signed grants** so a rooted device can't forge entitlements
+- **Two-rail gate**: legal-boundary caps stay the per-deployment edition
+  hard-gate (404, never sold); commercial caps become
+  `require_entitlement(grant, cap)` → 402 (mirrors existing `require_scope`)
+- **Free funnel**: anonymous browse/YouTube → free-registered
+  (favorites + cross-device sync) → paid
+- IPTV premium layer: EPG, favorites sync, "channel is live" notifications,
+  curated packs, seats — "the act is free, the scale is paid"
+- **Modular verticals** (radio / podcast / music) as drop-in manifests on
+  a shared spine — grant schema stays a flat namespaced set, never changes
+
+### v9.2 · Play Billing + TWA distribution — Monetization Phase 3 (~1-2 weeks)
+**Status**: planned (Play Billing chosen 2026-05-31 to pull market share)
+**Depends on**: v9.1
+**Spec**: media-licensing-entitlements.md §Distribution & Play compliance
+
+Get the community app onto the Play Store:
+- **`play` build sub-profile** = community minus third-party aggregation
+  (official YouTube-live + user URLs only) minus external-key redeem UI
+- **Google Play Billing** as a parallel purchase rail → same registry plan
+  SoT (license keys stay the sideload/web rail)
+- **PWA + TWA** wrap on a public (non-CF-Access) community deployment with
+  `assetlinks.json` verified against the Play signing key
+- Compliance hygiene: targetSdk 35, in-app + web account deletion, Data
+  Safety form, minimal permissions
+
 ---
 
 ## Cross-pillar dependencies
@@ -293,9 +365,11 @@ v1.0 Foundation ──┬─► v1.5 Watchlist ──┬─► v3.x IPTV
                   ├─► v2.0 Mini App ───┼─► v2.5 Stickers
                   │                    │
                   └─► v4.0 Apps + Auth─┴─► v4.2 Auth Phase 2
-                                             │
-                                             ▼
-                                      v5.0 Projector (needs projector.cast scope)
+                                       │     │
+                                       │     ▼
+                                       │  v5.0 Projector (needs projector.cast scope)
+                                       │
+                                       └─► v9.0 Editions + license ─► v9.1 Entitlements ─► v9.2 Play Billing/dist
                                              │
                                              ▼
                                      v5.1 Miracast compat
@@ -332,6 +406,9 @@ v1.0 Foundation ──┬─► v1.5 Watchlist ──┬─► v3.x IPTV
 | v7.0 Library | 3-4 weeks | none (parallel) | nothing | Plex-style local media library |
 | v7.1 DVR | 1-2 weeks | v3.2 + v7.0 | nothing | Schedule recordings from EPG |
 | v8.0 Federation | "weeks" | many | distant future | Multi-host Sentinel mesh |
+| v9.0 Editions + license authority | shipped | v4.0 | nothing | Community/private split + key issuance |
+| v9.1 Entitlement model | ~1 week | v9.0 | nothing | Sellable plans + free funnel + verticals |
+| v9.2 Play Billing + distribution | ~1-2 weeks | v9.1 | nothing | Play Store market share |
 
 ## Decision principles
 
@@ -374,8 +451,15 @@ When deciding what to build next:
 - IPTV aggregator v2 spec: [`metamcp-local/docs/iptv-aggregator-v2.md`](../metamcp-local/docs/iptv-aggregator-v2.md)
 - Auth-perms v2 spec: [`metamcp-local/docs/auth-perms-v2.md`](../metamcp-local/docs/auth-perms-v2.md)
 - SMDL Projector v1 spec: [`metamcp-local/docs/smdl-projector-v1.md`](../metamcp-local/docs/smdl-projector-v1.md)
+- Licensing & entitlements + Play distribution spec: [`sentinel-docs/planning/media-licensing-entitlements.md`](https://docs.az-sentinel.xyz/planning/media-licensing-entitlements/)
 
 ## Changelog
 
 - 2026-05-27 — initial roadmap; backfilled v1.0 → v4.0 from history.
                 Drafted v4.1 → v8.0 forward plan. azfar.
+- 2026-05-31 — backfilled shipped-since-v4.0 work: v1.6 (torrent/RD
+                fallback + progressive), v3.5 (in-app HLS relay + Family
+                TV), v9.0 (editions + license authority). Opened the v9
+                monetization pillar; planned v9.1 (entitlement model) +
+                v9.2 (Play Billing + TWA distribution). Specs cross-linked
+                to sentinel-docs/planning/media-licensing-entitlements.md.

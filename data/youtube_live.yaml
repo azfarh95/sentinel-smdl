@@ -43,7 +43,7 @@ channels:
 
   - id: tv3-malaysia
     name: TV3 Malaysia (Buletin)
-    handle: tv3msia
+    handle: tv3malaysia
     country: MY
     categories: [news]
 
@@ -54,8 +54,8 @@ channels:
     categories: [news]
 
   - id: rtm-news
-    name: RTM Berita (TV2)
-    handle: rtmkl
+    name: RTM Official (Berita)
+    handle: RTMofficial
     country: MY
     categories: [news]
 
@@ -70,6 +70,111 @@ channels:
     video_id: mkVyNaGee8A
     country: MY
     categories: [news]
+
+  - id: buletin-tv3
+    name: Buletin TV3
+    handle: BuletinTV3
+    country: MY
+    categories: [news]
+
+  - id: free-malaysia-today
+    name: Free Malaysia Today
+    handle: FreeMalaysiaToday
+    country: MY
+    categories: [news]
+
+  - id: malaysiakini-tv
+    name: Malaysiakini TV
+    handle: MalaysiakiniTV
+    country: MY
+    categories: [news]
+
+  - id: kinitv
+    name: KiniTV
+    handle: kinitv
+    country: MY
+    categories: [news]
+
+  - id: the-vibes
+    name: The Vibes
+    handle: TheVibesNews
+    country: MY
+    categories: [news]
+
+  - id: sinar-harian
+    name: Sinar Harian
+    handle: SinarHarianOnline
+    country: MY
+    categories: [news]
+
+  - id: the-star-my
+    name: The Star (Malaysia)
+    handle: thestaronline
+    country: MY
+    categories: [news]
+
+  - id: the-edge-tv
+    name: The Edge TV
+    handle: TheEdgeTV
+    country: MY
+    categories: [news, business]
+
+  # ── Malaysia — general / FTA / entertainment ────────────────────
+  - id: 8tv-my
+    name: 8TV Malaysia
+    handle: 8tvchannel
+    country: MY
+    categories: [general]
+
+  - id: tv9-my
+    name: TV9 Malaysia
+    handle: tv9malaysia
+    country: MY
+    categories: [general]
+
+  - id: astro-gempak
+    name: Astro Gempak
+    handle: AstroGempak
+    country: MY
+    categories: [entertainment]
+
+  - id: didik-tv
+    name: DidikTV (RTM)
+    handle: DidikTV
+    country: MY
+    categories: [education]
+
+  - id: tvs-sarawak
+    name: TVS (Sarawak)
+    handle: TVSarawak
+    country: MY
+    categories: [general]
+
+  - id: world-of-buzz
+    name: World of Buzz
+    handle: WORLDOFBUZZ
+    country: MY
+    categories: [lifestyle]
+
+  # ── Malaysia — religious ────────────────────────────────────────
+  - id: tv-alhijrah
+    name: TV AlHijrah
+    handle: tvalhijrahofficial
+    country: MY
+    categories: [religious]
+
+  # ── Malaysia — radio (live video) ───────────────────────────────
+  - id: melody-fm
+    name: Melody FM
+    handle: MELODYfm
+    country: MY
+    categories: [radio, music]
+
+  - id: traxx-fm
+    name: TRAXX FM (RTM)
+    handle: TraxxFMOfficial
+    country: MY
+    categories: [radio, music]
 
   # ── Indonesia ───────────────────────────────────────────────────
   - id: kompastv

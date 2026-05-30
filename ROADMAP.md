@@ -322,7 +322,7 @@ discovery: "here's my SMDL catalogue, federate me into your
 recommendations".
 
 ### v9.1 · Entitlement model — Monetization Phase 2 (~1 week)
-**Status**: planned (design locked 2026-05-31)
+**Status**: in progress — plumbing built on `feat/edition-split` (2026-05-31, not merged/deployed)
 **Depends on**: v9.0
 **Spec**: [`sentinel-docs/planning/media-licensing-entitlements.md`](https://docs.az-sentinel.xyz/planning/media-licensing-entitlements/)
 
@@ -340,20 +340,29 @@ model:
 - **Modular verticals** (radio / podcast / music) as drop-in manifests on
   a shared spine — grant schema stays a flat namespaced set, never changes
 
-### v9.2 · Play Billing + TWA distribution — Monetization Phase 3 (~1-2 weeks)
-**Status**: planned (Play Billing chosen 2026-05-31 to pull market share)
-**Depends on**: v9.1
-**Spec**: media-licensing-entitlements.md §Distribution & Play compliance
+Built so far (`feat/edition-split`): `app/entitlements.py` (plan→cap map,
+`require_entitlement` → 402), validate grant enriched with plan/entitlements.
+Still to do: registry-keyed plans + signed grants, free-funnel account wiring,
+wiring `require_entitlement` into feature routes (needs the grant-transport
+decision: how the APK presents its grant per request).
 
-Get the community app onto the Play Store:
-- **`play` build sub-profile** = community minus third-party aggregation
-  (official YouTube-live + user URLs only) minus external-key redeem UI
-- **Google Play Billing** as a parallel purchase rail → same registry plan
-  SoT (license keys stay the sideload/web rail)
-- **PWA + TWA** wrap on a public (non-CF-Access) community deployment with
-  `assetlinks.json` verified against the Play signing key
-- Compliance hygiene: targetSdk 35, in-app + web account deletion, Data
-  Safety form, minimal permissions
+### v9.2 · Sentinel Media TV on Play — Monetization Phase 3 (~1-2 weeks)
+**Status**: in progress — TV-first build scaffolded on `feat/edition-split` (2026-05-31); operator handoff remaining
+**Depends on**: v9.1
+**Spec**: media-licensing-entitlements.md §Distribution & Play compliance + §Implementation status
+
+Ship **service-by-service** — Sentinel Media **TV first** to pull market share:
+- **`play` build sub-profile** ✅ `app/profile.py` (`SENTINEL_MEDIA_PROFILE`/
+  `SENTINEL_MEDIA_SURFACE`) = community minus aggregation minus key-redeem
+- **Google Play Billing** ✅ `app/play_billing.py` + `/api/billing/play/verify`
+  — parallel rail → same entitlement SoT (creds-optional, never silent-grants)
+- **PWA + TWA** ✅ scaffolded: `app/pwa_routes.py` (manifest/sw/assetlinks) +
+  `android-twa/twa-manifest.json` (Bubblewrap, `com.azsentinel.smdltv`)
+- Compliance: account deletion ✅ (`/api/account/delete` + `/account/delete`),
+  minimal perms ✅, targetSdk 35 ✅; Data Safety + privacy URL documented
+- **Operator handoff** (can't automate): public non-CF-Access host, Play
+  Console account, signing keys → `TWA_SHA256_CERT_FINGERPRINTS`, 512px PNG
+  icon, Billing products + service account JSON. See doc §Launch handoff.
 
 ---
 
@@ -407,8 +416,8 @@ v1.0 Foundation ──┬─► v1.5 Watchlist ──┬─► v3.x IPTV
 | v7.1 DVR | 1-2 weeks | v3.2 + v7.0 | nothing | Schedule recordings from EPG |
 | v8.0 Federation | "weeks" | many | distant future | Multi-host Sentinel mesh |
 | v9.0 Editions + license authority | shipped | v4.0 | nothing | Community/private split + key issuance |
-| v9.1 Entitlement model | ~1 week | v9.0 | nothing | Sellable plans + free funnel + verticals |
-| v9.2 Play Billing + distribution | ~1-2 weeks | v9.1 | nothing | Play Store market share |
+| v9.1 Entitlement model | in progress (plumbing built) | v9.0 | nothing | Sellable plans + free funnel + verticals |
+| v9.2 Sentinel Media TV on Play | in progress (scaffolded; operator handoff) | v9.1 | public non-CF-Access host + Play account | TV-first Play Store market share |
 
 ## Decision principles
 
@@ -463,3 +472,10 @@ When deciding what to build next:
                 monetization pillar; planned v9.1 (entitlement model) +
                 v9.2 (Play Billing + TWA distribution). Specs cross-linked
                 to sentinel-docs/planning/media-licensing-entitlements.md.
+- 2026-05-31 — built v9.1 entitlement plumbing + v9.2 Sentinel Media TV
+                Play build on `feat/edition-split` (TV-first, service-by-
+                service strategy): app/entitlements.py, app/profile.py
+                (play sub-profile), app/play_billing.py (+ verify route),
+                account deletion, app/pwa_routes.py (PWA/TWA), android-twa
+                Bubblewrap manifest. Operator handoff remains (public host,
+                Play account, signing keys, Billing products). Not merged.

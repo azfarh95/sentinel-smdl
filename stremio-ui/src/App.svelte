@@ -18,7 +18,7 @@
   import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "$lib/components/ui/card";
   import { Badge } from "$lib/components/ui/badge";
 
-  type View = "discover" | "search" | "detail" | "grab" | "queue" | "library" | "addons" | "settings";
+  type View = "discover" | "detail" | "grab" | "queue" | "library" | "addons" | "settings";
 
   // ── State (Svelte 5 runes) ─────────────────────────────────────────────
   let view = $state<View>("discover");
@@ -149,7 +149,7 @@
   // Series: fetch the episode list first; streams come AFTER user picks
   // a specific episode.
   async function openDetail(m: MetaItem) {
-    returnTo = (view === "search" || view === "discover") ? view : "discover";
+    returnTo = "discover";
     selected = m; streams = []; episodes = []; pickedEpisode = null;
     view = "detail"; lastError = null;
     if (m.type === "series") {
@@ -430,7 +430,7 @@
         <div class="flex gap-3 overflow-x-auto pb-2 -mx-4 px-4 snap-x">
           {#each items as m (m.id)}
             <button onclick={() => openDetail(m)}
-                    class="group shrink-0 w-28 sm:w-32 text-left snap-start">
+                    class="group shrink-0 w-36 sm:w-44 text-left snap-start">
               <div class="aspect-[2/3] rounded-lg overflow-hidden bg-muted border border-border
                           group-hover:border-primary group-hover:scale-105 group-hover:shadow-xl
                           group-hover:shadow-primary/20 transition-all duration-200 relative">
@@ -474,9 +474,60 @@
       </section>
     {/snippet}
 
-    <!-- ── DISCOVER VIEW (Stremio-style home rows) ─────────────────────── -->
+    <!-- ── DISCOVER VIEW (search + Stremio-style home rows) ────────────── -->
     {#if view === "discover"}
-      {#if discoverLoading && !discover}
+      <!-- Search bar lives on Home now (#merge-search-into-home) -->
+      <form onsubmit={(e) => { e.preventDefault(); doSearch(); }}
+            class="flex gap-2 mb-4">
+        <Input type="search" placeholder="Search movies & series…  e.g. Inception"
+                bind:value={query} class="flex-1" />
+        <Button type="submit" disabled={searching || !query.trim()}>
+          {#if searching}
+            <Loader2 class="animate-spin" />
+          {:else}
+            <Search />
+          {/if}
+          Search
+        </Button>
+        {#if results.length || query.trim()}
+          <Button variant="outline" type="button"
+                  onclick={() => { query = ""; results = []; }}>Clear</Button>
+        {/if}
+      </form>
+
+      {#if searching}
+        <Card><CardContent class="py-12 text-center">
+          <Loader2 class="animate-spin size-6 mx-auto text-muted-foreground" />
+          <CardDescription class="mt-2">Searching…</CardDescription>
+        </CardContent></Card>
+      {:else if results.length}
+        <!-- Search results replace the home rows while active -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+          {#each results as m (m.id)}
+            <button onclick={() => openDetail(m)}
+                    class="group text-left rounded-lg overflow-hidden border border-border
+                           hover:border-primary transition-colors">
+              <div class="aspect-[2/3] bg-muted overflow-hidden">
+                {#if m.poster}
+                  <img src={m.poster} alt={m.name} loading="lazy"
+                       class="w-full h-full object-cover group-hover:scale-105 transition-transform" />
+                {:else}
+                  <div class="w-full h-full flex items-center justify-center">
+                    <Film class="size-8 text-muted-foreground" />
+                  </div>
+                {/if}
+              </div>
+              <div class="p-2">
+                <div class="text-sm font-medium truncate">{m.name}</div>
+                <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                  {#if m.year}<span>{m.year}</span>{/if}
+                  {#if m.imdb_rating}<span>· ★ {m.imdb_rating.toFixed(1)}</span>{/if}
+                </div>
+              </div>
+            </button>
+          {/each}
+        </div>
+      {:else if discoverLoading && !discover}
         <Card><CardContent class="py-12 text-center">
           <Loader2 class="animate-spin size-6 mx-auto text-muted-foreground" />
           <CardDescription class="mt-2">Loading discovery…</CardDescription>
@@ -494,65 +545,10 @@
         {#if !discover.continue_watching.length && !discover.popular_movies.length && !discover.popular_series.length}
           <Card class="text-center py-12"><CardContent>
             <Film class="size-12 text-muted-foreground mx-auto mb-3" />
-            <CardDescription>Nothing to show yet — try a search.</CardDescription>
+            <CardDescription>Nothing to show yet — search above to get started.</CardDescription>
           </CardContent></Card>
         {/if}
       {/if}
-    {/if}
-
-    <!-- ── SEARCH VIEW ──────────────────────────────────────────────── -->
-    {#if view === "search"}
-      <form onsubmit={(e) => { e.preventDefault(); doSearch(); }}
-            class="flex gap-2 mb-4">
-        <Input type="search" placeholder="Search movies…  e.g. Inception"
-                bind:value={query} class="flex-1" autofocus />
-        <Button type="submit" disabled={searching || !query.trim()}>
-          {#if searching}
-            <Loader2 class="animate-spin" />
-          {:else}
-            <Search />
-          {/if}
-          Search
-        </Button>
-      </form>
-
-      {#if !results.length && !searching}
-        <Card class="text-center py-12">
-          <CardContent>
-            <Film class="size-12 text-muted-foreground mx-auto mb-3" />
-            <CardDescription>
-              Type a movie or series name and hit Search.
-              <br />Metadata + streams resolved via Real-Debrid.
-            </CardDescription>
-          </CardContent>
-        </Card>
-      {/if}
-
-      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-        {#each results as m (m.id)}
-          <button onclick={() => openDetail(m)}
-                  class="group text-left rounded-lg overflow-hidden border border-border
-                         hover:border-primary transition-colors">
-            <div class="aspect-[2/3] bg-muted overflow-hidden">
-              {#if m.poster}
-                <img src={m.poster} alt={m.name} loading="lazy"
-                     class="w-full h-full object-cover group-hover:scale-105 transition-transform" />
-              {:else}
-                <div class="w-full h-full flex items-center justify-center">
-                  <Film class="size-8 text-muted-foreground" />
-                </div>
-              {/if}
-            </div>
-            <div class="p-2">
-              <div class="text-sm font-medium truncate">{m.name}</div>
-              <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                {#if m.year}<span>{m.year}</span>{/if}
-                {#if m.imdb_rating}<span>· ★ {m.imdb_rating.toFixed(1)}</span>{/if}
-              </div>
-            </div>
-          </button>
-        {/each}
-      </div>
     {/if}
 
     <!-- ── DETAIL VIEW ──────────────────────────────────────────────── -->
@@ -1100,11 +1096,6 @@
             class="flex-1 py-3 flex flex-col items-center gap-0.5
                    {view === 'discover' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}">
       <Home class="size-4" /><span>Home</span>
-    </button>
-    <button onclick={() => { view = "search"; }}
-            class="flex-1 py-3 flex flex-col items-center gap-0.5
-                   {view === 'search' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}">
-      <Search class="size-4" /><span>Search</span>
     </button>
     <button onclick={() => { view = "queue"; }}
             class="flex-1 py-3 flex flex-col items-center gap-0.5

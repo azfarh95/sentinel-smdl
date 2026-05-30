@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse
 
 from . import database as db
 from . import edition
+from . import entitlements
 from . import licensing
 from . import license_registry
 from .miniapp import _require_owner, _verify, require_scope
@@ -199,7 +200,9 @@ async def license_validate(request: Request):
                 return {"valid": False, "reason": "seat_limit"}
         await db.license_record_activation(key_id, device_id, device_label)
 
-    return licensing.build_grant(row)
+    grant = licensing.build_grant(row)
+    grant.update(entitlements.enrich(row))
+    return grant
 
 
 # ── Owner admin page ─────────────────────────────────────────────────────────

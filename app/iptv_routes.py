@@ -56,6 +56,7 @@ import aiosqlite
 
 from . import database as _db
 from . import edition as _edition
+from . import profile as _profile
 from . import iptv as _iptv
 from . import iptv_dedup as _dedup
 from . import miniapp as _mini   # reuse _verify + require_scope
@@ -186,7 +187,7 @@ async def iptv_refresh(body: RefreshBody, request: Request):
         if body.source is None:
             summaries = await _iptv.refresh_all_sources()
         elif body.source == "iptv-org":
-            if _edition.is_community():
+            if not _profile.private_sources_allowed():
                 raise HTTPException(status_code=404, detail="source not available in this edition")
             summaries = [await _iptv.refresh_from_iptv_org(
                 country=body.country, include_nsfw=body.include_nsfw,

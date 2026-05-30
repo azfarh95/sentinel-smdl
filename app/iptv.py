@@ -31,6 +31,7 @@ import httpx
 
 from . import database as db
 from . import edition
+from . import profile
 
 
 logger = logging.getLogger(__name__)
@@ -417,10 +418,12 @@ _PRIVATE_SOURCES: dict[str, dict] = {
     },
 }
 
-# Community = baseline only; private = baseline + bundled aggregators.
+# Community = baseline only; private = baseline + bundled aggregators. A play
+# build (store distribution) can never reach the aggregators even on a private
+# edition — profile.private_sources_allowed() folds the play gate into one test.
 SOURCES: dict[str, dict] = {
     **_BASELINE_SOURCES,
-    **(_PRIVATE_SOURCES if edition.is_private() else {}),
+    **(_PRIVATE_SOURCES if profile.private_sources_allowed() else {}),
 }
 
 
@@ -1156,8 +1159,9 @@ async def refresh_all_sources() -> list[dict]:
     out: list[dict] = []
     # iptv-org (global JSON) is a private-only aggregator — it's not in
     # SOURCES under community, but refresh_from_iptv_org() is called directly
-    # here, so gate it explicitly.
-    if edition.is_private():
+    # here, so gate it explicitly. private_sources_allowed() also blocks a play
+    # build from reaching it.
+    if profile.private_sources_allowed():
         try:
             out.append(await refresh_from_iptv_org())
         except Exception as exc:
@@ -1174,7 +1178,7 @@ async def refresh_all_sources() -> list[dict]:
     except Exception as exc:
         out.append({"ok": False, "source": "youtube-live", "error": str(exc)})
     # Per-country iptv-org slices are private-only for the same reason.
-    if edition.is_private():
+    if profile.private_sources_allowed():
         for cc in IPTV_ORG_COUNTRY_QUICK:
             try:
                 out.append(await refresh_iptv_org_country(cc))

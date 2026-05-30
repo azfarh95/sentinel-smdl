@@ -5948,6 +5948,135 @@ async def auth_logout(request: Request):
     return resp
 
 
+class _AccountDeleteBody(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/api/account/delete")
+async def account_delete(request: Request, body: _AccountDeleteBody):
+    """Delete the CALLER'S OWN account + all their personal data.
+
+    Mandatory for Play (the free-registered tier creates accounts). Acts only
+    on the authenticated principal — never deletes another user — honouring the
+    no-silent-identity-switch rule. Requires an explicit confirm flag, then
+    drops the session cookie so the deleted session can't keep acting.
+    """
+    p = await _verify(request)
+    uid = int(p["user"]["id"])
+    if not body.confirm:
+        return JSONResponse(
+            {"ok": False, "error": "confirmation_required",
+             "detail": "POST {confirm:true} to delete your account and data."},
+            status_code=400,
+        )
+    # The owner account is config-anchored and re-created on next interaction;
+    # refuse here so an owner session can't be silently wiped by a stray tap.
+    if _is_owner(uid):
+        return JSONResponse(
+            {"ok": False, "error": "owner_account",
+             "detail": "The owner account is managed by the operator, not self-deletable here."},
+            status_code=403,
+        )
+    result = await _db.delete_user_account(uid)
+    resp = JSONResponse({"ok": True, "deleted": result})
+    _clear_apk_cookie(resp, request)
+    return resp
+
+
+_ACCOUNT_DELETE_HTML = """<!doctype html>
+<html lang=en><head>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<title>Delete your account — Sentinel Media</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0e14; color:#e6e6e6; font:16px/1.5 Inter,system-ui,sans-serif; }
+  .wrap { max-width:640px; margin:0 auto; padding:32px 20px 64px; }
+  h1 { font-size:22px; margin:0 0 16px; }
+  .card { background:#141925; border:1px solid #232a3a; border-radius:12px; padding:20px; margin:18px 0; }
+  ul { padding-left:20px; }
+  li { margin:4px 0; }
+  button { font:inherit; border:0; border-radius:8px; padding:12px 18px; cursor:pointer; }
+  .danger { background:#b3261e; color:#fff; }
+  .danger:disabled { opacity:.5; cursor:not-allowed; }
+  .msg { margin-top:14px; min-height:1.4em; }
+  .ok { color:#5ad27a; } .err { color:#ff6b6b; } .muted { color:#9aa4b2; }
+  code { background:#1c2230; padding:1px 6px; border-radius:5px; }
+</style></head>
+<body><div class=wrap>
+  <h1>Delete your Sentinel Media account</h1>
+  <p>This permanently erases your account and all associated personal data. This cannot be undone.</p>
+  <div class=card>
+    <strong>What gets deleted</strong>
+    <ul>
+      <li>Your account profile and registration</li>
+      <li>Your download history</li>
+      <li>Your sticker packs, drafts and stickers</li>
+    </ul>
+    <p class=muted>We do not sell your data. Aggregate, non-identifying logs may persist as required for security and abuse prevention.</p>
+  </div>
+  <div class=card>
+    <p id=who class=muted>Checking your session…</p>
+    <label><input type=checkbox id=confirm> I understand this is permanent.</label>
+    <div style="margin-top:14px">
+      <button class=danger id=btn disabled>Delete my account</button>
+    </div>
+    <p class="msg" id=msg></p>
+  </div>
+  <p class=muted>Signed out? Open the app, sign in, then return to this page (or use <code>Account → Delete account</code> in the app).</p>
+</div>
+<script>
+(function(){
+  var who = document.getElementById('who');
+  var cb  = document.getElementById('confirm');
+  var btn = document.getElementById('btn');
+  var msg = document.getElementById('msg');
+  var authed = false;
+  function hdrs(){ return { 'Content-Type': 'application/json' }; }
+  fetch('/auth/session', { credentials: 'include' })
+    .then(function(r){ return r.json(); })
+    .then(function(s){
+      authed = !!(s && s.authenticated);
+      who.textContent = authed
+        ? 'Signed in. You can delete your account below.'
+        : 'You are not signed in. Sign in first, then return here.';
+      sync();
+    })
+    .catch(function(){ who.textContent = 'Could not check your session.'; });
+  function sync(){ btn.disabled = !(authed && cb.checked); }
+  cb.addEventListener('change', sync);
+  btn.addEventListener('click', function(){
+    btn.disabled = true; msg.className='msg muted'; msg.textContent='Deleting…';
+    fetch('/api/account/delete', {
+      method:'POST', credentials:'include', headers: hdrs(),
+      body: JSON.stringify({ confirm: true })
+    }).then(function(r){ return r.json().then(function(j){ return { ok:r.ok, j:j }; }); })
+      .then(function(res){
+        if (res.ok && res.j && res.j.ok) {
+          msg.className='msg ok';
+          msg.textContent='Your account and data have been deleted.';
+          cb.disabled = true;
+        } else {
+          msg.className='msg err';
+          msg.textContent = (res.j && (res.j.detail || res.j.error)) || 'Deletion failed.';
+          btn.disabled = false;
+        }
+      })
+      .catch(function(){ msg.className='msg err'; msg.textContent='Network error.'; btn.disabled=false; });
+  });
+})();
+</script>
+</body></html>"""
+
+
+@router.get("/account/delete", response_class=HTMLResponse)
+async def account_delete_page():
+    """Public account-deletion page — the stable URL disclosed in the Play
+    Data Safety form. Explains what is deleted and lets a signed-in user do it;
+    signed-out users are told how to sign in first."""
+    return HTMLResponse(_ACCOUNT_DELETE_HTML, headers=_NO_STORE)
+
+
 class _AuthLoginBody(BaseModel):
     token: str
 

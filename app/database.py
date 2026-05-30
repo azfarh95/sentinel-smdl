@@ -495,6 +495,33 @@ async def set_user_status(chat_id: int, status: str, reason: str | None = None) 
         return (cur.rowcount or 0) > 0
 
 
+async def delete_user_account(chat_id: int) -> dict:
+    """Hard-delete a user and ALL their personal data (Play account-deletion
+    requirement / GDPR erasure). Telegram chat_id == user_id, so this purges
+    every per-user table keyed on either. Returns rows removed per table.
+
+    Does NOT touch owner-managed/shared rows (approved_groups) or the license
+    rail (license_keys/activations are keyed by key_id/device, not a user) —
+    those are not the account holder's personal data and the owner revokes
+    licenses separately.
+    """
+    cid = int(chat_id)
+    removed: dict[str, int] = {}
+    async with aiosqlite.connect(DB_PATH) as db:
+        for table, col in (
+            ("download_history", "chat_id"),
+            ("stickers", "user_id"),
+            ("sticker_drafts", "user_id"),
+            ("sticker_packs", "user_id"),
+            ("users", "chat_id"),
+        ):
+            cur = await db.execute(f"DELETE FROM {table} WHERE {col} = ?", (cid,))
+            removed[table] = cur.rowcount or 0
+        await db.commit()
+    return {"chat_id": cid, "removed": removed,
+            "total": sum(removed.values())}
+
+
 def _normalise_url(url: str) -> str:
     return url.strip().rstrip("/")
 

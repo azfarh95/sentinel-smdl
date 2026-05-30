@@ -212,9 +212,9 @@ from fastapi.responses import JSONResponse as _EdJSONResponse  # noqa: E402
 from fastapi.requests import Request as _EdRequest  # noqa: E402
 
 _PRIVATE_PATH_PREFIXES = (
-    "/api/miniapp/stremio/",  # torrent / Real-Debrid / Stremio pipeline
-    "/iptv/hls/",             # same-origin HLS relay
-    "/api/iptv/refresh",      # bundled restream catalogue refresh (+ _country)
+    "/api/miniapp/stremio/",     # torrent / Real-Debrid / Stremio pipeline
+    "/iptv/hls/",                # same-origin HLS relay (community uses iframe)
+    "/api/iptv/refresh_country", # iptv-org per-country slices (aggregator)
 )
 
 

@@ -368,11 +368,22 @@ def parse_m3u(text: str) -> list[dict]:
 # normalised channel dicts. The upsert loop below is shared.
 
 
-# The full catalogue of bundled restream sources is PRIVATE-ONLY. These
-# are third-party aggregator lists (iptv-org, Free-TV, i.mjh.nz, …) plus
-# the youtube-live relay source. The community edition ships none of them
-# — it is a platform shell into which the operator supplies their own
-# sources. See app/edition.py for why the split exists.
+# Baseline source — available in BOTH editions. youtube-live is the legal
+# differentiator: it points at public YouTube live streams played via the
+# official IFrame Player (community) or the same-origin HLS relay (private).
+# Either way the channel list is just pointers to public broadcasts.
+_BASELINE_SOURCES: dict[str, dict] = {
+    "youtube-live": {
+        "name": "YouTube Live (24/7 news streams, geo-block-free via YouTube CDN)",
+        "url":  "data/youtube_live.yaml",
+        "kind": "yaml",  # different refresh path — see refresh_from_youtube_yaml
+    },
+}
+
+# Bundled restream aggregator catalogues — PRIVATE-ONLY. Third-party lists
+# (iptv-org, Free-TV, i.mjh.nz, …) whose streams are re-served from origins
+# we don't control. The community edition ships none of them; the operator
+# of a private instance supplies/accepts these themselves. See app/edition.py.
 _PRIVATE_SOURCES: dict[str, dict] = {
     "iptv-org": {
         "name": "iptv-org (global)",
@@ -404,15 +415,13 @@ _PRIVATE_SOURCES: dict[str, dict] = {
         "url":  "https://raw.githubusercontent.com/xN1ckuz/OpenIPTVItaly/main/OpenIPTVItaly.m3u",
         "kind": "m3u",
     },
-    "youtube-live": {
-        "name": "YouTube Live (24/7 news streams, geo-block-free via YouTube CDN)",
-        "url":  "data/youtube_live.yaml",
-        "kind": "yaml",  # different refresh path — see refresh_from_youtube_yaml
-    },
 }
 
-# Community edition gets an empty baseline; private gets the full set.
-SOURCES: dict[str, dict] = dict(_PRIVATE_SOURCES) if edition.is_private() else {}
+# Community = baseline only; private = baseline + bundled aggregators.
+SOURCES: dict[str, dict] = {
+    **_BASELINE_SOURCES,
+    **(_PRIVATE_SOURCES if edition.is_private() else {}),
+}
 
 
 # ── Per-country iptv-org slices ─────────────────────────────────────
@@ -1145,10 +1154,14 @@ async def refresh_all_sources() -> list[dict]:
     """Run every registered source's refresh, plus the SG/MY/ID quick
     country slices. Returns per-source summaries."""
     out: list[dict] = []
-    try:
-        out.append(await refresh_from_iptv_org())
-    except Exception as exc:
-        out.append({"ok": False, "source": "iptv-org", "error": str(exc)})
+    # iptv-org (global JSON) is a private-only aggregator — it's not in
+    # SOURCES under community, but refresh_from_iptv_org() is called directly
+    # here, so gate it explicitly.
+    if edition.is_private():
+        try:
+            out.append(await refresh_from_iptv_org())
+        except Exception as exc:
+            out.append({"ok": False, "source": "iptv-org", "error": str(exc)})
     for sid, meta in SOURCES.items():
         if meta["kind"] != "m3u":
             continue
@@ -1160,11 +1173,13 @@ async def refresh_all_sources() -> list[dict]:
         out.append(await refresh_from_youtube_yaml())
     except Exception as exc:
         out.append({"ok": False, "source": "youtube-live", "error": str(exc)})
-    for cc in IPTV_ORG_COUNTRY_QUICK:
-        try:
-            out.append(await refresh_iptv_org_country(cc))
-        except Exception as exc:
-            out.append({"ok": False, "source": _country_source_id(cc), "error": str(exc)})
+    # Per-country iptv-org slices are private-only for the same reason.
+    if edition.is_private():
+        for cc in IPTV_ORG_COUNTRY_QUICK:
+            try:
+                out.append(await refresh_iptv_org_country(cc))
+            except Exception as exc:
+                out.append({"ok": False, "source": _country_source_id(cc), "error": str(exc)})
     # iptv-aggregator-v2 Phase 1 — run the dedup pipeline after the
     # catalogue is up to date so logical_channels reflects the freshly
     # ingested source rows.

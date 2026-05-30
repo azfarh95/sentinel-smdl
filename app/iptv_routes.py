@@ -55,6 +55,7 @@ from pydantic import BaseModel
 import aiosqlite
 
 from . import database as _db
+from . import edition as _edition
 from . import iptv as _iptv
 from . import iptv_dedup as _dedup
 from . import miniapp as _mini   # reuse _verify + require_scope
@@ -185,6 +186,8 @@ async def iptv_refresh(body: RefreshBody, request: Request):
         if body.source is None:
             summaries = await _iptv.refresh_all_sources()
         elif body.source == "iptv-org":
+            if _edition.is_community():
+                raise HTTPException(status_code=404, detail="source not available in this edition")
             summaries = [await _iptv.refresh_from_iptv_org(
                 country=body.country, include_nsfw=body.include_nsfw,
             )]
@@ -843,6 +846,32 @@ async def iptv_hls_index(channel_id: str, request: Request):
         logger.warning("hls index resolve %s failed: %s", channel_id, exc)
         raise HTTPException(status_code=502, detail=f"resolve failed: {exc}")
     return await _hls_relay(target)
+
+
+@router.get("/api/iptv/channels/{channel_id}/embed")
+async def iptv_youtube_embed(channel_id: str, request: Request):
+    """Official YouTube IFrame Player embed for a youtube-live channel.
+
+    This is the community-edition playback path (the private edition uses
+    the same-origin HLS relay at /iptv/hls/*). Embedding via the official
+    IFrame Player API is a permitted use; the player is served unmodified
+    (ads intact). Returns the embed URL the play page drops into an
+    <iframe>. Accepts both source-row and logical channel ids."""
+    await _verify_iptv(request)
+    page_url = await _hls_youtube_source_url(channel_id)
+    if not page_url:
+        raise HTTPException(status_code=404, detail="channel not found")
+    from . import iptv_youtube
+    try:
+        video_id = await iptv_youtube.resolve_live_video_id(page_url)
+    except Exception as exc:
+        logger.warning("embed resolve %s failed: %s", channel_id, exc)
+        raise HTTPException(status_code=502, detail=f"resolve failed: {exc}")
+    embed_url = (
+        f"https://www.youtube-nocookie.com/embed/{video_id}"
+        "?autoplay=1&playsinline=1&rel=0"
+    )
+    return {"ok": True, "video_id": video_id, "embed_url": embed_url}
 
 
 class ProbeAllBody(BaseModel):
@@ -2026,6 +2055,55 @@ const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 const initData = tg?.initData || '';
 
+const EDITION = {{EDITION_JSON}};   // "community" | "private"
+
+// First-run legal acknowledgement — community edition only. The private
+// build is the operator's own instance (their parents use the Family
+// page; no nag for them). The community build is distributable, so it
+// surfaces a one-time, per-browser acknowledgement that this is a player
+// shipping no content, that the operator is responsible for sources they
+// add, and that YouTube playback uses official embeds under YouTube's ToS.
+(function firstRunAck() {
+  if (EDITION !== 'community') return;
+  if (localStorage.getItem('smdl_iptv_ack_v1')) return;
+  const veil = document.createElement('div');
+  veil.id = 'sm-ack-veil';
+  veil.style.cssText = 'position:fixed; inset:0; z-index:9999; background:rgba(8,10,14,0.92);'
+    + 'display:flex; align-items:center; justify-content:center; padding:18px;';
+  const card = document.createElement('div');
+  card.style.cssText = 'max-width:520px; background:#11151c; color:#e6e9ef; border:1px solid #2a313c;'
+    + 'border-radius:14px; padding:22px; font:14px/1.55 Inter,system-ui,sans-serif;';
+  card.innerHTML =
+    '<h2 style="margin:0 0 10px; font-size:18px">Before you start</h2>'
+    + '<p style="margin:0 0 10px; color:#aab2bf">This is a media <strong>player and catalogue</strong> '
+    + 'tool. It ships no television content of its own. Any channel sources you add are your '
+    + 'responsibility, and you are expected to have the right to access them under the laws that '
+    + 'apply to you.</p>'
+    + '<p style="margin:0 0 10px; color:#aab2bf">YouTube channels are played through YouTube&rsquo;s '
+    + 'official embedded player and remain subject to YouTube&rsquo;s Terms of Service. The software '
+    + 'is provided as-is, without warranty.</p>'
+    + '<label style="display:flex; gap:8px; align-items:flex-start; margin:14px 0; cursor:pointer">'
+    + '<input type="checkbox" id="sm-ack-cb" style="margin-top:3px">'
+    + '<span>I understand and agree, and I will only use this software in line with applicable law.</span>'
+    + '</label>'
+    + '<button id="sm-ack-ok" disabled style="width:100%; padding:11px; border:0; border-radius:9px;'
+    + 'background:#3a6df0; color:#fff; font-weight:600; font-size:14px; cursor:pointer; opacity:0.5">'
+    + 'Continue</button>';
+  veil.appendChild(card);
+  document.body.appendChild(veil);
+  const cb = card.querySelector('#sm-ack-cb');
+  const ok = card.querySelector('#sm-ack-ok');
+  cb.addEventListener('change', () => {
+    ok.disabled = !cb.checked;
+    ok.style.opacity = cb.checked ? '1' : '0.5';
+  });
+  ok.addEventListener('click', () => {
+    if (!cb.checked) return;
+    localStorage.setItem('smdl_iptv_ack_v1', new Date().toISOString());
+    veil.remove();
+  });
+})();
+
 const STATE_KEY = 'smdl_iptv_filters_v1';
 const FAV_KEY_V1 = 'smdl_iptv_favorites_v1';  // legacy — source-prefixed IDs
 const FAV_KEY    = 'smdl_iptv_favorites_v2';  // current — logical channel IDs
@@ -2926,6 +3004,7 @@ if (tg) { tg.ready(); tg.expand(); }
 const initData = tg?.initData || '';
 
 const CHANNEL_ID = {{CHANNEL_ID_JSON}};
+const EDITION = {{EDITION_JSON}};   // "community" | "private"
 
 async function api(path, opts = {}) {
   opts.headers = Object.assign({}, opts.headers || {}, {
@@ -3154,6 +3233,14 @@ function isApk() {
 
 document.getElementById('play-vlc')?.addEventListener('click', async () => {
   if (!CHANNEL?.url) return toast('No URL');
+  // Community edition has no HLS relay, so there's no m3u8 to hand to VLC
+  // for a YouTube-live channel — open the official YouTube page instead.
+  if (EDITION === 'community' && CHANNEL.source === 'youtube-live') {
+    const yt = CHANNEL.url;
+    if (tg?.openLink) { tg.openLink(yt, { try_instant_view: false }); }
+    else { window.open(yt, '_blank'); }
+    return;
+  }
   // YouTube-live needs the resolved m3u8 too — VLC can't deep-link into
   // youtube.com/@handle/live.
   const url = await resolveStreamUrl();
@@ -3231,8 +3318,38 @@ async function resolveStreamUrl() {
   return `/iptv/hls/${encodeURIComponent(CHANNEL_ID)}/index.m3u8`;
 }
 
+// Community edition plays YouTube via the official IFrame Player (a
+// permitted embedding use) instead of the same-origin HLS relay. The
+// server resolves the channel's current live video id; we drop the
+// unmodified official player into an <iframe> (ads intact).
+async function playYouTubeEmbed() {
+  toast('Loading YouTube live stream…', 2000);
+  let info;
+  try {
+    info = await api(`/api/iptv/channels/${encodeURIComponent(CHANNEL_ID)}/embed`);
+  } catch (e) {
+    return toast('Could not load stream: ' + e.message, 4000);
+  }
+  const v = document.getElementById('inline-video');
+  v.style.display = 'none';
+  let frame = document.getElementById('inline-frame');
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.id = 'inline-frame';
+    frame.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture; fullscreen');
+    frame.setAttribute('allowfullscreen', '');
+    frame.style.cssText = 'width:100%; aspect-ratio:16/9; border:0; border-radius:12px; display:block; margin-top:10px;';
+    v.insertAdjacentElement('afterend', frame);
+  }
+  frame.style.display = 'block';
+  frame.src = info.embed_url;
+}
+
 async function playInline() {
   if (!CHANNEL?.url) return toast('No URL');
+  if (EDITION === 'community' && CHANNEL.source === 'youtube-live') {
+    return playYouTubeEmbed();
+  }
   const url = await resolveStreamUrl();
   if (!url) return;
   const v = document.getElementById('inline-video');
@@ -3813,14 +3930,20 @@ async def iptv_browse_page():
     """Top-level browse page. Owner-only check is enforced by the JSON
     APIs the page calls (not by this static HTML responder) — same
     pattern miniapp.py / sticker_routes.py use for their HTML routes."""
-    return HTMLResponse(_BROWSE_HTML, headers=_NO_CACHE_HEADERS)
+    import json
+    html = _BROWSE_HTML.replace("{{EDITION_JSON}}", json.dumps(_edition.EDITION))
+    return HTMLResponse(html, headers=_NO_CACHE_HEADERS)
 
 
 @router.get("/iptv/play/{channel_id}", response_class=HTMLResponse)
 async def iptv_play_page(channel_id: str):
     import json
     safe = json.dumps(channel_id)  # JSON-string-encoded, safe for inline JS
-    html = _PLAY_HTML.replace("{{CHANNEL_ID_JSON}}", safe)
+    html = (
+        _PLAY_HTML
+        .replace("{{CHANNEL_ID_JSON}}", safe)
+        .replace("{{EDITION_JSON}}", json.dumps(_edition.EDITION))
+    )
     return HTMLResponse(html, headers=_NO_CACHE_HEADERS)
 
 

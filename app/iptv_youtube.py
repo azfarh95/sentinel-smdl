@@ -124,3 +124,86 @@ def clear_resolve_cache() -> int:
     n = len(_resolve_cache)
     _resolve_cache.clear()
     return n
+
+
+# ── Official IFrame embed path (community edition) ──────────────────
+#
+# The community build plays YouTube via the official IFrame Player API
+# (a permitted embedding use) instead of the same-origin HLS relay. The
+# player needs a *video id*: for `watch?v=<id>` / explicit-id channels we
+# parse it straight out of the stored URL (no yt-dlp); for `@handle/live`
+# channels we ask yt-dlp for the channel's current live video id. Cached
+# for the same TTL as the relay path.
+
+import re as _re
+
+# video_id cache: channel_url → (video_id, expires_at)
+_vid_cache: dict[str, tuple[str, float]] = {}
+
+
+def _video_id_from_url(url: str) -> str | None:
+    """Pull a YouTube video id straight out of a watch/embed/youtu.be URL.
+    Returns None for @handle/live pages (which need live resolution)."""
+    if not url:
+        return None
+    for pat in (
+        r"[?&]v=([A-Za-z0-9_-]{11})",
+        r"/embed/([A-Za-z0-9_-]{11})",
+        r"youtu\.be/([A-Za-z0-9_-]{11})",
+        r"/live/([A-Za-z0-9_-]{11})",
+    ):
+        m = _re.search(pat, url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _resolve_video_id_sync(channel_url: str) -> str:
+    """yt-dlp the @handle/live page for the *currently live* video id."""
+    import yt_dlp
+    ydl_opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extract_flat": False,
+        "socket_timeout": _RESOLVE_TIMEOUT_SEC,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(channel_url, download=False)
+    if not info:
+        raise RuntimeError("yt-dlp returned no info")
+    if info.get("_type") == "playlist":
+        entries = info.get("entries") or []
+        if not entries:
+            raise RuntimeError("channel has no current live stream")
+        info = entries[0]
+    if not info.get("is_live"):
+        raise RuntimeError("channel is not currently live")
+    vid = info.get("id")
+    if not vid:
+        raise RuntimeError("no video id in yt-dlp output")
+    return vid
+
+
+async def resolve_live_video_id(channel_url: str) -> str:
+    """Return a YouTube video id for an official-iframe embed.
+
+    Fast path: parse the id from a watch/embed/live URL with no network.
+    Slow path: @handle/live pages are resolved via yt-dlp (cached 30 min).
+    """
+    direct = _video_id_from_url(channel_url)
+    if direct:
+        return direct
+    now = time.time()
+    hit = _vid_cache.get(channel_url)
+    if hit and hit[1] > now:
+        return hit[0]
+    lock = _resolve_locks.setdefault(channel_url, asyncio.Lock())
+    async with lock:
+        hit = _vid_cache.get(channel_url)
+        if hit and hit[1] > now:
+            return hit[0]
+        loop = asyncio.get_event_loop()
+        vid = await loop.run_in_executor(None, _resolve_video_id_sync, channel_url)
+        _vid_cache[channel_url] = (vid, now + _RESOLVE_TTL_SEC)
+        return vid

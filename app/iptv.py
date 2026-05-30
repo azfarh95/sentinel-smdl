@@ -974,12 +974,19 @@ async def auto_probe_loop() -> None:
     Idempotent against the existing running-sweep gate (start_probe_all
     refuses if one's already in flight). Logs each tick + result."""
     # Initial delay so we don't slam the network the moment the
-    # container starts up — let other services settle first.
-    await asyncio.sleep(120)
+    # container starts up — let other services settle first, and give a
+    # clean window for live playback right after a restart.
+    await asyncio.sleep(300)
     while True:
         try:
+            # Keep concurrency modest: the sweep walks thousands of
+            # channels, and a high fan-out saturates the async DNS
+            # resolver thread-pool — which starves foreground requests
+            # (e.g. the youtube-live HLS relay's lookup of
+            # manifest.googlevideo.com), causing ConnectTimeouts mid-
+            # playback. 8 is gentle enough to stay out of the way.
             res = start_probe_all(
-                concurrency=32, timeout_s=6.0,
+                concurrency=8, timeout_s=6.0,
                 force_recheck=False,
                 fresh_window_hours=PROBE_AUTO_FRESH_WINDOW,
             )

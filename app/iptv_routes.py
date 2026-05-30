@@ -110,6 +110,7 @@ body.smdl-iptv-nav-hidden .smdl-iptv-topnav-host .reveal-pill { display: inline-
     <a href="/app#downloads" title="Downloads"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg> DL</a>
     <a href="/app#watchlist" title="Streams"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8.5a5 5 0 0 0 0 7"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M5 5.5a9 9 0 0 0 0 13"/><path d="M19 5.5a9 9 0 0 1 0 13"/></svg> Streams</a>
     <a href="/iptv" class="active" title="IPTV"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/><path d="M6 12a4 4 0 0 1 4-4"/></svg> IPTV</a>
+    <a href="/iptv/family" title="Family TV — simple MY/SG/ID channel picker"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3"/><circle cx="17" cy="9" r="2.4"/><path d="M3 20v-1a5 5 0 0 1 9-3"/><path d="M14 20v-.5a4 4 0 0 1 7-2.6"/></svg> Family</a>
     <a href="/app#files" title="Files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> Files</a>
     <a href="/app#scraper" title="Scraper"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg> Scrape</a>
     <a href="/app#admin" title="Server"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg> Server</a>
@@ -3802,4 +3803,141 @@ async def iptv_play_page(channel_id: str):
     import json
     safe = json.dumps(channel_id)  # JSON-string-encoded, safe for inline JS
     html = _PLAY_HTML.replace("{{CHANNEL_ID_JSON}}", safe)
+    return HTMLResponse(html, headers=_NO_CACHE_HEADERS)
+
+
+# ── Family TV — parent-friendly simplified browser ──────────────────
+#
+# A deliberately minimal landing page for non-technical viewers (the
+# owner's parents). Only the youtube-live channels are surfaced here:
+# those are the ones that play reliably in-app via the HLS relay
+# (broadcaster iptv-org sources are geo-blocked to MY/SG/ID residential
+# IPs and don't work from this server's exit). Plain anchor tiles — no
+# JS, no filters, no search — each pinned to the youtube-live source so
+# the play page always takes the relay path.
+
+# Map the fine-grained yaml categories down to four viewer-facing
+# buckets, in display order.
+_FAMILY_BUCKETS = [
+    ("News", {"news", "business"}),
+    ("General & Entertainment", {"general", "entertainment", "lifestyle", "education"}),
+    ("Religious", {"religious"}),
+    ("Radio", {"radio", "music"}),
+]
+_FAMILY_COUNTRIES = [
+    ("MY", "Malaysia", "\U0001F1F2\U0001F1FE"),
+    ("SG", "Singapore", "\U0001F1F8\U0001F1EC"),
+    ("ID", "Indonesia", "\U0001F1EE\U0001F1E9"),
+]
+
+
+def _family_bucket_of(categories: str) -> int:
+    cats = {c.strip().lower() for c in (categories or "").split(",") if c.strip()}
+    for idx, (_label, members) in enumerate(_FAMILY_BUCKETS):
+        if cats & members:
+            return idx
+    return 1  # default into "General & Entertainment"
+
+
+_FAMILY_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TV</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b35; --tx:#f2f5f9; --mut:#8b95a5; --accent:#3390ec; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; background:var(--bg); color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,sans-serif; }
+  .top { position:sticky; top:0; z-index:5; background:rgba(15,17,21,.96);
+    backdrop-filter:blur(8px); border-bottom:1px solid var(--line);
+    padding:16px 18px calc(16px + env(safe-area-inset-bottom,0)); padding-top:calc(16px + env(safe-area-inset-top,0)); }
+  .top h1 { margin:0; font-size:26px; font-weight:800; letter-spacing:.5px; }
+  .top p { margin:4px 0 0; color:var(--mut); font-size:15px; }
+  main { padding:8px 14px 60px; max-width:980px; margin:0 auto; }
+  .cty { margin-top:26px; }
+  .cty-h { display:flex; align-items:center; gap:10px; font-size:22px;
+    font-weight:800; margin:0 4px 12px; }
+  .cty-h .flag { font-size:28px; line-height:1; }
+  .sub { font-size:15px; font-weight:700; color:var(--mut); text-transform:uppercase;
+    letter-spacing:1px; margin:18px 4px 10px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr));
+    gap:14px; }
+  .tile { display:flex; flex-direction:column; align-items:center; gap:10px;
+    background:var(--card); border:1px solid var(--line); border-radius:16px;
+    padding:16px 10px; text-decoration:none; color:var(--tx);
+    transition:transform .08s ease, border-color .12s ease; min-height:150px; }
+  .tile:active { transform:scale(.96); border-color:var(--accent); }
+  .thumb { width:84px; height:84px; border-radius:50%; overflow:hidden;
+    background:#0b0d11; display:flex; align-items:center; justify-content:center; }
+  .thumb img { width:100%; height:100%; object-fit:cover; }
+  .cap { font-size:15px; font-weight:600; text-align:center; line-height:1.25; }
+  .empty { color:var(--mut); text-align:center; margin-top:40px; }
+  @media (min-width:520px){ .grid{ grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); } }
+</style>
+</head>
+<body>
+  <div class="top">
+    <h1>&#128250; TV</h1>
+    <p>Tap a channel to watch live</p>
+  </div>
+  <main>{{BODY}}</main>
+</body>
+</html>"""
+
+
+@router.get("/iptv/family", response_class=HTMLResponse)
+async def iptv_family_page(request: Request):
+    """Parent-friendly TV picker for MY/SG/ID. Server-rendered tiles."""
+    import html as _html
+
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT id, channel_id, name, country, categories "
+            "  FROM iptv_channels "
+            " WHERE source = 'youtube-live' AND country IN ('MY','SG','ID') "
+            " ORDER BY name COLLATE NOCASE"
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+
+    # country -> bucket_idx -> [channels]
+    by_country: dict[str, dict[int, list[dict]]] = {}
+    for r in rows:
+        cc = (r["country"] or "").upper()
+        b = _family_bucket_of(r["categories"])
+        by_country.setdefault(cc, {}).setdefault(b, []).append(r)
+
+    sections = []
+    for cc, cname, flag in _FAMILY_COUNTRIES:
+        buckets = by_country.get(cc)
+        if not buckets:
+            continue
+        used = [i for i, _ in enumerate(_FAMILY_BUCKETS) if buckets.get(i)]
+        show_sub = len(used) > 1
+        blocks = []
+        for i in used:
+            label = _FAMILY_BUCKETS[i][0]
+            tiles = []
+            for ch in buckets[i]:
+                logical = ch["channel_id"] or ch["id"].split(":", 1)[-1]
+                play = "/iptv/play/" + quote(ch["id"], safe="")
+                logo = "/iptv/logo/" + quote(logical, safe="")
+                nm = _html.escape(ch["name"])
+                tiles.append(
+                    f'<a class="tile" href="{play}">'
+                    f'<span class="thumb"><img src="{logo}" alt="" loading="lazy"></span>'
+                    f'<span class="cap">{nm}</span></a>'
+                )
+            sub = f'<h3 class="sub">{_html.escape(label)}</h3>' if show_sub else ""
+            blocks.append(sub + f'<div class="grid">{"".join(tiles)}</div>')
+        sections.append(
+            f'<section class="cty"><h2 class="cty-h">'
+            f'<span class="flag">{flag}</span>{_html.escape(cname)}</h2>'
+            f'{"".join(blocks)}</section>'
+        )
+
+    body = "".join(sections) or '<p class="empty">No channels available.</p>'
+    html = _FAMILY_HTML.replace("{{BODY}}", body)
     return HTMLResponse(html, headers=_NO_CACHE_HEADERS)

@@ -10,6 +10,11 @@
 # To add a channel: find a 24/7 livestream on YouTube, grab the @handle,
 # add an entry below. yt-dlp resolves https://youtube.com/@<handle>/live
 # at play time.
+#
+# Alternatively, point at one specific live broadcast with `video_id: <id>`
+# (the v= part of a watch?v= URL) — use this when the @handle/live page
+# resolves to the wrong stream or the channel runs several concurrent
+# live feeds. An explicit `url:` field overrides both.
 channels:
 
   # ── Singapore / SE Asia ─────────────────────────────────────────
@@ -51,6 +56,18 @@ channels:
   - id: rtm-news
     name: RTM Berita (TV2)
     handle: rtmkl
+    country: MY
+    categories: [news]
+
+  - id: berita-rtm
+    name: Berita RTM (Langsung)
+    video_id: NpVkmPLAx2Q
+    country: MY
+    categories: [news]
+
+  - id: awani-247
+    name: AWANI Live 24/7
+    video_id: mkVyNaGee8A
     country: MY
     categories: [news]
 

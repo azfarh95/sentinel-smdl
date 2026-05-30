@@ -1080,12 +1080,21 @@ async def refresh_from_youtube_yaml() -> dict:
         for ch in channels:
             cid = (ch.get("id") or "").strip().lower()
             handle = (ch.get("handle") or "").strip()
+            video_id = (ch.get("video_id") or "").strip()
+            explicit_url = (ch.get("url") or "").strip()
             name = (ch.get("name") or "").strip()
-            if not cid or not handle or not name:
+            # A channel resolves either from a @handle live page, a direct
+            # watch?v=<id> video, or an explicit full URL. Need at least one.
+            if not cid or not name or not (handle or video_id or explicit_url):
                 skipped += 1
                 continue
             row_id = f"youtube-live:{cid}"
-            url = iptv_youtube._channel_url_for(handle)
+            if explicit_url:
+                url = explicit_url
+            elif video_id:
+                url = f"https://www.youtube.com/watch?v={video_id}"
+            else:
+                url = iptv_youtube._channel_url_for(handle)
             country = (ch.get("country") or "").upper() or None
             cats = ch.get("categories") or []
             categories = ",".join(c.lower() for c in cats if c) or None

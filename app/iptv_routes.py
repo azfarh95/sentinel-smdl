@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -63,9 +64,10 @@ _IPTV_TOPNAV = """
     backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     transition: transform 180ms ease;
     font: 12px/1.2 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
-.smdl-iptv-topnav-host .nav a { display: inline-flex; align-items: center; gap: 5px;
+.smdl-iptv-topnav-host .nav a { display: inline-flex; align-items: center; gap: 6px;
     padding: 6px 10px; color: #cfd2d8; text-decoration: none; border-radius: 6px;
     border: 1px solid transparent; }
+.smdl-iptv-topnav-host .nav a svg { width: 16px; height: 16px; flex: none; }
 .smdl-iptv-topnav-host .nav a:hover { background: #1a1d24; color: #fff; }
 .smdl-iptv-topnav-host .nav a.active { background: #1a2a3a; color: #5ac8fa;
     border-color: #2a4054; }
@@ -93,14 +95,14 @@ body.smdl-iptv-nav-hidden .smdl-iptv-topnav-host .reveal-pill { display: inline-
 </style>
 <div class="smdl-iptv-topnav-host" id="smdl-iptv-topnav-host">
   <div class="nav" id="smdl-iptv-topnav">
-    <a href="/app" title="Home">🏠 Home</a>
-    <a href="/app#downloads" title="Downloads">⬇ DL</a>
-    <a href="/app#watchlist" title="Streams">👁 Streams</a>
-    <a href="/iptv" class="active" title="IPTV">📺 IPTV</a>
-    <a href="/app#files" title="Files">📁 Files</a>
-    <a href="/app#scraper" title="Scraper">🕷 Scrape</a>
-    <a href="/app#admin" title="Server">🛡 Server</a>
-    <a href="/app#settings" title="Settings">⚙</a>
+    <a href="/app" title="Home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9"/><path d="M9 21v-6h6v6"/></svg> Home</a>
+    <a href="/app#downloads" title="Downloads"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg> DL</a>
+    <a href="/app#watchlist" title="Streams"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8.5a5 5 0 0 0 0 7"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M5 5.5a9 9 0 0 0 0 13"/><path d="M19 5.5a9 9 0 0 1 0 13"/></svg> Streams</a>
+    <a href="/iptv" class="active" title="IPTV"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/><path d="M6 12a4 4 0 0 1 4-4"/></svg> IPTV</a>
+    <a href="/app#files" title="Files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> Files</a>
+    <a href="/app#scraper" title="Scraper"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg> Scrape</a>
+    <a href="/app#admin" title="Server"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg> Server</a>
+    <a href="/app#settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h8M16 6h4"/><path d="M4 12h4M12 12h8"/><path d="M4 18h8M16 18h4"/><circle cx="14" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="14" cy="18" r="2"/></svg> Settings</a>
     <span class="mode-chip" id="smdl-iptv-nav-mode-chip" title="Right-click here or anywhere on this bar to cycle: Fixed → Hover → Hidden">Fixed</span>
   </div>
   <span class="reveal-pill" id="smdl-iptv-nav-reveal" title="Right-click to bring the nav back">⋯ nav</span>
@@ -654,8 +656,8 @@ async def iptv_channel_resolve_url(channel_id: str, request: Request):
 class ProbeAllBody(BaseModel):
     source: str | None = None
     country: str | None = None
-    concurrency: int = 32
-    timeout_s: float = 6.0
+    concurrency: int = 16
+    timeout_s: float = 10.0
     force_recheck: bool = False     # set True to re-probe channels alive within the freshness window
     fresh_window_hours: int = 6
 
@@ -667,8 +669,8 @@ async def iptv_probe_all(body: ProbeAllBody, request: Request):
     await _verify_iptv(request)
     return _iptv.start_probe_all(
         source=body.source, country=body.country,
-        concurrency=max(1, min(int(body.concurrency or 32), 128)),
-        timeout_s=float(body.timeout_s or 6.0),
+        concurrency=max(1, min(int(body.concurrency or 16), 64)),
+        timeout_s=float(body.timeout_s or 10.0),
         force_recheck=bool(body.force_recheck),
         fresh_window_hours=max(1, min(int(body.fresh_window_hours or 6), 168)),
     )
@@ -787,6 +789,56 @@ def _safe_logo_filename(channel_id: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in channel_id)[:64]
 
 
+async def _resolve_youtube_avatar(page_url: str) -> str | None:
+    """Scrape a YouTube channel/live/watch page for the channel's avatar
+    image URL. YouTube embeds it in the initial-data JSON as
+    "avatar":{"thumbnails":[{"url":"https://yt3..."}]} — we grab the
+    largest. Returns None if the page can't be fetched or no avatar is
+    found. Used as a logo fallback for youtube-live channels that have
+    no curated `logo:` in the YAML."""
+    if not page_url or not page_url.startswith(("http://", "https://")):
+        return None
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True,
+                                     headers=headers) as cli:
+            r = await cli.get(page_url)
+        if r.status_code != 200:
+            return None
+        html = r.text
+        # Two page shapes carry the channel avatar:
+        #   • channel/@handle pages → "avatar":{"thumbnails":[...]}
+        #   • watch?v= pages        → the owner's
+        #     videoOwnerRenderer":{"thumbnail":{"thumbnails":[...]}
+        # Collect both, then pick the largest by =sNN size suffix.
+        blobs = re.findall(r'"avatar":\{"thumbnails":\[(.*?)\]', html)
+        blobs += re.findall(
+            r'videoOwnerRenderer":\{"thumbnail":\{"thumbnails":\[(.*?)\]', html
+        )
+        best: str | None = None
+        best_size = -1
+        for blob in blobs:
+            for m in re.finditer(r'"url":"(https://[^"]+?)"', blob):
+                u = m.group(1).replace("\\/", "/")
+                sm = re.search(r'[=-]s(\d+)', u)
+                size = int(sm.group(1)) if sm else 0
+                if size > best_size:
+                    best_size, best = size, u
+        # Upgrade the served size to a crisper ~176px crop when possible.
+        if best:
+            best = re.sub(r'=s\d+', "=s176", best)
+        return best
+    except Exception:
+        return None
+
+
 @router.get("/iptv/logo/{channel_id:path}")
 async def iptv_logo(channel_id: str, request: Request):
     """Serve a channel logo from on-disk cache, fetching the origin URL
@@ -811,6 +863,7 @@ async def iptv_logo(channel_id: str, request: Request):
 
     origin_url = None
     channel_name = channel_id
+    yt_page_url = None  # set for youtube-live channels lacking a curated logo
     async with aiosqlite.connect(_db.DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
         cur = await conn.execute(
@@ -825,13 +878,43 @@ async def iptv_logo(channel_id: str, request: Request):
         if row:
             origin_url, channel_name = row["logo"], row["name"]
         else:
+            # No member source carries a logo. Pull the logical name and,
+            # if this logical channel is backed by a youtube-live source,
+            # its page URL so we can scrape the channel avatar.
             cur = await conn.execute(
-                "SELECT name, logo FROM iptv_channels WHERE id = ? LIMIT 1",
+                "SELECT name FROM logical_channels WHERE id = ? LIMIT 1",
                 (channel_id,),
             )
-            row = await cur.fetchone()
-            if row:
-                origin_url, channel_name = row["logo"], row["name"]
+            lrow = await cur.fetchone()
+            if lrow:
+                channel_name = lrow["name"]
+            cur = await conn.execute(
+                "SELECT name, url FROM iptv_channels "
+                "WHERE channel_id = ? AND source = 'youtube-live' "
+                "AND url IS NOT NULL AND url != '' LIMIT 1",
+                (channel_id,),
+            )
+            yrow = await cur.fetchone()
+            if not yrow:
+                # Fall back to a direct id match (covers callers that pass
+                # a raw source id instead of a logical id).
+                cur = await conn.execute(
+                    "SELECT name, logo, url, source FROM iptv_channels "
+                    "WHERE id = ? LIMIT 1",
+                    (channel_id,),
+                )
+                drow = await cur.fetchone()
+                if drow:
+                    origin_url, channel_name = drow["logo"], drow["name"]
+                    if (not origin_url) and drow["source"] == "youtube-live":
+                        yt_page_url = drow["url"]
+            else:
+                channel_name = yrow["name"]
+                yt_page_url = yrow["url"]
+
+    # youtube-live channel with no curated logo: scrape its avatar once.
+    if not origin_url and yt_page_url:
+        origin_url = await _resolve_youtube_avatar(yt_page_url)
 
     if origin_url and origin_url.startswith(("http://", "https://")):
         try:
@@ -1631,13 +1714,13 @@ _BROWSE_HTML = r"""<!doctype html>
     <div style="padding:8px 0 4px;">
       <label style="display:flex; align-items:center; gap:8px; padding:4px 0;">
         <span style="flex:1">Concurrency</span>
-        <input type="range" id="probe-conc" min="4" max="128" step="4" value="32" style="width:120px">
-        <span id="probe-conc-v" style="font-variant-numeric:tabular-nums; width:32px; text-align:right">32</span>
+        <input type="range" id="probe-conc" min="4" max="64" step="4" value="16" style="width:120px">
+        <span id="probe-conc-v" style="font-variant-numeric:tabular-nums; width:32px; text-align:right">16</span>
       </label>
       <label style="display:flex; align-items:center; gap:8px; padding:4px 0;">
         <span style="flex:1">Timeout (s)</span>
-        <input type="range" id="probe-to" min="2" max="15" step="1" value="6" style="width:120px">
-        <span id="probe-to-v" style="font-variant-numeric:tabular-nums; width:32px; text-align:right">6</span>
+        <input type="range" id="probe-to" min="2" max="20" step="1" value="10" style="width:120px">
+        <span id="probe-to-v" style="font-variant-numeric:tabular-nums; width:32px; text-align:right">10</span>
       </label>
       <label style="display:flex; align-items:center; gap:8px; padding:4px 0;">
         <span style="flex:1">Fresh-skip (h)</span>
@@ -1649,7 +1732,10 @@ _BROWSE_HTML = r"""<!doctype html>
         <span>Force re-probe even fresh channels</span>
       </label>
       <div style="font-size:10px; opacity:.7; line-height:1.5; margin-top:2px;">
-        Higher concurrency = faster sweep (residential SG fibre handles ~64 easily).<br>
+        Keep concurrency low (16–32). Cranking it high makes the probe time out on its
+        own connections and mark live channels "dead" — most false-deaths are this.<br>
+        "Alive" only means the manifest is reachable from the server; it does not mean
+        the stream plays inline (geo-fencing / codec / CORS can still fail at playback).<br>
         Fresh-skip hides channels alive within the window. Set to 0 + ✓ force = full re-probe.
       </div>
     </div>
@@ -2204,8 +2290,8 @@ document.getElementById('probe-all-btn')?.addEventListener('click', async () => 
   const statusEl = document.getElementById('probe-status');
   btn.disabled = true; const orig = btn.textContent; btn.textContent = '🩺 Starting…';
   // Read user-tuned knobs (defaults if the user never opens the panel).
-  const conc  = parseInt(document.getElementById('probe-conc')?.value ?? '32', 10) || 32;
-  const tout  = parseInt(document.getElementById('probe-to')?.value ?? '6', 10) || 6;
+  const conc  = parseInt(document.getElementById('probe-conc')?.value ?? '16', 10) || 16;
+  const tout  = parseInt(document.getElementById('probe-to')?.value ?? '10', 10) || 10;
   const fresh = parseInt(document.getElementById('probe-fresh')?.value ?? '6', 10) || 6;
   const force = !!document.getElementById('probe-force')?.checked;
   try {

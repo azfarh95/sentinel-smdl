@@ -8,7 +8,7 @@
    *  No router — single-component view state machine. The TG BackButton
    *  is wired to navigate Detail → Search; on Search it closes the app. */
   import { onMount } from "svelte";
-  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive, Tv, Settings, Home, Puzzle, Plus, Trash2, Check, Shield } from "@lucide/svelte";
+  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive, Tv, Settings, Home, Puzzle, Plus, Trash2, Check, Shield, KeyRound } from "@lucide/svelte";
   import { api, type MetaItem, type StreamEntry, type GrabFile, type RDAccount,
             type StremioJob, type CacheEntry, type EpisodeMeta,
             type DiscoverData, type DiscoverItem, type AddonSummary } from "$lib/api";
@@ -317,6 +317,8 @@
   function fmtPct(p: number) { return Math.max(0, Math.min(100, p)).toFixed(0); }
 
   // ── P7 settings + resume position ────────────────────────────────────
+  type SettingsCat = "accounts" | "playback" | "storage" | "addons";
+  let settingsCat = $state<SettingsCat>("accounts");
   let settings = $state<any>(null);
   let settingsLoading = $state(false);
   let settingsSaving = $state(false);
@@ -895,6 +897,26 @@
           <Loader2 class="animate-spin size-5 mx-auto text-muted-foreground" />
         </CardContent></Card>
       {:else}
+        <!-- Category top nav — jump between Settings sections -->
+        <div class="sticky top-0 z-10 -mx-4 mb-3 px-4 py-2 bg-background/95 backdrop-blur
+                    border-b border-border flex gap-1 overflow-x-auto">
+          {#each [
+            { id: "accounts", label: "Accounts", icon: KeyRound },
+            { id: "playback", label: "Playback", icon: Play },
+            { id: "storage",  label: "Storage",  icon: HardDrive },
+            { id: "addons",   label: "Addons",   icon: Puzzle },
+          ] as cat (cat.id)}
+            <button onclick={() => { settingsCat = cat.id as SettingsCat; }}
+                    class="shrink-0 inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium
+                           {settingsCat === cat.id
+                             ? 'bg-primary text-primary-foreground'
+                             : 'bg-secondary text-muted-foreground hover:text-foreground'}">
+              <cat.icon class="size-3.5" />{cat.label}
+            </button>
+          {/each}
+        </div>
+
+        {#if settingsCat === "accounts"}
         <Card class="mb-3"><CardHeader>
           <CardTitle class="flex items-center gap-2">
             Real-Debrid
@@ -957,7 +979,9 @@
             <code>scripts/rotate_pia_creds.ps1</code>.
           </p>
         </CardContent></Card>
+        {/if}
 
+        {#if settingsCat === "playback"}
         <Card class="mb-3"><CardHeader>
           <CardTitle>Playback</CardTitle>
           <CardDescription>Default stream quality + auto-grab behaviour.</CardDescription>
@@ -979,7 +1003,9 @@
                    onchange={(e) => saveSettings({ auto_grab_top_seeded: (e.currentTarget as HTMLInputElement).checked })} />
           </div>
         </CardContent></Card>
+        {/if}
 
+        {#if settingsCat === "storage"}
         <Card class="mb-3"><CardHeader>
           <CardTitle>Cache</CardTitle>
           <CardDescription>Where grabbed files live + how big the cache can grow.</CardDescription>
@@ -1021,7 +1047,9 @@
             </p>
           </div>
         </CardContent></Card>
+        {/if}
 
+        {#if settingsCat === "accounts"}
         <Card class="mb-3"><CardHeader>
           <CardTitle class="flex items-center gap-2">
             Trakt
@@ -1053,7 +1081,9 @@
             </Button>
           {/if}
         </CardContent></Card>
+        {/if}
 
+        {#if settingsCat === "addons"}
         <Card><CardHeader>
           <CardTitle class="flex items-center gap-2"><Puzzle class="size-4" /> Addons</CardTitle>
           <CardDescription>Manage Stremio-protocol addons in the dedicated Addons tab.</CardDescription>
@@ -1062,6 +1092,7 @@
             <Puzzle class="size-3" /> Open Addons
           </Button>
         </CardContent></Card>
+        {/if}
       {/if}
     {/if}
 

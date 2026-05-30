@@ -12,6 +12,7 @@ from . import file_serve
 from . import interceptor  # noqa: F401 — triggers plugin auto-load at startup
 from . import iptv
 from . import iptv_routes
+from . import license_routes
 from . import miniapp
 from . import profile_monitor
 from . import sticker_routes
@@ -199,6 +200,7 @@ app.include_router(file_serve.router)
 app.include_router(miniapp.router)
 app.include_router(sticker_routes.router)
 app.include_router(iptv_routes.router)
+app.include_router(license_routes.router)
 
 
 # ── Edition gate ────────────────────────────────────────────────────

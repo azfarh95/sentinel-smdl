@@ -180,6 +180,50 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS ix_stickers_user
             ON stickers(user_id)
         """)
+        # ── License keys ─────────────────────────────────────────────────────
+        # The operator (this private instance) is the issuing authority for
+        # license keys that gate the distributed Community / Family APKs. The
+        # key the owner hands out is `SMDL-<TIER>.<key_id>.<secret>`; we store
+        # only an HMAC of the secret (so a DB leak doesn't yield usable keys).
+        # Every key is time-limited (expires_at always set). Validation is
+        # online: the APK calls /api/license/validate, which checks status +
+        # expiry + seats here and returns a grant the APK caches for an offline
+        # grace window. See app/licensing.py for the crypto/format.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS license_keys (
+                key_id      TEXT PRIMARY KEY,
+                tier        TEXT NOT NULL,
+                issued_to   TEXT,
+                seats       INTEGER NOT NULL DEFAULT 1,
+                secret_hash TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'active',
+                issued_at   TEXT NOT NULL,
+                expires_at  TEXT NOT NULL,
+                revoked_at  TEXT,
+                note        TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_license_status
+            ON license_keys(status)
+        """)
+        # One row per (key, device). Seat enforcement counts distinct devices
+        # per key; an already-seen device re-validating is free.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS license_activations (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_id       TEXT NOT NULL,
+                device_id    TEXT NOT NULL,
+                device_label TEXT,
+                first_seen   TEXT NOT NULL,
+                last_seen    TEXT NOT NULL,
+                UNIQUE(key_id, device_id)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_license_activation_key
+            ON license_activations(key_id)
+        """)
         await db.commit()
 
 
@@ -1038,6 +1082,114 @@ async def sticker_list_for_user(user_id: int) -> list[dict]:
         async with db.execute(
             "SELECT * FROM stickers WHERE user_id = ? ORDER BY created_at DESC",
             (int(user_id),),
+        ) as cur:
+            async for row in cur:
+                out.append(dict(row))
+    return out
+
+
+# ── License keys ─────────────────────────────────────────────────────────────
+
+
+async def license_create(key_id: str, tier: str, secret_hash: str,
+                         issued_to: str | None, seats: int,
+                         issued_at: str, expires_at: str,
+                         note: str | None = None) -> None:
+    """Persist a freshly-issued key. key_id is unique; the plaintext secret is
+    never stored — only its HMAC (secret_hash)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO license_keys
+                (key_id, tier, issued_to, seats, secret_hash, status,
+                 issued_at, expires_at, note)
+            VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
+        """, (key_id, tier, issued_to, int(seats), secret_hash,
+              issued_at, expires_at, note))
+        await db.commit()
+
+
+async def license_get(key_id: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM license_keys WHERE key_id = ?", (key_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def license_list() -> list[dict]:
+    """All keys, newest first, each with its current activation count."""
+    out: list[dict] = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT k.*,
+                   (SELECT COUNT(*) FROM license_activations a
+                     WHERE a.key_id = k.key_id) AS activations
+            FROM license_keys k
+            ORDER BY k.issued_at DESC
+        """) as cur:
+            async for row in cur:
+                out.append(dict(row))
+    return out
+
+
+async def license_revoke(key_id: str) -> bool:
+    """Flip a key to 'revoked'. Idempotent; returns True if a row changed."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("""
+            UPDATE license_keys SET status = 'revoked', revoked_at = ?
+            WHERE key_id = ? AND status != 'revoked'
+        """, (now, key_id))
+        await db.commit()
+        return (cur.rowcount or 0) > 0
+
+
+async def license_count_activations(key_id: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM license_activations WHERE key_id = ?",
+            (key_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
+
+async def license_activation_exists(key_id: str, device_id: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM license_activations WHERE key_id = ? AND device_id = ? LIMIT 1",
+            (key_id, device_id),
+        ) as cur:
+            return (await cur.fetchone()) is not None
+
+
+async def license_record_activation(key_id: str, device_id: str,
+                                    device_label: str | None = None) -> None:
+    """Upsert a (key, device) activation. An existing device just refreshes
+    last_seen; a new device claims a seat (caller checks the limit first)."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO license_activations
+                (key_id, device_id, device_label, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(key_id, device_id) DO UPDATE SET
+                last_seen    = excluded.last_seen,
+                device_label = COALESCE(excluded.device_label, device_label)
+        """, (key_id, device_id, device_label, now, now))
+        await db.commit()
+
+
+async def license_list_activations(key_id: str) -> list[dict]:
+    out: list[dict] = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM license_activations WHERE key_id = ? "
+            "ORDER BY last_seen DESC", (key_id,),
         ) as cur:
             async for row in cur:
                 out.append(dict(row))

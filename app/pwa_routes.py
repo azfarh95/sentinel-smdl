@@ -18,11 +18,15 @@ app is uploaded — so it's templated from the environment and returns an empty
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 router = APIRouter()
+
+_ASSETS = Path(__file__).resolve().parent / "assets"
+_ICON_PNG_512 = _ASSETS / "sentinel-tv-512.png"
 
 _THEME = "#0b0e14"
 _NAME = "Sentinel Media TV"
@@ -46,6 +50,17 @@ async def pwa_icon():
     )
 
 
+@router.get("/icons/sentinel-tv-512.png")
+async def pwa_icon_png():
+    """512x512 maskable PNG — the raster icon Bubblewrap consumes to generate
+    the Android launcher icons (it doesn't rasterise the SVG)."""
+    return FileResponse(
+        _ICON_PNG_512,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @router.get("/manifest.webmanifest")
 async def web_manifest():
     manifest = {
@@ -61,11 +76,17 @@ async def web_manifest():
         "categories": ["entertainment", "video"],
         "icons": [
             {
+                "src": "/icons/sentinel-tv-512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable",
+            },
+            {
                 "src": "/icons/sentinel-tv.svg",
                 "sizes": "any",
                 "type": "image/svg+xml",
                 "purpose": "any maskable",
-            }
+            },
         ],
     }
     return JSONResponse(

@@ -1641,6 +1641,16 @@ _BROWSE_HTML = r"""<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>SMDL · Live TV</title>
+  <meta name="theme-color" content="#0b0e14">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/sentinel-tv.svg" type="image/svg+xml">
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('/sw.js').catch(function () {});
+      });
+    }
+  </script>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root { color-scheme: dark light; --drawer-w: 280px; }

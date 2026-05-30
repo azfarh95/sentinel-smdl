@@ -15,6 +15,7 @@ from . import iptv_routes
 from . import license_routes
 from . import miniapp
 from . import profile_monitor
+from . import pwa_routes
 from . import sticker_routes
 from . import stream_monitor
 from .bot import build
@@ -201,6 +202,7 @@ app.include_router(miniapp.router)
 app.include_router(sticker_routes.router)
 app.include_router(iptv_routes.router)
 app.include_router(license_routes.router)
+app.include_router(pwa_routes.router)
 
 
 # ── Edition gate ────────────────────────────────────────────────────

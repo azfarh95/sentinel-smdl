@@ -113,14 +113,35 @@
   onMount(async () => {
     try { account = await api.account(); } catch (e) { /* non-fatal */ }
     const tg = (window as any).Telegram?.WebApp;
-    tg?.BackButton?.onClick(() => {
-      if (view === "grab") { view = "detail"; }
-      else if (view === "detail") { view = returnTo; selected = null; streams = []; }
-      else if (view !== "discover") { view = "discover"; }
-      else { tg.close?.(); }
-    });
+    if (tg?.BackButton) {
+      // Inside Telegram: the Mini App back chevron drives navigation.
+      tg.BackButton.onClick(() => { if (!goBackOneStep()) tg.close?.(); });
+    } else {
+      // Standalone (the Android WebView app / a plain browser): trap the
+      // hardware/browser Back button so it steps back through Theater views
+      // instead of leaving straight to the SMDL home. We keep one buffer
+      // history entry; each Back press pops it, we unwind one view level and
+      // re-push the buffer. Only when there's nothing left to unwind do we
+      // actually leave to /app.
+      history.pushState({ theater: true }, "");
+      window.addEventListener("popstate", onPopState);
+    }
     updateBack();
   });
+
+  // Unwind one level of Theater navigation. Returns false when already at the
+  // root (discover) — i.e. there is nowhere left to go inside the SPA.
+  function goBackOneStep(): boolean {
+    if (view === "grab") { view = "detail"; return true; }
+    if (view === "detail") { view = returnTo; selected = null; streams = []; return true; }
+    if (view !== "discover") { view = "discover"; return true; }
+    return false;
+  }
+
+  function onPopState() {
+    if (goBackOneStep()) history.pushState({ theater: true }, "");
+    else exitToHome();
+  }
 
   function updateBack() {
     const tg = (window as any).Telegram?.WebApp;

@@ -695,7 +695,7 @@
                 <div class="text-sm truncate" title={s.title}>{s.title.split("\n")[0]}</div>
                 <div class="text-[10px] text-muted-foreground">
                   {fmtSize(s.size_bytes)}
-                  {#if s.rd_blocked}· <span class="text-destructive">RD can't serve this</span>{/if}
+                  {#if s.rd_blocked}· <span class="text-amber-500">Not cached on RD</span>{/if}
                 </div>
               </div>
               {#if s.rd_blocked}
@@ -747,8 +747,9 @@
             <div class="text-sm text-destructive">{activeJob.error ?? "Unknown error"}</div>
             {#if activeJob.error_kind === "rd_infringing"}
               <div class="text-xs text-muted-foreground mt-2">
-                Real-Debrid only serves releases it has already cached. The sources it
-                can't serve are greyed out below — pick another, or try a different title.
+                Real-Debrid only streams releases that are already cached on its servers.
+                This one isn't — brand-new releases often aren't cached by anyone yet.
+                Tried sources are greyed out below; pick another, or try a more popular title.
               </div>
               <Button size="sm" variant="outline" class="mt-3"
                        onclick={() => { autoAdvancing = false; view = "detail"; }}>

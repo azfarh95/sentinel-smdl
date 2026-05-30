@@ -216,7 +216,7 @@ async def enqueue(*, imdb_id: str, type_: str, title: str,
                 "VALUES (?,?,?,?,?,?,?,?,?,'error',0,?,'rd_infringing',?,?)",
                 (imdb_id, type_, title, infohash, magnet, file_index,
                  source_stream_title, quality, expected_size,
-                 "Real-Debrid blocked this release (copyright takedown) — try another source",
+                 "Not cached on Real-Debrid — try another source",
                  now, now),
             )
             await db.commit()
@@ -322,7 +322,7 @@ async def _process_job(job: StremioJob) -> None:
                                          title=job.title)
                     await _update(
                         job.id, status="error", error_kind="rd_infringing",
-                        error="Real-Debrid blocked this release (copyright takedown) — try another source",
+                        error="Not cached on Real-Debrid — try another source",
                     )
                 else:
                     await _update(job.id, status="error", error_kind="rd_error",

@@ -695,7 +695,7 @@ async def stremio_grab(body: _StremioGrabBody, request: Request):
             return {
                 "ok": False,
                 "error_kind": "rd_infringing",
-                "error": "Real-Debrid blocked this release (copyright takedown) — try another source",
+                "error": "Not cached on Real-Debrid — try another source",
             }
         return {"ok": False, "error_kind": "rd_error", "error": str(e)}
     return {

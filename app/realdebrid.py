@@ -325,7 +325,7 @@ def magnet_to_direct_urls(magnet: str, *,
     if not out:
         if infringing_hit:
             raise RealDebridError(
-                "Real-Debrid blocked this release (copyright takedown)",
+                "Not cached on Real-Debrid",
                 http_status=451, error_code=35,
             )
         raise RealDebridError(

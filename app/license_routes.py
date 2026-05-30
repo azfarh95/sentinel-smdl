@@ -19,6 +19,7 @@ from . import edition
 from . import entitlements
 from . import licensing
 from . import license_registry
+from . import play_billing
 from . import profile
 from .miniapp import _require_owner, _verify, require_scope
 
@@ -209,6 +210,28 @@ async def license_validate(request: Request):
     grant = licensing.build_grant(row)
     grant.update(entitlements.enrich(row))
     return grant
+
+
+# ── Play Billing rail (parallel to license keys, same entitlement SoT) ────────
+
+
+@router.post("/api/billing/play/verify")
+async def play_billing_verify(request: Request):
+    """Verify a Google Play purchase/subscription token and return a grant.
+
+    The Play build's only paid rail. Returns the same grant shape as
+    /api/license/validate (valid, plan, entitlements, limits) so the client
+    treats both rails identically. Always HTTP 200 — branch on `valid`.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await play_billing.verify(
+        purchase_token=(body.get("purchase_token") or ""),
+        product_id=(body.get("product_id") or ""),
+        kind=(body.get("kind") or "product"),
+    )
 
 
 # ── Owner admin page ─────────────────────────────────────────────────────────

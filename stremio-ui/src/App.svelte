@@ -362,6 +362,40 @@
   }
   $effect(() => { if (view === "settings" && !rdStatus) loadRdStatus(); });
 
+  // ── PIA VPN creds (powers the direct-torrent fallback) ────────────────
+  type PiaField = { set: boolean; masked: string | null };
+  let piaStatus = $state<{ username: PiaField; password: PiaField;
+                           dip_token: PiaField; configured: boolean } | null>(null);
+  let piaUser = $state("");
+  let piaPass = $state("");
+  let piaDip  = $state("");
+  let piaSaving = $state(false);
+  let piaSaveMsg = $state<string | null>(null);
+
+  async function loadPiaStatus() {
+    try { piaStatus = await api.pia.status(); } catch (e) { lastError = String(e); }
+  }
+  async function savePia() {
+    // Only send fields the owner actually typed — blanks leave existing values
+    // untouched so you can rotate one credential without re-entering all three.
+    const patch: { username?: string; password?: string; dip_token?: string } = {};
+    if (piaUser.trim()) patch.username = piaUser.trim();
+    if (piaPass.trim()) patch.password = piaPass.trim();
+    if (piaDip.trim())  patch.dip_token = piaDip.trim();
+    if (Object.keys(patch).length === 0) return;
+    piaSaving = true; piaSaveMsg = null;
+    try {
+      const r = await api.pia.set(patch);
+      piaStatus = r.status;
+      piaUser = ""; piaPass = ""; piaDip = "";
+      piaSaveMsg = r.ok
+        ? (r.status.configured ? "Saved — VPN credentials stored." : "Saved.")
+        : `Couldn't save: ${r.error ?? "unknown error"}`;
+    } catch (e) { piaSaveMsg = String(e); }
+    finally { piaSaving = false; }
+  }
+  $effect(() => { if (view === "settings" && !piaStatus) loadPiaStatus(); });
+
   // Resume offer: when entering player, check for saved position.
   async function checkResume(imdb: string, vid: HTMLVideoElement) {
     try {
@@ -898,6 +932,51 @@
               <p class="text-xs text-muted-foreground">{rdSaveMsg}</p>
             {/if}
           {/if}
+        </CardContent></Card>
+
+        <Card class="mb-3"><CardHeader>
+          <CardTitle class="flex items-center gap-2">
+            PIA VPN
+            {#if piaStatus?.configured}<Badge variant="secondary">Configured</Badge>
+            {:else if piaStatus?.username.set || piaStatus?.password.set}
+              <Badge variant="destructive">Incomplete</Badge>
+            {:else}<Badge variant="destructive">Not set</Badge>{/if}
+          </CardTitle>
+          <CardDescription>
+            Private Internet Access credentials for the direct-torrent fallback —
+            when Real-Debrid can't serve an uncached release, the magnet is pulled
+            through PIA so your home IP never joins the swarm. Find these under
+            <span class="text-foreground">PIA dashboard → Account</span>
+            (OpenVPN/WireGuard user) and
+            <span class="text-foreground">→ Dedicated IP</span> (token).
+          </CardDescription>
+        </CardHeader><CardContent class="space-y-2">
+          <div class="space-y-2">
+            <Input type="text" autocomplete="off"
+                   placeholder={piaStatus?.username.set
+                     ? `Username (saved ${piaStatus.username.masked}) — leave blank to keep`
+                     : "PIA username (p1234567…)"}
+                   bind:value={piaUser} class="text-sm" />
+            <Input type="password" autocomplete="new-password"
+                   placeholder={piaStatus?.password.set
+                     ? "Password (saved) — leave blank to keep"
+                     : "PIA password"}
+                   bind:value={piaPass} class="text-sm" />
+            <Input type="password" autocomplete="off"
+                   placeholder={piaStatus?.dip_token.set
+                     ? `Dedicated IP token (saved ${piaStatus.dip_token.masked}) — leave blank to keep`
+                     : "Dedicated IP token (optional)"}
+                   bind:value={piaDip} class="text-sm" />
+          </div>
+          <div class="flex items-center gap-2">
+            <Button size="sm" disabled={piaSaving || (!piaUser.trim() && !piaPass.trim() && !piaDip.trim())}
+                    onclick={savePia}>
+              {#if piaSaving}<Loader2 class="animate-spin size-4" />{:else}Save{/if}
+            </Button>
+            {#if piaSaveMsg}
+              <span class="text-xs text-muted-foreground">{piaSaveMsg}</span>
+            {/if}
+          </div>
         </CardContent></Card>
 
         <Card class="mb-3"><CardHeader>

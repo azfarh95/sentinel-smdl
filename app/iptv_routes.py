@@ -41,7 +41,7 @@ from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -60,6 +60,8 @@ from . import profile as _profile
 from . import iptv as _iptv
 from . import iptv_dedup as _dedup
 from . import miniapp as _mini   # reuse _verify + require_scope
+from . import entitlements as _entitlements
+from . import grant_transport as _grant_transport
 
 
 # Shared top nav (#29). Injected into each IPTV page's <body>. Three display
@@ -984,11 +986,18 @@ class RecordBody(BaseModel):
     duration_min: int = 5
 
 
-@router.post("/api/iptv/channels/{channel_id}/record")
+@router.post(
+    "/api/iptv/channels/{channel_id}/record",
+    dependencies=[Depends(_grant_transport.requires(_entitlements.CAP_TV_RECORDER))],
+)
 async def iptv_record(channel_id: str, body: RecordBody, request: Request):
     """Queue an ffmpeg recording of the channel. Returns immediately;
     job lands in iptv_recordings table + the file appears in
-    /downloads/iptv/. Poll GET /api/iptv/recordings for status."""
+    /downloads/iptv/. Poll GET /api/iptv/recordings for status.
+
+    Recording is a paid (plus/family) capability. The grant_transport dependency
+    402s a caller whose grant lacks smdl.tv.recorder on community/play builds;
+    the private edition is exempt (enforcement_active() is False there)."""
     await _verify_iptv(request)
     try:
         result = await _iptv.start_iptv_recording(

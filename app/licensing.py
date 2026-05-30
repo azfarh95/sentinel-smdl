@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -149,7 +150,10 @@ def clamp_seats(seats: int) -> int:
 
 
 def build_grant(row: dict) -> dict:
-    """Shape the success response the APK caches. `row` is a license_keys row."""
+    """Shape the success response the APK caches. `row` is a license_keys row.
+
+    The caller enriches this with plan/entitlements and then runs it through
+    `sign_grant` so the cached copy is tamper-evident on a rooted device."""
     return {
         "valid": True,
         "tier": row["tier"],
@@ -158,3 +162,84 @@ def build_grant(row: dict) -> dict:
         "grace_seconds": GRACE_SECONDS,
         "issued_to": row.get("issued_to"),
     }
+
+
+# ── Signed grants ────────────────────────────────────────────────────────────
+# A grant is a flat JSON object the APK caches and replays. Without a signature
+# a rooted device could edit `entitlements`/`plan` in its cache and unlock paid
+# caps offline. We HMAC the canonical JSON of every field (except the signature
+# itself) under the same signing secret, so any edit invalidates it. The same
+# secret signs license-key and Play-Billing grants — one verification path.
+
+GRANT_SIG_ALG = "HS256-grant-v1"
+
+
+def _canonical_grant_bytes(grant: dict) -> bytes:
+    """Deterministic bytes to HMAC: every field except `sig`, key-sorted with
+    tight separators so sign-time and verify-time serialisation are identical."""
+    payload = {k: v for k, v in grant.items() if k != "sig"}
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
+
+
+def sign_grant(grant: dict, *, now: datetime | None = None) -> dict:
+    """Attach an HMAC signature so the cached grant can't be forged. Stamps
+    `iat` (issued-at, epoch seconds) if absent, sets `sig_alg`, then signs the
+    canonical JSON of all fields except `sig`. Mutates and returns `grant`.
+
+    >>> import os
+    >>> os.environ["LICENSE_SIGNING_SECRET"] = "doctest-secret"
+    >>> g = sign_grant({"valid": True, "plan": "plus", "entitlements": ["a"]})
+    >>> verify_grant(g)
+    True
+    >>> g["plan"] = "family"          # tamper with the cached entitlement
+    >>> verify_grant(g)
+    False
+    """
+    if "iat" not in grant:
+        base = now or datetime.now(timezone.utc)
+        grant["iat"] = int(base.timestamp())
+    grant["sig_alg"] = GRANT_SIG_ALG
+    grant.pop("sig", None)  # never sign over a stale signature
+    grant["sig"] = hmac.new(
+        _signing_secret().encode(), _canonical_grant_bytes(grant), hashlib.sha256
+    ).hexdigest()
+    return grant
+
+
+def verify_grant(grant: dict, *, now: datetime | None = None) -> bool:
+    """True iff the grant carries our signature, its signature is within the
+    offline grace window, and the underlying key hasn't expired. Fail-closed on
+    anything missing or misconfigured.
+
+    >>> import os
+    >>> os.environ["LICENSE_SIGNING_SECRET"] = "doctest-secret"
+    >>> verify_grant({"valid": True})            # unsigned
+    False
+    >>> verify_grant({"valid": True, "sig": "deadbeef", "sig_alg": "HS256-grant-v1"})
+    False
+    """
+    if not isinstance(grant, dict):
+        return False
+    sig = grant.get("sig")
+    if not sig or grant.get("sig_alg") != GRANT_SIG_ALG:
+        return False
+    try:
+        expected = hmac.new(
+            _signing_secret().encode(), _canonical_grant_bytes(grant), hashlib.sha256
+        ).hexdigest()
+    except LicensingNotConfigured:
+        return False
+    if not hmac.compare_digest(str(sig), expected):
+        return False
+    iat = grant.get("iat")
+    if not isinstance(iat, (int, float)):
+        return False
+    age = (now or datetime.now(timezone.utc)).timestamp() - float(iat)
+    if age < -300 or age > GRACE_SECONDS:  # 5-min skew tolerance, then grace cap
+        return False
+    exp = grant.get("expires_at")
+    if exp and is_expired(exp, now=now):
+        return False
+    return True

@@ -209,7 +209,7 @@ async def license_validate(request: Request):
 
     grant = licensing.build_grant(row)
     grant.update(entitlements.enrich(row))
-    return grant
+    return licensing.sign_grant(grant)
 
 
 # ── Play Billing rail (parallel to license keys, same entitlement SoT) ────────
@@ -227,11 +227,19 @@ async def play_billing_verify(request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    return await play_billing.verify(
+    grant = await play_billing.verify(
         purchase_token=(body.get("purchase_token") or ""),
         product_id=(body.get("product_id") or ""),
         kind=(body.get("kind") or "product"),
     )
+    # Sign valid grants so the cached copy is tamper-evident — same path as the
+    # license rail. Fail closed if signing isn't configured on this deployment
+    # rather than emitting a forgeable unsigned grant.
+    if grant.get("valid"):
+        if not licensing.is_configured():
+            return {"valid": False, "reason": "signing_not_configured"}
+        grant = licensing.sign_grant(grant)
+    return grant
 
 
 # ── Owner admin page ─────────────────────────────────────────────────────────

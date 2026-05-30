@@ -30,6 +30,7 @@ import aiosqlite
 import httpx
 
 from . import database as db
+from . import edition
 
 
 logger = logging.getLogger(__name__)
@@ -367,7 +368,12 @@ def parse_m3u(text: str) -> list[dict]:
 # normalised channel dicts. The upsert loop below is shared.
 
 
-SOURCES: dict[str, dict] = {
+# The full catalogue of bundled restream sources is PRIVATE-ONLY. These
+# are third-party aggregator lists (iptv-org, Free-TV, i.mjh.nz, …) plus
+# the youtube-live relay source. The community edition ships none of them
+# — it is a platform shell into which the operator supplies their own
+# sources. See app/edition.py for why the split exists.
+_PRIVATE_SOURCES: dict[str, dict] = {
     "iptv-org": {
         "name": "iptv-org (global)",
         "url":  "https://iptv-org.github.io/iptv/",
@@ -404,6 +410,9 @@ SOURCES: dict[str, dict] = {
         "kind": "yaml",  # different refresh path — see refresh_from_youtube_yaml
     },
 }
+
+# Community edition gets an empty baseline; private gets the full set.
+SOURCES: dict[str, dict] = dict(_PRIVATE_SOURCES) if edition.is_private() else {}
 
 
 # ── Per-country iptv-org slices ─────────────────────────────────────

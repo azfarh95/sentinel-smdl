@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from . import database as db
+from . import edition
 from . import file_serve
 from . import interceptor  # noqa: F401 — triggers plugin auto-load at startup
 from . import iptv
@@ -198,6 +199,35 @@ app.include_router(file_serve.router)
 app.include_router(miniapp.router)
 app.include_router(sticker_routes.router)
 app.include_router(iptv_routes.router)
+
+
+# ── Edition gate ────────────────────────────────────────────────────
+#
+# Private-only feature surfaces. The community build ships as a platform
+# shell: no torrent / Real-Debrid pipeline and no server-side HLS relay
+# (YouTube is embedded via the official IFrame Player instead). We block
+# these path prefixes outright in community so the routes can stay in the
+# codebase without being reachable. See app/edition.py.
+from fastapi.responses import JSONResponse as _EdJSONResponse  # noqa: E402
+from fastapi.requests import Request as _EdRequest  # noqa: E402
+
+_PRIVATE_PATH_PREFIXES = (
+    "/api/miniapp/stremio/",  # torrent / Real-Debrid / Stremio pipeline
+    "/iptv/hls/",             # same-origin HLS relay
+    "/api/iptv/refresh",      # bundled restream catalogue refresh (+ _country)
+)
+
+
+@app.middleware("http")
+async def _edition_gate(request: _EdRequest, call_next):
+    if edition.is_community():
+        path = request.url.path
+        if any(path.startswith(p) for p in _PRIVATE_PATH_PREFIXES):
+            return _EdJSONResponse(
+                {"ok": False, "error": "not_available_in_this_edition"},
+                status_code=404,
+            )
+    return await call_next(request)
 
 
 # Global 5xx → JSON shim (#38). Without this, an unhandled exception inside

@@ -1073,7 +1073,7 @@ async def stremio_queue_enqueue(body: _StremioQueueBody, request: Request):
         quality=body.quality, expected_size=body.expected_size,
     )
     job = await _sq.get_job(job_id)
-    return {"ok": True, "job_id": job_id, "job": _job_to_dict(job)}
+    return {"ok": True, "job_id": job_id, "job": _stremio_job_to_dict(job)}
 
 
 @router.get("/api/miniapp/stremio/jobs")
@@ -1083,7 +1083,7 @@ async def stremio_jobs_list(request: Request, limit: int = 50):
     _require_owner(p)
     from . import stremio_queue as _sq
     jobs = await _sq.list_jobs(limit=limit)
-    return {"jobs": [_job_to_dict(j) for j in jobs]}
+    return {"jobs": [_stremio_job_to_dict(j) for j in jobs]}
 
 
 @router.get("/api/miniapp/stremio/jobs/{job_id}")
@@ -1094,7 +1094,7 @@ async def stremio_jobs_get(job_id: int, request: Request):
     job = await _sq.get_job(job_id)
     if not job:
         raise HTTPException(404, "no such job")
-    return {"job": _job_to_dict(job)}
+    return {"job": _stremio_job_to_dict(job)}
 
 
 @router.get("/api/miniapp/stremio/file/{infohash}")
@@ -1255,7 +1255,7 @@ async def branding_logo_delete(request: Request):
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-def _job_to_dict(job) -> dict:
+def _stremio_job_to_dict(job) -> dict:
     """StremioJob → dict for JSON response. Mirrors the dataclass shape."""
     if job is None:
         return {}

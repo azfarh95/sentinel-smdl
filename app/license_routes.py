@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse
 
 from . import database as db
 from . import licensing
+from . import license_registry
 from .miniapp import _require_owner, _verify, require_scope
 
 router = APIRouter()
@@ -53,6 +54,11 @@ async def license_create(request: Request):
         issued_to=issued_to, seats=seats, issued_at=now_iso,
         expires_at=expires_at, note=note,
     )
+    # Best-effort mirror to the central registry (never blocks issuance).
+    license_registry.fire_upsert({
+        "key_id": key_id, "tier": tier, "status": "active",
+        "expires_at": expires_at, "issued_to": issued_to, "note": note,
+    })
     return {
         "ok": True,
         "key_code": key_code,   # show once
@@ -87,6 +93,7 @@ async def license_list(request: Request):
         "keys": [_decorate(r) for r in rows],
         "tiers": list(licensing.TIERS),
         "grace_seconds": licensing.GRACE_SECONDS,
+        "registry": license_registry.status(),
     }
 
 
@@ -100,7 +107,24 @@ async def license_revoke(request: Request):
     if not key_id:
         raise HTTPException(400, "key_id required")
     changed = await db.license_revoke(key_id)
+    # Mirror the revocation centrally (best-effort). Pull the row so the
+    # registry gets accurate metadata even if it never saw the key before.
+    row = await db.license_get(key_id)
+    if row:
+        license_registry.fire_upsert(dict(row), force_revoked=True)
     return {"ok": True, "revoked": changed}
+
+
+@router.post("/api/miniapp/admin/license/sync")
+async def license_sync(request: Request):
+    """Reconcile every local key to the central registry. Idempotent; safe to
+    re-run. Owner-only."""
+    p = await _verify(request)
+    _require_owner(p)
+    require_scope(p, "smdl.license")
+    rows = [dict(r) for r in await db.license_list()]
+    result = await license_registry.backfill(rows)
+    return {"ok": result.get("ok", False), **result}
 
 
 @router.get("/api/miniapp/admin/license/{key_id}/activations")
@@ -264,8 +288,12 @@ _LICENSE_HTML = r"""<!doctype html>
   </div>
 
   <div class="card">
-    <h2>Existing keys</h2>
-    <div id="keys-host"><p class="muted">Loading…</p></div>
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px">
+      <h2 style="margin:0">Existing keys</h2>
+      <button class="ghost" id="btn-sync" style="display:none" title="Push all keys to the central registry">Sync to registry</button>
+    </div>
+    <p class="sub" id="registry-line" style="margin:8px 0 0"></p>
+    <div id="keys-host" style="margin-top:10px"><p class="muted">Loading…</p></div>
   </div>
 </div>
 <div id="toast"></div>
@@ -310,6 +338,16 @@ async function loadKeys() {
   try {
     const res = await api('/api/miniapp/admin/license/list');
     document.getElementById('config-warn').style.display = res.configured ? 'none' : 'block';
+    const reg = res.registry || {};
+    const regLine = document.getElementById('registry-line');
+    const syncBtn = document.getElementById('btn-sync');
+    if (reg.enabled) {
+      regLine.innerHTML = 'Central registry: <span style="color:#6fe39a">connected</span> <span class="muted">(' + esc(reg.url) + ')</span>';
+      syncBtn.style.display = '';
+    } else {
+      regLine.innerHTML = 'Central registry: <span class="muted">not configured — keys are local-only</span>';
+      syncBtn.style.display = 'none';
+    }
     const keys = res.keys || [];
     if (!keys.length) { host.innerHTML = '<p class="muted">No keys issued yet.</p>'; return; }
     let html = '<table><thead><tr>' +
@@ -379,6 +417,21 @@ async function revokeKey(keyId) {
   }
 }
 
+async function syncRegistry() {
+  const btn = document.getElementById('btn-sync');
+  btn.disabled = true;
+  try {
+    const res = await api('/api/miniapp/admin/license/sync', { method: 'POST', body: '{}' });
+    toast('Synced ' + (res.synced || 0) + '/' + (res.total || 0) + (res.failed ? ' (' + res.failed + ' failed)' : ''));
+    loadKeys();
+  } catch (e) {
+    toast('Sync failed: ' + e.message, 3500);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('btn-sync').addEventListener('click', syncRegistry);
 document.getElementById('btn-create').addEventListener('click', createKey);
 document.getElementById('btn-copy').addEventListener('click', () => {
   const code = document.getElementById('keycode').textContent;

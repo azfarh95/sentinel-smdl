@@ -1099,17 +1099,39 @@ async def stremio_jobs_get(job_id: int, request: Request):
 
 @router.get("/api/miniapp/stremio/file/{infohash}")
 async def stremio_file_stream(infohash: str, request: Request):
-    """Range-served local file for a cached Stremio grab. Phones can
-    seek mid-stream because we honour the HTTP Range header."""
+    """Range-served video for a Stremio grab. Two sources, transparently:
+
+    1. Fully cached file on disk → plain range serve (seek anywhere).
+    2. A torrent still downloading via the qB-behind-PIA fallback → progressive
+       serve: we hand out only bytes whose covering pieces are already on disk
+       and block until the rest arrives. Same URL, so the player connects once
+       and keeps playing as 'streaming' flips to 'cached'.
+
+    Phones seek mid-stream because we honour the HTTP Range header in both."""
     p = await _verify(request)
     _require_owner(p)
     from . import stremio_cache as _cache
     entry = _cache.find_by_infohash(infohash)
-    if not entry or not entry.file_path.exists():
-        raise HTTPException(404, "not cached")
-    _cache.touch_last_played(infohash)
-    return _serve_with_range(entry.file_path, entry.mime or "application/octet-stream",
-                              request.headers.get("range"))
+    if entry and entry.file_path.exists():
+        _cache.touch_last_played(infohash)
+        return _serve_with_range(entry.file_path, entry.mime or "application/octet-stream",
+                                  request.headers.get("range"))
+    # Not cached (yet). If a live torrent is mid-download, serve it progressively.
+    from . import qbittorrent as _qb
+    if await asyncio.to_thread(_qb.torrent, infohash) is not None:
+        resp = _serve_progressive_torrent(infohash, request.headers.get("range"))
+        if resp is not None:
+            return resp
+    # Finalize race: the torrent may have just moved into the cache between the
+    # two checks. Give it a brief window before declaring 404.
+    for _ in range(6):
+        await asyncio.sleep(0.5)
+        entry = _cache.find_by_infohash(infohash)
+        if entry and entry.file_path.exists():
+            _cache.touch_last_played(infohash)
+            return _serve_with_range(entry.file_path, entry.mime or "application/octet-stream",
+                                      request.headers.get("range"))
+    raise HTTPException(404, "not cached")
 
 
 @router.get("/api/miniapp/stremio/cache")
@@ -1385,6 +1407,134 @@ def _serve_with_range(path, media_type: str, range_header: Optional[str]):
             "Content-Length": str(length),
         },
     )
+
+
+def _serve_progressive_torrent(infohash: str, range_header: Optional[str]):
+    """Range-serve the picked video of a still-downloading torrent, gating every
+    chunk on piece availability. Returns a StreamingResponse, or None if the
+    torrent/metadata isn't ready enough to serve (caller falls back to 404).
+
+    qB writes pieces as they land; sequentialDownload fills the file
+    front-to-back and firstLastPiecePrio pulls the tail early — so the apparent
+    file size lies (a sparse hole sits in the middle). We advertise the TRUE
+    final size (from the file row) so the player knows the duration, then stream
+    sequentially, blocking per-chunk until pieces_ready() says the covering
+    pieces are all on disk. When the torrent vanishes (finalize moved it to the
+    cache) our already-open fd survives the rename, so we read to the end."""
+    from fastapi.responses import StreamingResponse
+    from . import qbittorrent as _qb
+    import mimetypes
+
+    t = _qb.torrent(infohash)
+    if t is None:
+        return None
+    rows = _qb.files(infohash)
+    vid = _qb.pick_video_file(rows)
+    props = _qb.properties(infohash)
+    piece_size = int(props.get("piece_size") or 0)
+    save_path = t.get("save_path") or props.get("save_path") or "/downloads"
+    if not vid or int(vid.get("size") or 0) <= 0 or piece_size <= 0:
+        return None
+
+    size = int(vid["size"])
+    name = vid["name"]
+    file_offset = _qb.file_offset_in_torrent(rows, vid)
+    media_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+    start, end = 0, size - 1
+    status_code = 200
+    if range_header:
+        import re
+        m = re.match(r"bytes=(\d*)-(\d*)", range_header)
+        if not m:
+            raise HTTPException(416, "bad Range")
+        start = int(m.group(1)) if m.group(1) else 0
+        end = int(m.group(2)) if m.group(2) else size - 1
+        start = max(0, start); end = min(end, size - 1)
+        if start > end:
+            raise HTTPException(416, "Range not satisfiable")
+        status_code = 206
+    length = end - start + 1
+
+    chunk = 1024 * 1024
+    # How long to wait for a single chunk's pieces before giving up. The queue's
+    # own stall guard fails the job sooner; this is just a backstop so a dead
+    # connection doesn't hang a worker forever.
+    piece_wait_deadline = 180
+
+    def _stream():
+        from pathlib import Path
+        fh = None
+        try:
+            pos = start
+            remaining = length
+            while remaining > 0:
+                want = min(chunk, remaining)
+                rng_end = pos + want - 1
+                states = _qb.piece_states(infohash)
+                if not states:
+                    # Torrent gone — finalize moved the file out (our open fd, if
+                    # any, survives the rename) or it was killed. Read whatever is
+                    # on disk; a short read just ends the stream.
+                    if fh is None:
+                        path = _qb.live_path(save_path, name)
+                        if path is None:
+                            return
+                        fh = open(path, "rb")
+                        fh.seek(pos)
+                    data = fh.read(want)
+                    if not data:
+                        return
+                    pos += len(data); remaining -= len(data)
+                    yield data
+                    continue
+                if not _qb.pieces_ready(states, piece_size, file_offset, pos, rng_end):
+                    # Pieces not down yet — wait for them, bounded.
+                    waited = 0.0
+                    while waited < piece_wait_deadline:
+                        time.sleep(1.0)
+                        waited += 1.0
+                        states = _qb.piece_states(infohash)
+                        if not states:
+                            break  # torrent gone; loop top re-resolves via fd
+                        if _qb.pieces_ready(states, piece_size, file_offset, pos, rng_end):
+                            break
+                    else:
+                        return  # backstop timeout — end the stream
+                    if not states:
+                        continue
+                if fh is None:
+                    path = _qb.live_path(save_path, name)
+                    if path is None:
+                        time.sleep(1.0)
+                        continue
+                    fh = open(path, "rb")
+                    fh.seek(pos)
+                data = fh.read(want)
+                if not data:
+                    # File on disk shorter than the pieces claim (rename in
+                    # flight) — reopen on next pass.
+                    try:
+                        fh.close()
+                    except Exception:
+                        pass
+                    fh = None
+                    time.sleep(0.5)
+                    continue
+                pos += len(data); remaining -= len(data)
+                yield data
+        finally:
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
+    headers = {"Accept-Ranges": "bytes", "Content-Length": str(length)}
+    if status_code == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    return StreamingResponse(_stream(), status_code=status_code,
+                             media_type=media_type, headers=headers)
 
 
 @router.post("/api/miniapp/downloads/clear")

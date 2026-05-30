@@ -65,6 +65,9 @@ _TORRENT_FALLBACK = (os.environ.get("STREMIO_TORRENT_FALLBACK", "1").strip().low
 TORRENT_META_TIMEOUT = int(os.environ.get("STREMIO_TORRENT_META_TIMEOUT", "150"))
 # Absolute ceiling on a single torrent download before we give up.
 TORRENT_HARD_TIMEOUT = int(os.environ.get("STREMIO_TORRENT_HARD_TIMEOUT", "2400"))
+# Once we've handed the player a progressive stream, how long the file may make
+# zero download progress before we declare the swarm dead and fail the job.
+TORRENT_STREAM_STALL = int(os.environ.get("STREMIO_TORRENT_STREAM_STALL", "180"))
 
 
 @dataclass
@@ -429,6 +432,20 @@ async def _download_to_cache(job_id: int, url: str, filename: str,
     )
 
 
+async def _fail_streaming(job: StremioJob, ih: str, msg: str) -> None:
+    """Tear down a torrent that died after we'd already flipped the job to
+    'streaming'. The player may be connected to /file/<infohash>; setting the
+    job to 'error' is what the UI polls to surface the failure. We also remove
+    the torrent (with its partial data) so qB doesn't keep seeding a release we
+    abandoned. The caller returns True afterwards — the fallback is spent, so we
+    must NOT fall back to the original block-and-advance path on top of it."""
+    await _update(job.id, status="error", error=msg, error_kind="torrent_stream")
+    try:
+        await asyncio.to_thread(_qb.delete, ih, with_files=True)
+    except Exception:
+        logger.warning("torrent fallback: cleanup after stream failure failed (job %s)", job.id)
+
+
 async def _download_via_torrent(job: StremioJob) -> bool:
     """RD-451 fallback: pull the magnet through qBittorrent (behind PIA) and
     cache the result exactly like an RD grab.
@@ -464,10 +481,21 @@ async def _download_via_torrent(job: StremioJob) -> bool:
     meta_deadline = time.time() + TORRENT_META_TIMEOUT
     hard_deadline = time.time() + TORRENT_HARD_TIMEOUT
     last_state = None
+    # Once we know the file, flip the job to 'streaming' and point the player at
+    # the live progressive endpoint — playback starts while the download runs.
+    streaming = False
+    filename = ""
+    filesize = 0
+    last_prog = 0.0
+    last_prog_at = time.time()
     try:
         while True:
-            if time.time() > hard_deadline:
+            now = time.time()
+            if now > hard_deadline:
                 logger.warning("torrent fallback: job %s hit hard timeout", job.id)
+                if streaming:
+                    await _fail_streaming(job, ih, "Download stalled — the swarm dried up mid-stream.")
+                    return True
                 return False
             t = await asyncio.to_thread(_qb.torrent, ih)
             if t is None:
@@ -483,32 +511,66 @@ async def _download_via_torrent(job: StremioJob) -> bool:
             if state in {"error", "missingfiles"}:
                 logger.warning("torrent fallback: job %s torrent errored (%s)",
                                job.id, state)
+                if streaming:
+                    await _fail_streaming(job, ih, "The torrent errored mid-stream.")
+                    return True
                 return False
             # Dead-magnet guard: no metadata + no peers within the window.
-            if prog <= 0 and peers == 0 and time.time() > meta_deadline:
+            if prog <= 0 and peers == 0 and now > meta_deadline:
                 logger.warning("torrent fallback: job %s found no peers in %ds",
                                job.id, TORRENT_META_TIMEOUT)
                 return False
+            # Stall guard once streaming: no byte progress for too long = dead.
+            if streaming:
+                if prog > last_prog + 1e-6:
+                    last_prog, last_prog_at = prog, now
+                elif now - last_prog_at > TORRENT_STREAM_STALL:
+                    logger.warning("torrent fallback: job %s stalled mid-stream", job.id)
+                    await _fail_streaming(job, ih, "Download stalled — the swarm dried up mid-stream.")
+                    return True
+
             await _update(job.id, progress=max(0.0, min(99.0, prog * 100.0)))
+
+            # Flip to streaming as soon as metadata + the picked file resolve.
+            # The /file/<infohash> endpoint serves the live file with per-range
+            # piece gating, so the player can connect immediately and buffer.
+            if not streaming:
+                rows = await asyncio.to_thread(_qb.files, ih)
+                vid = _qb.pick_video_file(rows)
+                props = await asyncio.to_thread(_qb.properties, ih)
+                if vid and int(vid.get("size") or 0) > 0 and int(props.get("piece_size") or 0) > 0:
+                    filename = Path(vid["name"]).name
+                    filesize = int(vid.get("size") or 0)
+                    await _update(
+                        job.id, status="streaming",
+                        direct_url=f"/api/miniapp/stremio/file/{job.infohash}",
+                        filename=filename, filesize=filesize,
+                        error=None, error_kind=None,
+                    )
+                    streaming = True
+                    last_prog, last_prog_at = prog, now
+                    logger.info("torrent fallback: job %s streaming live %s (%d bytes) via PIA",
+                                job.id, filename, filesize)
+
             if _qb.is_complete(t):
                 break
             await asyncio.sleep(2)
 
-        # Resolve the largest video file's on-disk path under the shared mount.
+        # ── Complete → finalize: move the picked file into the cache. ────────
         rows = await asyncio.to_thread(_qb.files, ih)
         vid = _qb.pick_video_file(rows)
         t = await asyncio.to_thread(_qb.torrent, ih) or {}
         save_path = t.get("save_path") or "/downloads"
         if not vid:
             logger.warning("torrent fallback: job %s has no video file", job.id)
+            if streaming:
+                await _fail_streaming(job, ih, "No playable video file in the torrent.")
+                return True
             return False
         src = Path(save_path) / vid["name"]
         filename = Path(vid["name"]).name
         filesize = int(vid.get("size") or 0)
 
-        # Remove the torrent from qB FIRST (keep files) so it releases the
-        # handle and stops seeding, then move the picked file into the cache.
-        await asyncio.to_thread(_qb.delete, ih, with_files=False)
         entry = await asyncio.to_thread(
             _cache.record,
             imdb_id=job.imdb_id, infohash=job.infohash, magnet=magnet,
@@ -519,10 +581,17 @@ async def _download_via_torrent(job: StremioJob) -> bool:
         if not moved:
             # No file landed where the cache expects it — drop the orphan meta.
             await asyncio.to_thread(_cache._evict_one, entry)
+            if streaming:
+                await _fail_streaming(job, ih, "Finished download didn't land on disk.")
+                return True
             return False
-        # Tidy leftover torrent data (other files in a multi-file torrent).
+        # In-flight progressive readers keep their open fd valid across this
+        # rename (same filesystem), so moving the file mid-stream is safe.
+        # Remove the torrent (keep nothing — the picked file is already moved).
+        await asyncio.to_thread(_qb.delete, ih, with_files=True)
         await asyncio.to_thread(_cleanup_torrent_dir, src.parent, save_path)
         await _update(job.id, status="cached", progress=100.0,
+                      direct_url=f"/api/miniapp/stremio/file/{job.infohash}",
                       filename=filename, filesize=filesize,
                       error=None, error_kind=None)
         logger.info("torrent fallback: job %s cached %s (%d bytes) via PIA",

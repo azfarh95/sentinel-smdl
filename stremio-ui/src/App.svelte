@@ -777,7 +777,7 @@
                 <Loader2 class="animate-spin size-5" />
                 <span class="text-sm">
                   Not on Real-Debrid — pulling it directly over your PIA VPN.
-                  This downloads the whole file before it plays; large releases take a while.
+                  Finding peers… playback starts as soon as the first pieces land.
                 </span>
               </div>
               <div class="flex justify-between items-center text-xs text-muted-foreground mb-1">
@@ -837,6 +837,8 @@
                 <span>
                   {#if activeJob.status === "cached"}
                     Cached locally · {fmtSize(activeJob.filesize)}
+                  {:else if activeJob.status === "streaming"}
+                    Streaming via VPN · downloading {fmtSize(activeJob.filesize)}
                   {:else}
                     Caching to G:\ · {fmtSize(activeJob.filesize)}
                   {/if}

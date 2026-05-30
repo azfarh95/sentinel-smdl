@@ -199,3 +199,74 @@ def is_complete(t: dict) -> bool:
     state = (t.get("state") or "").lower()
     return state in {"uploading", "stalledup", "pausedup", "forcedup",
                      "queuedup", "checkingup"}
+
+
+# ── Progressive streaming support ───────────────────────────────────────────
+# qB writes pieces as they arrive; with sequentialDownload the head fills
+# front-to-back and firstLastPiecePrio pulls the tail (an MP4's moov atom)
+# early. To stream a partially-downloaded file safely we must serve ONLY bytes
+# whose covering pieces are actually on disk — the file's apparent size lies
+# once a tail piece lands (a sparse hole sits in the middle). pieceStates +
+# piece_size let us check any byte range's pieces precisely.
+
+def properties(infohash: str) -> dict:
+    """torrents/properties for one infohash: piece_size, pieces_have,
+    pieces_num, total_size, save_path, etc. Empty dict if qB doesn't have it."""
+    try:
+        return _get_json("/api/v2/torrents/properties", {"hash": infohash.lower()})
+    except QBittorrentError:
+        return {}
+
+
+def piece_states(infohash: str) -> list[int]:
+    """Per-piece download state: 0=not downloaded, 1=downloading, 2=done.
+    Empty list if the torrent is gone (e.g. already removed after finalize)."""
+    try:
+        out = _get_json("/api/v2/torrents/pieceStates", {"hash": infohash.lower()})
+        return out if isinstance(out, list) else []
+    except QBittorrentError:
+        return []
+
+
+def file_offset_in_torrent(file_rows: list[dict], picked: dict) -> int:
+    """Byte offset of `picked` within the whole torrent payload — the sum of
+    every earlier file's size. Needed to map a file-local byte range onto the
+    torrent's global piece grid (multi-file torrents). 0 for single-file."""
+    idx = picked.get("index")
+    if idx is None:
+        return 0
+    return sum(int(f.get("size") or 0) for f in file_rows
+              if (f.get("index") if f.get("index") is not None else 1 << 30) < idx)
+
+
+def pieces_ready(states: list[int], piece_size: int, file_offset: int,
+                 byte_start: int, byte_end: int) -> bool:
+    """True iff every piece covering the file-local byte range [byte_start,
+    byte_end] is fully downloaded. Conservative: a missing/unknown piece reads
+    as not-ready, so we never hand a player bytes from a sparse hole."""
+    if piece_size <= 0 or not states:
+        return False
+    g_start = file_offset + max(0, byte_start)
+    g_end = file_offset + max(byte_start, byte_end)
+    p0 = g_start // piece_size
+    p1 = g_end // piece_size
+    if p0 < 0 or p1 >= len(states):
+        return False
+    for i in range(p0, p1 + 1):
+        if states[i] != 2:
+            return False
+    return True
+
+
+def live_path(save_path: str, name: str):
+    """On-disk path of an in-progress file. qB appends '.!qB' to incomplete
+    files when that option is on; we try the plain path first, then the
+    suffixed one. Returns a pathlib.Path or None if neither exists yet."""
+    from pathlib import Path
+    base = Path(save_path) / name
+    if base.exists():
+        return base
+    partial = base.with_name(base.name + ".!qB")
+    if partial.exists():
+        return partial
+    return None

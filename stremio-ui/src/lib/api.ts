@@ -236,24 +236,12 @@ export const api = {
                        editable: boolean };
              account: RDAccount }>("/api/miniapp/stremio/rd-token", { token }),
   },
-  /** PIA VPN creds for the direct-torrent fallback. Owner-only; values never
-   *  come back from the server — only set/unset + a masked tail. */
+  /** PIA VPN status for the direct-torrent fallback. Read-only — creds are
+   *  managed canonically in WCM/.env.local; secrets never reach the browser. */
   pia: {
     status: () =>
-      get<{
-        username:  { set: boolean; masked: string | null };
-        password:  { set: boolean; masked: string | null };
-        dip_token: { set: boolean; masked: string | null };
-        configured: boolean;
-      }>("/api/miniapp/stremio/pia"),
-    set: (creds: { username?: string; password?: string; dip_token?: string }) =>
-      post<{ ok: boolean; error?: string;
-             status: {
-               username:  { set: boolean; masked: string | null };
-               password:  { set: boolean; masked: string | null };
-               dip_token: { set: boolean; masked: string | null };
-               configured: boolean;
-             } }>("/api/miniapp/stremio/pia", creds),
+      get<{ configured: boolean; username: string | null;
+            region: string; source: string }>("/api/miniapp/stremio/pia"),
   },
   position: {
     get: (imdb_id: string) =>

@@ -868,35 +868,13 @@ async def stremio_rd_token_set(body: _RDTokenBody, request: Request):
 
 @router.get("/api/miniapp/stremio/pia")
 async def stremio_pia_status(request: Request):
-    """Whether PIA VPN creds are configured (never returns raw values).
-    Feeds the gluetun-gated direct-torrent fallback."""
+    """Whether PIA VPN creds are configured (read-only; never returns secrets).
+    Creds are managed in WCM/.env.local — this just surfaces status for the
+    Settings page. Feeds the gluetun-gated direct-torrent fallback."""
     p = await _verify(request)
     _require_owner(p)
     from . import pia as _pia
     return _pia.status()
-
-
-class _PIABody(BaseModel):
-    username: Optional[str] = None
-    password: Optional[str] = None
-    dip_token: Optional[str] = None
-
-
-@router.post("/api/miniapp/stremio/pia")
-async def stremio_pia_set(body: _PIABody, request: Request):
-    """Owner saves their PIA OpenVPN/WireGuard username + password and the
-    dedicated-IP token. Persisted to /config secret files for gluetun to read.
-    Send only the fields you want to change; omit the rest."""
-    p = await _verify(request)
-    _require_owner(p)
-    from . import pia as _pia
-    try:
-        st = _pia.set_creds(username=body.username, password=body.password,
-                            dip_token=body.dip_token)
-    except OSError as e:
-        return JSONResponse({"ok": False, "error": f"could not save: {e}"},
-                            status_code=500)
-    return {"ok": True, "status": st}
 
 
 class _StremioPositionBody(BaseModel):

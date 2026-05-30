@@ -27,6 +27,9 @@ WebKit-based platforms that grok HLS natively.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -34,11 +37,19 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 from pydantic import BaseModel
 
 import aiosqlite
@@ -651,6 +662,168 @@ async def iptv_channel_resolve_url(channel_id: str, request: Request):
         raise HTTPException(status_code=502, detail=f"resolve failed: {exc}")
     return {"url": url, "resolved": True, "source": ch.source,
             "original": ch.url}
+
+
+# ── YouTube-live HLS relay ──────────────────────────────────────────────────
+# YouTube's googlevideo manifests (a) send no Access-Control-Allow-Origin
+# header and (b) are pinned to the IP that resolved them. So the in-app
+# hls.js player — running at a different origin/egress than the resolver —
+# can never fetch them directly (manifest load fails). This relay re-serves
+# the manifest + segments same-origin with CORS, fetching upstream from the
+# server (whose IP matches the manifest pin). Works for any youtube-live
+# channel, not just one.
+#
+# Abuse surface is deliberately bounded WITHOUT requiring auth (hls.js
+# requests can't reliably carry the cookie/initData gate):
+#   - the entry endpoint only resolves channels already in the catalogue
+#     whose source is 'youtube-live';
+#   - segment fetches must be HMAC-signed (minted by our own rewrite) AND
+#     target a *.googlevideo.com host — so this is neither an open proxy
+#     nor an SSRF primitive.
+_HLS_SECRET = (
+    os.environ.get("SMDL_BOT_TOKEN")
+    or os.environ.get("BOT_TOKEN")
+    or os.environ.get("TELEGRAM_BOT_TOKEN")
+    or "smdl-hls-relay"
+).encode()
+
+
+def _hls_sign(url: str) -> str:
+    return hmac.new(_HLS_SECRET, url.encode(), hashlib.sha256).hexdigest()[:16]
+
+
+def _hls_b64e(url: str) -> str:
+    return base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+
+
+def _hls_b64d(tok: str) -> str:
+    pad = "=" * (-len(tok) % 4)
+    return base64.urlsafe_b64decode(tok + pad).decode()
+
+
+def _hls_host_allowed(url: str) -> bool:
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host == "googlevideo.com" or host.endswith(".googlevideo.com")
+
+
+def _hls_seg_url(abs_url: str) -> str:
+    return f"/iptv/hls/seg?u={quote(_hls_b64e(abs_url), safe='')}&s={_hls_sign(abs_url)}"
+
+
+_HLS_URI_RE = re.compile(r'URI="([^"]+)"')
+
+
+def _hls_rewrite_manifest(text: str, base_url: str) -> str:
+    """Point every child-playlist / segment / key URI at our seg relay so
+    the player only ever talks to us (same-origin, CORS-ok)."""
+    out: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            out.append(line)
+            continue
+        if s.startswith("#"):
+            if 'URI="' in s:
+                s = _HLS_URI_RE.sub(
+                    lambda m: 'URI="%s"' % _hls_seg_url(urljoin(base_url, m.group(1))),
+                    s,
+                )
+            out.append(s)
+            continue
+        out.append(_hls_seg_url(urljoin(base_url, s)))
+    return "\n".join(out) + "\n"
+
+
+_HLS_CORS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "*",
+}
+
+
+async def _hls_relay(target: str) -> Response:
+    """Fetch `target` upstream; rewrite if it's an HLS manifest, else stream
+    the bytes through. Caller must have already authorised `target`."""
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(20.0, read=60.0), follow_redirects=True
+    )
+    try:
+        req = client.build_request("GET", target, headers=headers)
+        resp = await client.send(req, stream=True)
+    except Exception as exc:
+        await client.aclose()
+        detail = f"{type(exc).__name__}: {exc}"
+        logger.warning("hls relay fetch failed for %s: %s", target[:80], detail)
+        return PlainTextResponse(f"upstream fetch failed: {detail}", status_code=502)
+
+    ctype = resp.headers.get("content-type", "").lower()
+    is_manifest = "mpegurl" in ctype
+    if is_manifest:
+        raw = await resp.aread()
+        await resp.aclose()
+        await client.aclose()
+        rewritten = _hls_rewrite_manifest(raw.decode("utf-8", "replace"), str(resp.url))
+        return Response(
+            rewritten,
+            status_code=resp.status_code,
+            media_type="application/vnd.apple.mpegurl",
+            headers={**_HLS_CORS, "Cache-Control": "no-cache, no-store"},
+        )
+
+    passthrough = {
+        k: v
+        for k, v in resp.headers.items()
+        if k.lower() in ("content-type", "content-length", "content-range", "accept-ranges")
+    }
+
+    async def _body():
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        _body(), status_code=resp.status_code, headers={**passthrough, **_HLS_CORS}
+    )
+
+
+@router.get("/iptv/hls/seg")
+async def iptv_hls_segment(request: Request):
+    """Relay a single signed googlevideo segment/child-playlist."""
+    tok = request.query_params.get("u", "")
+    sig = request.query_params.get("s", "")
+    try:
+        target = _hls_b64d(tok)
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad token")
+    if not hmac.compare_digest(sig, _hls_sign(target)):
+        raise HTTPException(status_code=403, detail="bad signature")
+    if not _hls_host_allowed(target):
+        raise HTTPException(status_code=403, detail="host not allowed")
+    return await _hls_relay(target)
+
+
+@router.get("/iptv/hls/{channel_id}/index.m3u8")
+async def iptv_hls_index(channel_id: str, request: Request):
+    """Entry point the in-app player loads for a youtube-live channel:
+    resolve the current googlevideo manifest server-side and relay it."""
+    ch = await _iptv.get_channel(channel_id)
+    if not ch or not ch.url:
+        raise HTTPException(status_code=404, detail="channel not found")
+    if ch.source != "youtube-live":
+        raise HTTPException(status_code=400, detail="not a youtube-live channel")
+    from . import iptv_youtube
+    try:
+        target = await iptv_youtube.resolve_live_url(ch.url)
+    except Exception as exc:
+        logger.warning("hls index resolve %s failed: %s", channel_id, exc)
+        raise HTTPException(status_code=502, detail=f"resolve failed: {exc}")
+    return await _hls_relay(target)
 
 
 class ProbeAllBody(BaseModel):
@@ -3030,14 +3203,13 @@ function loadScript(src, globalCheck) {
 async function resolveStreamUrl() {
   if (!CHANNEL) return null;
   if (CHANNEL.source !== 'youtube-live') return CHANNEL.url;
-  toast('Resolving YouTube live stream…', 2500);
-  try {
-    const r = await api(`/api/iptv/channels/${encodeURIComponent(CHANNEL_ID)}/resolve_url`);
-    return r.url || null;
-  } catch (e) {
-    toast('Resolve failed: ' + e.message, 4000);
-    return null;
-  }
+  // googlevideo manifests carry no CORS header and are IP-pinned to the
+  // resolver, so the in-app player can't fetch them directly. Route through
+  // the server-side HLS relay, which re-serves manifest + segments same-
+  // origin with CORS (and resolves the live URL server-side, so no separate
+  // resolve_url round-trip is needed here).
+  toast('Loading YouTube live stream…', 2000);
+  return `/iptv/hls/${encodeURIComponent(CHANNEL_ID)}/index.m3u8`;
 }
 
 async function playInline() {

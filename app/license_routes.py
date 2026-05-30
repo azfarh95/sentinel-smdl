@@ -9,15 +9,30 @@ admin without full owner rights. The validate endpoint is intentionally public
 """
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from . import database as db
+from . import edition
 from . import licensing
 from . import license_registry
 from .miniapp import _require_owner, _verify, require_scope
 
 router = APIRouter()
+
+
+def _accepted_tiers() -> set[str]:
+    """Which license tiers THIS deployment honours at validate time. Defaults
+    from the edition flag — private serves Family keys, community serves
+    Community keys — so a key minted for one edition can't activate the other.
+    Override with LICENSE_ACCEPTED_TIERS=community,family to honour both (e.g.
+    an operator box that also runs community clients)."""
+    raw = (os.environ.get("LICENSE_ACCEPTED_TIERS") or "").strip()
+    if raw:
+        return {t.strip().lower() for t in raw.split(",") if t.strip()}
+    return {licensing.TIER_FAMILY} if edition.is_private() else {licensing.TIER_COMMUNITY}
 
 
 # ── Owner admin API ──────────────────────────────────────────────────────────
@@ -171,6 +186,12 @@ async def license_validate(request: Request):
         return {"valid": False, "reason": "revoked"}
     if licensing.is_expired(row["expires_at"]):
         return {"valid": False, "reason": "expired"}
+    # Edition gate: a real, active key still can't activate the wrong edition
+    # (a Community key on a private deployment, or vice versa). Checked against
+    # the persisted row tier, not the code prefix, so a forged prefix can't slip
+    # an unauthorised tier past the secret check.
+    if row["tier"] not in _accepted_tiers():
+        return {"valid": False, "reason": "wrong_edition"}
 
     if device_id:
         if not await db.license_activation_exists(key_id, device_id):

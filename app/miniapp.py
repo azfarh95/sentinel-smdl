@@ -324,10 +324,23 @@ async def _verify(request: Request) -> dict:
     # — so owner-only routes still 403. Paid caps are gated by entitlements.
     uid = (payload.get("user") or {}).get("id")
     is_owner_user = bool(uid) and _is_owner(int(uid))
+    if is_owner_user:
+        scopes: list[str] = ["*"]
+        user_id_str = "owner"
+    else:
+        # Merge any live (redeemed, non-revoked, non-expired) beta-key extras
+        # into the community user surface. Keeps initData callers in sync with
+        # cookie callers: a TG user who redeemed a beta key gets that scope
+        # without re-login, because every request rebuilds the synthetic
+        # session here.
+        user_id_str = str(uid)
+        from . import beta_keys as _bk
+        extras = await _bk.live_extra_scopes_for(user_id_str)
+        scopes = sorted(set(COMMUNITY_USER_SCOPES) | set(extras))
     payload["session"] = {
         "version": "initdata",
-        "user_id": "owner" if is_owner_user else str(uid),
-        "scopes": ["*"] if is_owner_user else list(COMMUNITY_USER_SCOPES),
+        "user_id": user_id_str,
+        "scopes": scopes,
         "jti": "", "iat": 0, "expired": False,
     }
     return payload

@@ -252,6 +252,77 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS ix_license_activation_key
             ON license_activations(key_id)
         """)
+        # ── Premium users (operator manifest) ────────────────────────────────
+        # Maps an external identity (Telegram chat_id, Google sub, e-mail) to
+        # a plan baked into grants without going through the license-key rail.
+        # Used on the community/play deployments so the operator can mark a
+        # specific identity as plus/family without minting+handing-out a key.
+        # (identity_type, identity_value) is the lookup key; UNIQUE so a single
+        # identity holds at most one row. expires_at is optional — NULL means
+        # "no expiry until removed". Plan must be a key of entitlements.PLANS.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS premium_users (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                identity_type  TEXT NOT NULL,
+                identity_value TEXT NOT NULL,
+                plan           TEXT NOT NULL,
+                notes          TEXT,
+                expires_at     TEXT,
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL,
+                UNIQUE(identity_type, identity_value)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_premium_identity
+            ON premium_users(identity_type, identity_value)
+        """)
+        # ── Beta keys (extra-scope issuance, NOT billing) ────────────────────
+        # Owner-only mint of opaque keys that unlock NAMED extra scopes (e.g.
+        # `smdl.tv.recorder.beta`) on top of whatever plan the redeemer already
+        # has. Distinct from license_keys: a beta key does not change the user's
+        # plan or appear in the billing rail — it only attaches extra scopes to
+        # their session cookie via auth_v2 on redemption. Stored as HMAC of the
+        # secret half so a DB leak doesn't yield usable keys (mirrors
+        # license_keys.secret_hash). Each row is one mint; once redeemed,
+        # redeemed_by_user_id pins it to a single user (no seat-sharing).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS beta_keys (
+                key_id              TEXT PRIMARY KEY,
+                secret_hash         TEXT NOT NULL,
+                label               TEXT,
+                extra_scopes        TEXT NOT NULL,
+                expires_at          TEXT,
+                created_at          TEXT NOT NULL,
+                created_by          INTEGER,
+                redeemed_by_user_id TEXT,
+                redeemed_at         TEXT,
+                revoked_at          TEXT,
+                note                TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_beta_keys_redeemed
+            ON beta_keys(redeemed_by_user_id)
+        """)
+        # ── OAuth identities (Google sign-in) ────────────────────────────────
+        # One row per (provider, subject). Populated by /auth/google/callback
+        # on first sign-in; updated on every subsequent sign-in. This is the
+        # identity directory for non-Telegram users — Telegram users live in
+        # the `users` table keyed by chat_id.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS oauth_identities (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider      TEXT NOT NULL,
+                subject       TEXT NOT NULL,
+                email         TEXT,
+                name          TEXT,
+                picture_url   TEXT,
+                first_seen    TEXT NOT NULL,
+                last_seen     TEXT NOT NULL,
+                UNIQUE(provider, subject)
+            )
+        """)
         await db.commit()
 
 

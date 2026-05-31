@@ -10,10 +10,12 @@ from . import database as db
 from . import edition
 from . import file_serve
 from . import interceptor  # noqa: F401 — triggers plugin auto-load at startup
+from . import auth_google
 from . import iptv
 from . import iptv_routes
 from . import license_routes
 from . import miniapp
+from . import premium_routes
 from . import profile_monitor
 from . import pwa_routes
 from . import sticker_routes
@@ -213,6 +215,8 @@ app.include_router(miniapp.router)
 app.include_router(sticker_routes.router)
 app.include_router(iptv_routes.router)
 app.include_router(license_routes.router)
+app.include_router(premium_routes.router)
+app.include_router(auth_google.router)
 app.include_router(pwa_routes.router)
 
 

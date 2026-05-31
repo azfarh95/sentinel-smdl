@@ -4655,7 +4655,7 @@ async function loadStickers() {
       '<div style="color:var(--muted);font-size:11px;margin-top:2px">' + esc(_fmtStickerExpires(d.expires_at)) + '</div>' +
       err +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' +
-      '<button onclick="location.href=\'/stickers/' + d.id + '/edit\'">Make sticker</button>' +
+      '<button onclick="location.href=\\'/stickers/' + d.id + '/edit\\'">Make sticker</button>' +
       '<button class=sec onclick="stickersDeleteDraft(' + d.id + ')">Delete</button>' +
       '</div></div>';
     draftsEl.appendChild(div);
@@ -4677,7 +4677,7 @@ async function stickersDeleteDraft(id) {
 }
 
 async function stickersDeleteAll() {
-  if (!confirm('Wipe ALL your sticker drafts + intermediate files?\nAlready-published stickers in your pack are unaffected.')) return;
+  if (!confirm('Wipe ALL your sticker drafts + intermediate files?\\nAlready-published stickers in your pack are unaffected.')) return;
   try {
     const r = await api('/api/sticker_drafts/delete_all', { method: 'POST', body: '{}' });
     showOk('Deleted ' + (r.deleted || 0) + ' drafts.');

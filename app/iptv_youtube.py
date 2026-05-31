@@ -207,3 +207,56 @@ async def resolve_live_video_id(channel_url: str) -> str:
         vid = await loop.run_in_executor(None, _resolve_video_id_sync, channel_url)
         _vid_cache[channel_url] = (vid, now + _RESOLVE_TTL_SEC)
         return vid
+
+
+# ── Live-status probe (grid badge) ──────────────────────────────────
+#
+# The grid badge needs live vs off-air for MANY channels at once. The
+# resolve_* caches only store successes (30 min), so an off-air channel
+# would re-invoke yt-dlp on every grid load — and a community grid is all
+# of the youtube-live channels. This probe caches BOTH outcomes with a
+# short TTL so a full sweep is cheap and dark channels don't hammer
+# yt-dlp. A watch/embed/live URL with a pinned video id is treated as
+# live without a network call (the same fast path resolve uses).
+
+_STATUS_TTL_SEC = 180   # 3 min — re-check live AND off-air this often
+# status cache: channel_url → (status_dict, expires_at)
+_status_cache: dict[str, tuple[dict, float]] = {}
+
+_OFFAIR_MARKERS = (
+    "not currently live",
+    "no current live",
+    "has no current live",
+    "not live",
+)
+
+
+async def probe_live_status(channel_url: str) -> dict:
+    """Is this channel broadcasting right now? Returns
+    {"live": bool, "reason": None|"off_air"|"error"}.
+
+    Caches both live and off-air results for a short TTL so the grid
+    badge sweep doesn't re-run yt-dlp for dark channels each load."""
+    direct = _video_id_from_url(channel_url)
+    if direct:
+        # Pinned video id (watch/embed/live URL) — treat as live; no probe.
+        return {"live": True, "reason": None}
+    now = time.time()
+    hit = _status_cache.get(channel_url)
+    if hit and hit[1] > now:
+        return hit[0]
+    lock = _resolve_locks.setdefault(channel_url, asyncio.Lock())
+    async with lock:
+        hit = _status_cache.get(channel_url)
+        if hit and hit[1] > now:
+            return hit[0]
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, _resolve_video_id_sync, channel_url)
+            status = {"live": True, "reason": None}
+        except Exception as exc:
+            msg = str(exc).lower()
+            off_air = any(m in msg for m in _OFFAIR_MARKERS)
+            status = {"live": False, "reason": "off_air" if off_air else "error"}
+        _status_cache[channel_url] = (status, now + _STATUS_TTL_SEC)
+        return status

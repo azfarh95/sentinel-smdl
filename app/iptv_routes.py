@@ -911,6 +911,46 @@ async def iptv_youtube_live_status(channel_id: str, request: Request):
         }
 
 
+@router.get("/api/iptv/youtube/live_status")
+async def iptv_youtube_live_status_batch(request: Request):
+    """Batch live/off-air status for EVERY youtube-live channel — drives
+    the grid badge. Enumerates the youtube-live source rows, probes each
+    with bounded concurrency, and returns a {cid: {live, reason}} map.
+
+    Per-channel results are negative-cached (live AND off-air, short TTL)
+    in iptv_youtube, so a full grid sweep stays cheap and dark channels
+    don't re-run yt-dlp every load. Always HTTP 200."""
+    await _verify_iptv(request)
+    from . import iptv_youtube
+    rows: list[tuple[str, str]] = []
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT channel_id AS cid, url FROM iptv_channels "
+            " WHERE source = 'youtube-live' "
+            "   AND url IS NOT NULL AND url != '' "
+            " GROUP BY channel_id"
+        )
+        for r in await cur.fetchall():
+            rows.append((r["cid"], r["url"]))
+
+    sem = asyncio.Semaphore(8)
+    statuses: dict[str, dict] = {}
+
+    async def _one(cid: str, url: str):
+        async with sem:
+            try:
+                statuses[cid] = await iptv_youtube.probe_live_status(url)
+            except Exception as exc:  # never let one channel sink the sweep
+                statuses[cid] = {"live": False, "reason": "error"}
+                logger.debug("live_status probe %s failed: %s", cid, exc)
+
+    if rows:
+        await asyncio.gather(*(_one(cid, url) for cid, url in rows))
+    as_of = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"statuses": statuses, "count": len(statuses), "as_of": as_of}
+
+
 class ProbeAllBody(BaseModel):
     source: str | None = None
     country: str | None = None
@@ -1948,6 +1988,8 @@ _BROWSE_HTML = r"""<!doctype html>
     .b.geo   { background:#5a2020; color:#f5b4b4; }
     .b.multi { background:#1f3c5a; color:#b6d5f0; }   /* ×N source-count chip */
     .b.curated { background:#3a3a14; color:#f0e090; } /* curated badge */
+    .b.live   { background:#1f5230; color:#a9e8be; }  /* youtube-live: on air */
+    .b.offair { background:#33363c; color:#9aa0aa; }  /* youtube-live: off air */
     .empty, .loading { text-align:center; padding:40px 16px;
                         color:var(--tg-theme-hint-color,#8a8f99); font-size:13px; }
     .toast {
@@ -2203,6 +2245,7 @@ const _defaultState = {
   status: null, q: '', favorites_only: false,
   tab: 'all',                // 'all' | 'sg' | 'fav' | 'recent'
   now_playing: {},           // populated lazily by loadNowPlaying()
+  live_status: {},           // youtube-live cid → {live,reason}; loadLiveStatus()
 };
 
 // ── Favorites — Set of channel ids, persisted to localStorage ──────
@@ -2488,6 +2531,7 @@ async function loadChannels() {
   // if either fails.
   loadNowPlaying();
   loadLastWatched();
+  loadLiveStatus();
   // Alive-only filter happens client-side — the v2 endpoint doesn't
   // have a status= param (logical channels don't have a status — only
   // their underlying sources do).
@@ -2537,6 +2581,10 @@ async function loadChannels() {
     if (aliveN > 0) badges.push(`<span class="b official">${aliveN} alive</span>`);
     else if (srcN > 0) badges.push(`<span class="b geo">no alive</span>`);
     if (isGeo) badges.push(`<span class="b geo">geo</span>`);
+    // youtube-live channels get a live/off-air badge once loadLiveStatus()
+    // resolves; on a re-render we reuse the cached status so it survives.
+    const lb = liveBadgeHtml(ch.id);
+    if (lb) badges.push(lb);
     card.innerHTML = `
       <button class="star-btn ${fav ? 'on' : ''}" aria-label="favorite">${fav ? '★' : '☆'}</button>
       <div class="logo-wrap">${logoHtml}</div>
@@ -2846,6 +2894,40 @@ async function loadNowPlaying() {
       // Insert just before the badges block.
       const badges = card.querySelector('.badges');
       if (badges) card.insertBefore(npDiv, badges); else card.appendChild(npDiv);
+    });
+  } catch (e) { /* silently skip */ }
+}
+
+// ── Live / off-air badge for youtube-live channels ─────────────
+// The catalogue 'alive' flag reflects past probes; a youtube-live
+// channel that only streams occasionally (events / press conferences)
+// can read 'alive' while currently dark. loadLiveStatus() asks the
+// batch endpoint which youtube-live channels are broadcasting right
+// now and stamps each card so a viewer sees off-air before tapping.
+let _liveStatusFetchAt = 0;
+function liveBadgeHtml(cid) {
+  const s = (state.live_status || {})[cid];
+  if (!s) return '';   // not a youtube-live channel, or not yet resolved
+  return s.live
+    ? `<span class="b live">● LIVE</span>`
+    : `<span class="b offair">○ Off-air</span>`;
+}
+async function loadLiveStatus() {
+  // Cache 2 min — the server already negative-caches per channel, this
+  // just avoids re-fetching the whole map on every grid re-render.
+  if (Date.now() - _liveStatusFetchAt < 2 * 60 * 1000) return;
+  try {
+    const r = await api('/api/iptv/youtube/live_status');
+    state.live_status = r.statuses || {};
+    _liveStatusFetchAt = Date.now();
+    document.querySelectorAll('#grid .card').forEach(card => {
+      const cid = card.dataset.channelId;
+      if (!cid || !(cid in state.live_status)) return;
+      const badges = card.querySelector('.badges');
+      if (!badges) return;
+      // Drop any prior live/off-air chip, then stamp the fresh one.
+      badges.querySelectorAll('.b.live, .b.offair').forEach(b => b.remove());
+      badges.insertAdjacentHTML('beforeend', liveBadgeHtml(cid));
     });
   } catch (e) { /* silently skip */ }
 }

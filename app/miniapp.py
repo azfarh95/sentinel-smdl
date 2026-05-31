@@ -3950,9 +3950,24 @@ button.warn { background: #ff9500; color: #fff; }
     <div class=card id=stickers-pack-card>
       <div class=empty><span class=spin></span> Loading…</div>
     </div>
+    <div class=card style="margin-top:10px">
+      <div style="font-weight:600;margin-bottom:6px">Add to your pack</div>
+      <input type=file id=stickers-file accept="video/*,image/gif" style="display:none">
+      <div id=stickers-dropzone style="border:2px dashed var(--separator);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s">
+        <div style="font-size:30px;line-height:1;margin-bottom:6px">📎</div>
+        <div style="font-weight:600">Tap to pick · or drag &amp; drop</div>
+        <div class=meta style="margin-top:4px;font-size:12px;color:var(--muted)">A video or GIF, ≤ 50 MB. Or send one to <b>@Sentinel_Media_bot</b>.</div>
+      </div>
+      <div id=stickers-upload-progress style="display:none;margin-top:10px">
+        <div style="background:#222;border-radius:6px;height:6px;overflow:hidden">
+          <div id=stickers-upload-bar style="background:var(--accent);height:100%;width:0;transition:width .15s"></div>
+        </div>
+        <div id=stickers-upload-status class=meta style="margin-top:4px;font-size:12px"></div>
+      </div>
+    </div>
     <h2 style="margin:18px 4px 8px;font-size:15px;color:var(--muted);font-weight:600">Drafts</h2>
     <div id=stickers-drafts>
-      <div class=empty>Send a video or GIF to <b>@Sentinel_Media_bot</b> to start a draft.</div>
+      <div class=empty>Drop a video above, or send one to <b>@Sentinel_Media_bot</b>, to start a draft.</div>
     </div>
     <div style="margin-top:18px;text-align:center">
       <button class=sec onclick=stickersDeleteAll() style="color:#e88">🗑 Delete all my sticker data</button>
@@ -4606,9 +4621,15 @@ function _fmtStickerExpires(iso) {
   return `expires in ${hrs}h${rest}m`;
 }
 
+let _stickersPackUrl = '';   // remembered between renders so click-to-copy + rename work
+let _stickersPackName = '';
+let _stickersPackTitle = '';
+let _stickersUploadWired = false;
+
 async function loadStickers() {
   const packEl = document.getElementById('stickers-pack-card');
   const draftsEl = document.getElementById('stickers-drafts');
+  if (!_stickersUploadWired) { _wireStickersUpload(); _stickersUploadWired = true; }
   let data;
   try {
     data = await api('/api/sticker_drafts');
@@ -4617,23 +4638,38 @@ async function loadStickers() {
     return;
   }
   if (data.pack && data.pack.telegram_url) {
+    _stickersPackUrl = data.pack.telegram_url || '';
+    _stickersPackName = data.pack.pack_name || '';
+    _stickersPackTitle = data.pack.pack_title || '';
+    // Card layout: title row with copy hint, URL row, action row.
+    // The whole card is click-to-copy via stickersCopyPackLink(); the Open
+    // button bypasses with stopPropagation so users can still jump to TG.
+    packEl.style.cursor = 'pointer';
+    packEl.title = 'Tap to copy pack link';
+    packEl.onclick = stickersCopyPackLink;
     packEl.innerHTML =
       '<div style="font-size:13px;color:var(--muted);margin-bottom:4px">Your sticker pack</div>' +
-      '<div style="font-weight:600;margin-bottom:6px">📦 ' + esc(data.pack.pack_title || '') + '</div>' +
-      '<a id=stickers-pack-link style="color:var(--accent);word-break:break-all;cursor:pointer">' +
-      esc(data.pack.telegram_url) + '</a>';
-    const pl = document.getElementById('stickers-pack-link');
-    if (pl) pl.addEventListener('click', ev => {
-      ev.preventDefault();
-      if (tg && tg.openTelegramLink) tg.openTelegramLink(data.pack.telegram_url);
-      else window.open(data.pack.telegram_url, '_blank');
-    });
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+        '<span style="font-size:22px;line-height:1">📦</span>' +
+        '<span id=stickers-pack-title style="font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(_stickersPackTitle) + '</span>' +
+        '<span class=meta style="font-size:11px;color:var(--muted);white-space:nowrap">tap to copy</span>' +
+      '</div>' +
+      '<div style="color:var(--accent);word-break:break-all;font-size:12px;margin-bottom:8px">' + esc(_stickersPackUrl) + '</div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+        '<button class=sec onclick="event.stopPropagation();stickersRenamePack()">✎ Rename</button>' +
+        '<button class=sec onclick="event.stopPropagation();stickersOpenPack()">↗ Open in Telegram</button>' +
+      '</div>';
   } else {
+    _stickersPackUrl = '';
+    _stickersPackName = '';
+    _stickersPackTitle = '';
+    packEl.style.cursor = '';
+    packEl.onclick = null;
     packEl.innerHTML = '<div class=empty>No sticker pack yet — finalise your first draft to start one.</div>';
   }
   const drafts = data.drafts || [];
   if (!drafts.length) {
-    draftsEl.innerHTML = '<div class=empty>Send a video or GIF to <b>@Sentinel_Media_bot</b> to start a draft.</div>';
+    draftsEl.innerHTML = '<div class=empty>Drop a video above, or send one to <b>@Sentinel_Media_bot</b>, to start a draft.</div>';
     return;
   }
   draftsEl.innerHTML = '';
@@ -4668,6 +4704,44 @@ async function loadStickers() {
   }
 }
 
+async function stickersCopyPackLink() {
+  if (!_stickersPackUrl) return;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(_stickersPackUrl);
+    } else {
+      // Fallback for older WebViews — execCommand still works on textareas.
+      const ta = document.createElement('textarea');
+      ta.value = _stickersPackUrl;
+      ta.style.position = 'fixed'; ta.style.left = '-9999px';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    showOk('Pack link copied');
+  } catch (e) { showErr('Copy failed: ' + e); }
+}
+
+function stickersOpenPack() {
+  if (!_stickersPackUrl) return;
+  if (tg && tg.openTelegramLink) tg.openTelegramLink(_stickersPackUrl);
+  else window.open(_stickersPackUrl, '_blank');
+}
+
+async function stickersRenamePack() {
+  if (!_stickersPackName) { showErr('No pack to rename yet'); return; }
+  const next = prompt('Rename your sticker pack (max 64 chars):', _stickersPackTitle || '');
+  if (next == null) return;
+  const title = String(next).trim();
+  if (!title) { showErr('Title cannot be empty'); return; }
+  if (title === _stickersPackTitle) return;
+  try {
+    await api('/api/sticker_pack/rename', { method: 'POST', body: JSON.stringify({ title }) });
+    showOk('Renamed to ' + title);
+    loadStickers();
+  } catch (e) { showErr('Rename failed: ' + e); }
+}
+
 async function stickersDeleteDraft(id) {
   if (!confirm('Delete this draft?')) return;
   try {
@@ -4683,6 +4757,84 @@ async function stickersDeleteAll() {
     showOk('Deleted ' + (r.deleted || 0) + ' drafts.');
     loadStickers();
   } catch (e) { showErr('Wipe failed: ' + e); }
+}
+
+// ── Upload wiring (file picker + drag-and-drop) ────────────────────────────
+// Bound once per session via `_stickersUploadWired`. The drop zone forwards
+// to the hidden <input type=file>; the change handler streams the file via
+// FormData to POST /api/sticker_drafts, then refreshes the list.
+
+function _wireStickersUpload() {
+  const dz = document.getElementById('stickers-dropzone');
+  const fi = document.getElementById('stickers-file');
+  if (!dz || !fi) return;
+  dz.addEventListener('click', () => fi.click());
+  fi.addEventListener('change', () => {
+    if (fi.files && fi.files[0]) {
+      const f = fi.files[0]; fi.value = ''; stickersUploadFile(f);
+    }
+  });
+  // Drag-and-drop. preventDefault on dragover is what allows drop to fire.
+  ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation();
+    dz.style.borderColor = 'var(--accent)';
+    dz.style.background = 'rgba(255,255,255,0.03)';
+  }));
+  ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation();
+    dz.style.borderColor = ''; dz.style.background = '';
+  }));
+  dz.addEventListener('drop', e => {
+    const dt = e.dataTransfer;
+    if (dt && dt.files && dt.files[0]) stickersUploadFile(dt.files[0]);
+  });
+}
+
+async function stickersUploadFile(file) {
+  const progEl = document.getElementById('stickers-upload-progress');
+  const barEl = document.getElementById('stickers-upload-bar');
+  const statEl = document.getElementById('stickers-upload-status');
+  if (file.size > 50 * 1024 * 1024) {
+    showErr('File too large (max 50 MB)');
+    return;
+  }
+  progEl.style.display = 'block';
+  barEl.style.width = '0';
+  statEl.textContent = 'Uploading ' + file.name + ' (' + Math.round(file.size / 1024) + ' KB)…';
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  // Use XHR so we get an upload-progress event. fetch() can't report
+  // upload progress in 2026 browsers without ReadableStream tricks the
+  // TG WebView doesn't reliably support.
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/sticker_drafts');
+  xhr.setRequestHeader('X-Init-Data', initData);
+  xhr.upload.addEventListener('progress', ev => {
+    if (ev.lengthComputable) {
+      const pct = Math.round((ev.loaded / ev.total) * 100);
+      barEl.style.width = pct + '%';
+      statEl.textContent = 'Uploading ' + pct + '% (' + Math.round(ev.loaded / 1024) + ' / ' + Math.round(ev.total / 1024) + ' KB)';
+    }
+  });
+  xhr.onload = () => {
+    if (xhr.status >= 200 && xhr.status < 300) {
+      barEl.style.width = '100%';
+      statEl.textContent = 'Upload complete — refreshing drafts…';
+      setTimeout(() => { progEl.style.display = 'none'; loadStickers(); }, 400);
+    } else {
+      let detail = xhr.responseText;
+      try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) {}
+      statEl.textContent = 'Failed: ' + detail;
+      statEl.style.color = '#e88';
+      showErr('Upload failed: ' + detail);
+    }
+  };
+  xhr.onerror = () => {
+    statEl.textContent = 'Network error during upload';
+    statEl.style.color = '#e88';
+    showErr('Upload network error');
+  };
+  xhr.send(fd);
 }
 
 async function redeliverDownload(id, btn) {

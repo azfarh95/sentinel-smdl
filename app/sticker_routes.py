@@ -29,7 +29,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from telegram.error import TelegramError
@@ -75,6 +75,33 @@ class MakeStickerBody(BaseModel):
     # Trim in seconds. Frontend clamps to [0, duration] before posting.
     trim_start: float = 0.0
     trim_end:   float = 3.0
+
+
+class RenamePackBody(BaseModel):
+    title: str
+
+
+# Web-upload limits. Mirrors what Telegram itself accepts at the bot path
+# (50 MB inline upload ceiling) and a small mime allowlist so we don't end
+# up storing arbitrary files in DRAFTS_DIR.
+_UPLOAD_MAX_BYTES   = 50 * 1024 * 1024
+_UPLOAD_MIME_PREFIX = ("video/",)
+_UPLOAD_MIME_EXACT  = frozenset({"image/gif"})
+# Sentinel for direct (browser) uploads — `sticker_drafts.telegram_file_id`
+# is NOT NULL in the schema but isn't used downstream by `make_sticker`
+# (the make-flow keys off `file_path`). Use a recognisable sentinel so
+# anyone grepping the DB can tell where the row came from.
+_WEB_UPLOAD_SENTINEL = "web_upload"
+# File-extension hints for a few known mime types so the on-disk filename
+# carries the right suffix (ffprobe + ffmpeg use the extension as a hint).
+_MIME_EXT = {
+    "video/mp4":         ".mp4",
+    "video/quicktime":   ".mov",
+    "video/webm":        ".webm",
+    "video/x-matroska":  ".mkv",
+    "video/mpeg":        ".mpeg",
+    "image/gif":         ".gif",
+}
 
 
 # ── JSON routes ─────────────────────────────────────────────────────────────
@@ -260,6 +287,156 @@ async def delete_all(request: Request):
             try: f.unlink(missing_ok=True)
             except Exception: pass
     return {"ok": True, "deleted": len(paths)}
+
+
+# ── Direct (browser) upload — alternative to the bot DM path ───────────────
+
+
+@router.post("/api/sticker_drafts")
+async def upload_draft(request: Request,
+                       file: UploadFile = File(...)) -> dict:
+    """Accept a video / GIF uploaded directly from the Mini App and produce
+    a draft row equivalent to one the bot would have created from a DM.
+
+    The bot path stores `telegram_file_id` from PTB's upload result; web
+    uploads have no such id, so we tag those rows with `_WEB_UPLOAD_SENTINEL`
+    in that NOT NULL column. The make-sticker flow only reads `file_path`,
+    so the sentinel never reaches the encode/upload pipeline.
+    """
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+
+    mime = (file.content_type or "").lower()
+    if not (mime.startswith(_UPLOAD_MIME_PREFIX) or mime in _UPLOAD_MIME_EXACT):
+        raise HTTPException(415, f"unsupported media type: {mime or 'unknown'}")
+
+    # Stream to disk under a temporary basename so the file lands somewhere
+    # before we have a draft id. Once the row is created we rename it into
+    # the canonical `<draft_id>.<ext>` slot that `draft_path()` predicts.
+    ext = _MIME_EXT.get(mime, ".bin")
+    user_dir = DRAFTS_DIR / str(user_id)
+    user_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = user_dir / f"_upload_{uuid.uuid4().hex}{ext}"
+    written = 0
+    try:
+        with open(tmp_path, "wb") as out:
+            while True:
+                chunk = await file.read(64 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > _UPLOAD_MAX_BYTES:
+                    raise HTTPException(413, "file too large (max 50 MB)")
+                out.write(chunk)
+    except HTTPException:
+        try: tmp_path.unlink(missing_ok=True)
+        except Exception: pass
+        raise
+    except Exception as e:
+        logger.warning("web-upload write failed for u=%s: %s", user_id, e)
+        try: tmp_path.unlink(missing_ok=True)
+        except Exception: pass
+        raise HTTPException(500, "upload write failed")
+
+    if written == 0:
+        try: tmp_path.unlink(missing_ok=True)
+        except Exception: pass
+        raise HTTPException(400, "empty upload")
+
+    # Probe metadata. Best-effort — the editor falls back to client-side
+    # decoding for duration/dimensions, so we don't fail upload on a
+    # ffprobe miss.
+    meta = await _sp.probe(tmp_path)
+
+    # Insert the draft row first so we know the canonical id, THEN rename
+    # the file into the `<id>.<ext>` slot the rest of the code expects.
+    draft_id = await _db.sticker_draft_insert(
+        user_id=user_id,
+        telegram_file_id=_WEB_UPLOAD_SENTINEL,
+        file_path="",
+        mime_type=mime,
+        duration_s=meta.get("duration_s"),
+        width=meta.get("width"),
+        height=meta.get("height"),
+    )
+    final_path = draft_path(user_id, draft_id, ext)
+    try:
+        tmp_path.rename(final_path)
+    except Exception as e:
+        logger.warning("draft rename failed u=%s d=%s: %s", user_id, draft_id, e)
+        # The row exists but its file_path is empty — the housekeeping
+        # purge will sweep it on its 6h TTL. Surface the failure so the
+        # caller can retry rather than appearing-to-succeed silently.
+        raise HTTPException(500, "draft persist failed")
+    # Patch the row's file_path now that we have it. There's no dedicated
+    # setter, so go through aiosqlite directly — single column, single row.
+    import aiosqlite
+    async with aiosqlite.connect(_db.DB_PATH) as dbh:
+        await dbh.execute(
+            "UPDATE sticker_drafts SET file_path = ? WHERE id = ?",
+            (str(final_path), draft_id),
+        )
+        await dbh.commit()
+
+    logger.info("web-upload OK u=%s d=%s mime=%s bytes=%d",
+                user_id, draft_id, mime, written)
+    return {
+        "id":          draft_id,
+        "mime_type":   mime,
+        "duration_s":  meta.get("duration_s"),
+        "width":       meta.get("width"),
+        "height":      meta.get("height"),
+        "bytes":       written,
+    }
+
+
+# ── Pack rename (Telegram setStickerSetTitle) ──────────────────────────────
+
+
+@router.post("/api/sticker_pack/rename")
+async def rename_pack(body: RenamePackBody, request: Request) -> dict:
+    """Rename the caller's sticker pack on Telegram AND in the local DB.
+
+    Telegram caps `set_sticker_set_title` at 64 chars; reject longer input
+    locally so we don't burn a Telegram API call to learn that."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+
+    new_title = (body.title or "").strip()
+    if not new_title:
+        raise HTTPException(400, "title is required")
+    if len(new_title) > 64:
+        raise HTTPException(400, "title is over 64 chars (Telegram limit)")
+
+    pack = await _db.sticker_pack_get(user_id)
+    if not pack:
+        raise HTTPException(404, "no sticker pack to rename (make one sticker first)")
+
+    from .bot import get_application
+    tg_app = get_application()
+    if tg_app is None:
+        raise HTTPException(503, "bot not running")
+
+    try:
+        await tg_app.bot.set_sticker_set_title(
+            name=pack["pack_name"], title=new_title,
+        )
+    except TelegramError as e:
+        msg = str(e)
+        logger.warning("set_sticker_set_title failed u=%s: %s", user_id, msg)
+        raise HTTPException(502, f"Telegram: {msg}")
+
+    # Mirror into the DB so subsequent /api/sticker_drafts responses
+    # reflect the new title without depending on a Telegram round-trip.
+    await _db.sticker_pack_create(
+        user_id=user_id,
+        pack_name=pack["pack_name"],
+        pack_title=new_title,
+        telegram_url=pack.get("telegram_url") or f"https://t.me/addstickers/{pack['pack_name']}",
+    )
+    return {"ok": True, "title": new_title}
 
 
 # ── HTML pages ──────────────────────────────────────────────────────────────

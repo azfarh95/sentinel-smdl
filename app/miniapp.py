@@ -1779,6 +1779,102 @@ async def notifications_seen(request: Request):
     return {"ok": True, "seen_at": now}
 
 
+@router.get("/api/miniapp/search")
+async def unified_search(request: Request, q: str = "", limit: int = 8):
+    """One search box across SMDL's content pillars. Fans out to the
+    existing per-module queries and returns grouped results:
+      • channels   — IPTV channels (all users)
+      • theater    — Cinemeta movies + series (owner only)
+      • downloads  — the caller's own download history (in-memory filter)
+      • watchlist  — tracked streamers (scoped: owner=all, else own)
+
+    Each group is independently best-effort: one failing source returns []
+    for that group rather than failing the whole search."""
+    p = await _verify(request)
+    require_scope(p, "smdl.downloader")
+    uid = int(p["user"]["id"])
+    is_owner = _is_owner(uid)
+    needle = (q or "").strip()
+    limit = max(1, min(limit, 20))
+    if not needle:
+        return {"q": "", "groups": {}, "total": 0}
+    nlow = needle.lower()
+
+    groups: dict[str, list[dict]] = {}
+
+    # — IPTV channels —
+    try:
+        from . import iptv as _iptv
+        chans = await _iptv.list_channels(q=needle, limit=limit)
+        groups["channels"] = [{
+            "id": c.id, "name": c.name, "country": getattr(c, "country", None),
+            "logo": getattr(c, "logo", None),
+        } for c in chans]
+    except Exception:
+        logger.exception("search: channels failed")
+        groups["channels"] = []
+
+    # — Theater (Cinemeta), owner only —
+    if is_owner:
+        try:
+            from . import stremio as _st, stremio_settings as _ss
+            addons = _effective_addons(await _ss.get_all())
+            movies = await asyncio.to_thread(_st.search, needle, "movie", addons, limit)
+            series = await asyncio.to_thread(_st.search, needle, "series", addons, limit)
+            merged = (list(movies) + list(series))[: limit]
+            groups["theater"] = [{
+                "id": m.id, "type": m.type, "name": m.name, "year": m.year,
+                "poster": m.poster, "imdb_rating": m.imdb_rating,
+            } for m in merged]
+        except Exception:
+            logger.exception("search: theater failed")
+            groups["theater"] = []
+
+    # — Download history (this user, in-memory filter) —
+    try:
+        hist = await _db.list_download_history(uid, limit=200)
+        hits = []
+        for d in hist:
+            files = d.get("files") or []
+            hay = " ".join([
+                d.get("url") or "", d.get("uploader") or "",
+                d.get("platform") or "", " ".join(files),
+            ]).lower()
+            if nlow in hay:
+                hits.append({
+                    "url": d.get("url"),
+                    "uploader": d.get("uploader") or d.get("platform"),
+                    "file": (files[0].split("/")[-1] if files else ""),
+                    "downloaded_at": d.get("downloaded_at"),
+                })
+            if len(hits) >= limit:
+                break
+        groups["downloads"] = hits
+    except Exception:
+        logger.exception("search: downloads failed")
+        groups["downloads"] = []
+
+    # — Watchlist (scoped) —
+    try:
+        wl = stream_monitor.list_watchlist(chat_id=None if is_owner else uid)
+        whits = []
+        for w in wl:
+            url = w.get("url") or ""
+            uname = stream_monitor.extract_username(url)
+            plat = stream_monitor.extract_platform(url)
+            if nlow in (url + " " + (uname or "") + " " + (plat or "")).lower():
+                whits.append({"url": url, "username": uname, "platform": plat})
+            if len(whits) >= limit:
+                break
+        groups["watchlist"] = whits
+    except Exception:
+        logger.exception("search: watchlist failed")
+        groups["watchlist"] = []
+
+    total = sum(len(v) for v in groups.values())
+    return {"q": needle, "groups": groups, "total": total}
+
+
 @router.get("/api/miniapp/files/list")
 async def files_list(request: Request, path: str = ""):
     """Browse the host's /downloads directory. Returns folders + files
@@ -3463,6 +3559,16 @@ button.warn { background: #ff9500; color: #fff; }
               padding: 0 5px; border-radius: 9px; background: #d33; color: #fff;
               font-size: 11px; line-height: 18px; text-align: center; font-weight: 700; }
 .home-tile .ico { position: relative; }
+/* Unified search */
+.search-group { margin-bottom: 14px; }
+.search-group-head { font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+                     color: var(--muted); margin: 0 2px 6px; }
+.search-row { padding: 10px 12px; border-radius: 8px; background: var(--section);
+              margin-bottom: 6px; cursor: pointer; }
+.search-row:active { background: var(--bg); }
+.search-title { font-weight: 600; }
+.search-sub { color: var(--muted); font-size: 13px; margin-top: 2px; word-break: break-all; }
+.search-tag { background: var(--bg); padding: 1px 6px; border-radius: 4px; font-size: 11px; }
 /* Files page */
 .files-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
                 font-size: 13px; margin-bottom: 12px; color: var(--muted); }
@@ -3568,6 +3674,11 @@ button.warn { background: #ff9500; color: #fff; }
         <div class=name>Activity</div>
         <div class=desc>Downloads · recordings · approvals in one feed</div>
       </div>
+      <div class=home-tile data-tile=search id=tile-search onclick="goto('search')">
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
+        <div class=name>Search</div>
+        <div class=desc>One box across IPTV · Theater · downloads · streams</div>
+      </div>
       <div class=home-tile data-tile=streams onclick="goto('watchlist')">
         <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8.5a5 5 0 0 0 0 7"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M5 5.5a9 9 0 0 0 0 13"/><path d="M19 5.5a9 9 0 0 1 0 13"/></svg></div>
         <div class=name>Streams</div>
@@ -3623,6 +3734,16 @@ button.warn { background: #ff9500; color: #fff; }
       <button class="small sec" onclick="loadNotifications()" title="Refresh">🔄</button>
     </div>
     <div id=notifications-list><div class=empty><span class=spin></span> Loading…</div></div>
+  </div>
+
+  <div class=page id=page-search>
+    <div class=page-header><h1>Search</h1></div>
+    <div class=card style="margin-bottom:14px">
+      <input id=search-input placeholder="Search channels, movies, downloads, streams…"
+             autocomplete=off oninput="onSearchInput()"
+             style="width:100%;box-sizing:border-box;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px">
+    </div>
+    <div id=search-results><div class=empty>Type at least 2 characters to search.</div></div>
   </div>
 
   <div class=page id=page-files>
@@ -3697,6 +3818,9 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
   <div class=sidebar-item id=nav-notifications onclick="goto('notifications')">
     <div class=icon style="position:relative"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span class=tile-badge id=notif-badge-nav style="display:none"></span></div><div class=label>Activity</div>
+  </div>
+  <div class=sidebar-item id=nav-search onclick="goto('search')">
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div><div class=label>Search</div>
   </div>
   <div class=sidebar-item id=nav-watchlist onclick="goto('watchlist')">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8.5a5 5 0 0 0 0 7"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M5 5.5a9 9 0 0 0 0 13"/><path d="M19 5.5a9 9 0 0 1 0 13"/></svg></div><div class=label>Streams</div>
@@ -3956,11 +4080,13 @@ function goto(page) {
     home: 'nav-home', downloads: 'nav-downloads', watchlist: 'nav-watchlist',
     files: 'nav-files', scraper: 'tab-scraper', admin: 'tab-admin',
     settings: 'nav-settings', notifications: 'nav-notifications',
+    search: 'nav-search',
   };
   const targetId = navMap[page];
   document.querySelectorAll('.sidebar-item').forEach(el =>
     el.classList.toggle('active', el.id === targetId));
   if (page === 'downloads') loadDownloads();
+  else if (page === 'search') { const si = document.getElementById('search-input'); if (si) si.focus(); }
   else if (page === 'notifications') loadNotifications();
   else if (page === 'watchlist') loadWatchlist();
   else if (page === 'files') loadFiles(filesCwd);
@@ -4031,6 +4157,82 @@ async function loadNotifications() {
     try { await api('/api/miniapp/notifications/seen', { method: 'POST' }); } catch (e) {}
     setNotifBadge(0);
   } catch (e) { showErr('Load failed: ' + e); }
+}
+
+let _searchTimer = null;
+let _searchSeq = 0;
+function onSearchInput() {
+  const q = (document.getElementById('search-input').value || '').trim();
+  if (_searchTimer) clearTimeout(_searchTimer);
+  const root = document.getElementById('search-results');
+  if (q.length < 2) {
+    root.innerHTML = '<div class=empty>Type at least 2 characters to search.</div>';
+    return;
+  }
+  _searchTimer = setTimeout(() => runSearch(q), 300);
+}
+
+const SEARCH_GROUP_META = {
+  channels:  { label: 'IPTV channels', icon: '📺' },
+  theater:   { label: 'Theater',       icon: '🎬' },
+  downloads: { label: 'Your downloads',icon: '⬇' },
+  watchlist: { label: 'Streams',       icon: '🔴' },
+};
+
+async function runSearch(q) {
+  const seq = ++_searchSeq;
+  const root = document.getElementById('search-results');
+  root.innerHTML = '<div class=empty><span class=spin></span> Searching…</div>';
+  let j;
+  try {
+    j = await api('/api/miniapp/search?q=' + encodeURIComponent(q) + '&limit=8');
+  } catch (e) { if (seq === _searchSeq) showErr('Search failed: ' + e); return; }
+  if (seq !== _searchSeq) return;   // a newer query already superseded this one
+  const groups = j.groups || {};
+  if (!j.total) {
+    root.innerHTML = '<div class=empty>No results for “' + esc(q) + '”.</div>';
+    return;
+  }
+  let html = '';
+  for (const key of ['channels', 'theater', 'downloads', 'watchlist']) {
+    const items = groups[key] || [];
+    if (!items.length) continue;
+    const meta = SEARCH_GROUP_META[key];
+    html += '<div class=search-group><div class=search-group-head>' +
+            meta.icon + ' ' + meta.label + ' · ' + items.length + '</div>';
+    html += items.map(it => renderSearchItem(key, it)).join('');
+    html += '</div>';
+  }
+  root.innerHTML = html;
+}
+
+function renderSearchItem(kind, it) {
+  if (kind === 'channels') {
+    const cc = it.country ? ('<span class=search-tag>' + esc(it.country) + '</span>') : '';
+    return '<div class=search-row onclick="location.href=\\'/iptv/play/' +
+      encodeURIComponent(it.id) + '\\'">' +
+      '<div class=search-title>' + esc(it.name || it.id) + '</div>' +
+      '<div class=search-sub>' + cc + '</div></div>';
+  }
+  if (kind === 'theater') {
+    const yr = it.year ? (' · ' + esc(String(it.year))) : '';
+    const rt = it.imdb_rating ? (' · ★ ' + esc(String(it.imdb_rating))) : '';
+    return '<div class=search-row onclick="location.href=\\'/app/stremio\\'">' +
+      '<div class=search-title>' + esc(it.name || '') + '</div>' +
+      '<div class=search-sub>' + esc(it.type || '') + yr + rt + '</div></div>';
+  }
+  if (kind === 'downloads') {
+    const u = encodeURIComponent(it.url || '');
+    return '<div class=search-row onclick="openExternal(\\'' + u + '\\')">' +
+      '<div class=search-title>@' + esc(it.uploader || 'unknown') + '</div>' +
+      '<div class=search-sub>' + esc(it.file || it.url || '') + '</div></div>';
+  }
+  if (kind === 'watchlist') {
+    return '<div class=search-row onclick="goto(\\'watchlist\\')">' +
+      '<div class=search-title>' + esc(it.username || it.url || '') + '</div>' +
+      '<div class=search-sub>' + esc(it.platform || '') + '</div></div>';
+  }
+  return '';
 }
 
 async function loadDownloads() {

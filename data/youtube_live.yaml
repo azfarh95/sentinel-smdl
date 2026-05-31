@@ -457,6 +457,39 @@ channels:
     country: US
     categories: [news]
 
+  # Free official 24/7 lives whose brands also appear (paywalled) on the
+  # YouTube TV subscription. We admit only the sanctioned free IFrame feed
+  # (ADR-016 rule 1); the YouTube TV cable bundle is rule-3 excluded.
+  - id: livenow-fox
+    name: LiveNOW from FOX
+    handle: livenowfox
+    country: US
+    categories: [news]
+
+  - id: cheddar-news
+    name: Cheddar News
+    handle: cheddar
+    country: US
+    categories: [news, business]
+
+  - id: scripps-news
+    name: Scripps News
+    handle: scrippsnews
+    country: US
+    categories: [news]
+
+  - id: newsnation
+    name: NewsNation
+    handle: NewsNation
+    country: US
+    categories: [news]
+
+  - id: tyt
+    name: The Young Turks
+    handle: TheYoungTurks
+    country: US
+    categories: [news]
+
   # ── Korean / Japanese ───────────────────────────────────────────
   - id: arirang-tv
     name: Arirang TV

@@ -3000,6 +3000,17 @@ _PLAY_HTML = r"""<!doctype html>
     .source-picker .summary {
       font-size:11px; color:var(--tg-theme-hint-color,#8a8f99); margin-top:6px;
     }
+    .track-picker {
+      display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;
+    }
+    .track-picker label {
+      flex:1 1 140px; min-width:0; display:flex; flex-direction:column; gap:4px;
+      font-size:11px; color:var(--tg-theme-hint-color,#8a8f99);
+    }
+    .track-picker select {
+      width:100%; padding:7px 8px; border-radius:6px;
+      background:#0d0f14; color:#fff; border:1px solid #2a2f3a; font-size:12px;
+    }
     .hint { font-size:11px; color:var(--tg-theme-hint-color,#8a8f99); margin-top:14px; line-height:1.5; }
     .toast {
       position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
@@ -3074,6 +3085,17 @@ _PLAY_HTML = r"""<!doctype html>
   <div class="url-box" id="url-box">…</div>
 
   <video id="inline-video" controls playsinline></video>
+
+  <div id="track-picker" class="track-picker" style="display:none">
+    <label id="audio-pick-wrap" style="display:none">
+      <span>🔊 Audio</span>
+      <select id="audio-pick"></select>
+    </label>
+    <label id="sub-pick-wrap" style="display:none">
+      <span>💬 Subtitles</span>
+      <select id="sub-pick"></select>
+    </label>
+  </div>
 
   <div class="hint">
     <strong>▶ Play</strong> uses the in-app player (hls.js for HLS, dash.js for DASH) —
@@ -3503,13 +3525,108 @@ async function playInline() {
   }
 }
 
+let _activeHls = null;
+
+function resetTrackPicker() {
+  if (_activeHls) { try { _activeHls.destroy(); } catch (_) {} _activeHls = null; }
+  const picker = document.getElementById('track-picker');
+  if (picker) picker.style.display = 'none';
+  ['audio-pick-wrap', 'sub-pick-wrap'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.style.display = 'none';
+  });
+  ['audio-pick', 'sub-pick'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.innerHTML = '';
+  });
+}
+
+function _trackLabel(t, i, kind) {
+  const name = t.name || t.lang || t.language || '';
+  const lang = (t.lang || t.language) ? ` (${t.lang || t.language})` : '';
+  return name ? (name + (name === (t.lang || t.language) ? '' : lang))
+              : `${kind} ${i + 1}${lang}`;
+}
+
+function populateHlsTracks(hls) {
+  const picker = document.getElementById('track-picker');
+  let any = false;
+
+  const aWrap = document.getElementById('audio-pick-wrap');
+  const aSel  = document.getElementById('audio-pick');
+  const aTracks = hls.audioTracks || [];
+  if (aTracks.length > 1) {
+    aSel.innerHTML = aTracks.map((t, i) =>
+      `<option value="${i}">${_trackLabel(t, i, 'Audio')}</option>`).join('');
+    aSel.value = String(hls.audioTrack);
+    aSel.onchange = () => { hls.audioTrack = parseInt(aSel.value, 10); };
+    aWrap.style.display = ''; any = true;
+  } else { aWrap.style.display = 'none'; }
+
+  const sWrap = document.getElementById('sub-pick-wrap');
+  const sSel  = document.getElementById('sub-pick');
+  const sTracks = hls.subtitleTracks || [];
+  if (sTracks.length > 0) {
+    sSel.innerHTML = '<option value="-1">Off</option>' + sTracks.map((t, i) =>
+      `<option value="${i}">${_trackLabel(t, i, 'Subtitle')}</option>`).join('');
+    sSel.value = String(hls.subtitleTrack);
+    sSel.onchange = () => {
+      const idx = parseInt(sSel.value, 10);
+      hls.subtitleDisplay = idx >= 0;
+      hls.subtitleTrack = idx;
+    };
+    sWrap.style.display = ''; any = true;
+  } else { sWrap.style.display = 'none'; }
+
+  picker.style.display = any ? 'flex' : 'none';
+}
+
+function wireNativeTracks(v) {
+  // Safari native HLS exposes tracks on the <video> element itself.
+  const picker = document.getElementById('track-picker');
+  let any = false;
+
+  const aWrap = document.getElementById('audio-pick-wrap');
+  const aSel  = document.getElementById('audio-pick');
+  const aTracks = v.audioTracks || [];
+  if (aTracks.length > 1) {
+    let cur = 0;
+    for (let i = 0; i < aTracks.length; i++) if (aTracks[i].enabled) cur = i;
+    aSel.innerHTML = Array.from(aTracks).map((t, i) =>
+      `<option value="${i}">${t.label || t.language || ('Audio ' + (i + 1))}</option>`).join('');
+    aSel.value = String(cur);
+    aSel.onchange = () => {
+      const idx = parseInt(aSel.value, 10);
+      for (let i = 0; i < aTracks.length; i++) aTracks[i].enabled = (i === idx);
+    };
+    aWrap.style.display = ''; any = true;
+  } else { aWrap.style.display = 'none'; }
+
+  const sWrap = document.getElementById('sub-pick-wrap');
+  const sSel  = document.getElementById('sub-pick');
+  const sTracks = Array.from(v.textTracks || []).filter(t =>
+    t.kind === 'subtitles' || t.kind === 'captions');
+  if (sTracks.length > 0) {
+    sSel.innerHTML = '<option value="-1">Off</option>' + sTracks.map((t, i) =>
+      `<option value="${i}">${t.label || t.language || ('Subtitle ' + (i + 1))}</option>`).join('');
+    sSel.value = '-1';
+    sSel.onchange = () => {
+      const idx = parseInt(sSel.value, 10);
+      sTracks.forEach((t, i) => { t.mode = (i === idx) ? 'showing' : 'disabled'; });
+    };
+    sWrap.style.display = ''; any = true;
+  } else { sWrap.style.display = 'none'; }
+
+  picker.style.display = any ? 'flex' : 'none';
+}
+
 async function _playInlineCore(kind, v) {
+  resetTrackPicker();
 
   if (kind === 'hls') {
     // Safari/WebKit play HLS natively; everywhere else needs hls.js.
     const native = v.canPlayType('application/vnd.apple.mpegurl');
     if (native) {
       v.src = CHANNEL.url;
+      v.addEventListener('loadedmetadata', () => wireNativeTracks(v), { once: true });
       v.play().catch(e => toast('Playback failed: ' + e.message, 3500));
       return;
     }
@@ -3521,8 +3638,13 @@ async function _playInlineCore(kind, v) {
       return toast('HLS not supported on this device — try VLC handoff', 4000);
     }
     const hls = new window.Hls({ enableWorker: true });
+    _activeHls = hls;
     hls.loadSource(CHANNEL.url);
     hls.attachMedia(v);
+    const _Ev = window.Hls.Events;
+    hls.on(_Ev.MANIFEST_PARSED,         () => populateHlsTracks(hls));
+    hls.on(_Ev.AUDIO_TRACKS_UPDATED,    () => populateHlsTracks(hls));
+    hls.on(_Ev.SUBTITLE_TRACKS_UPDATED, () => populateHlsTracks(hls));
     let _failovered = false;
     hls.on(window.Hls.Events.ERROR, async (_e, data) => {
       if (!data.fatal) return;

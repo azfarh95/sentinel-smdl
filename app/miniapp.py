@@ -1633,6 +1633,70 @@ async def downloads_batch(request: Request):
     }
 
 
+@router.post("/api/miniapp/downloads/redeliver")
+async def downloads_redeliver(request: Request):
+    """Re-send a past download's file(s) to the requesting user's Telegram
+    chat — no re-download, just push the bytes already on disk.
+
+    Body: {id}  — a download_history row id, scoped to the caller's chat_id
+    so a user can only re-deliver their own history.
+
+    Files that still exist on disk and fit under Telegram's upload cap are
+    sent inline via the bot. If a file is gone we say so; if it's too big we
+    hand back its signed share URL so the Mini App can render a tap link
+    (same threshold logic as the live download flow)."""
+    from . import bot as _bot
+    from . import downloader as _dl
+
+    p = await _verify(request)
+    require_scope(p, "smdl.downloader")
+    uid = int(p["user"]["id"])
+
+    body = await request.json()
+    hist_id = body.get("id")
+    if not isinstance(hist_id, int):
+        try:
+            hist_id = int(hist_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="id required")
+
+    row = await _db.get_download(uid, hist_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="not in your history")
+
+    files = row.get("files") or []
+    from pathlib import Path as _P
+    existing = [f for f in files if _P(f).exists()]
+    if not existing:
+        raise HTTPException(
+            status_code=410,
+            detail="files no longer on disk — re-download from the source link",
+        )
+
+    app = _bot.get_application()
+    if app is None or app.bot is None:
+        raise HTTPException(status_code=503, detail="bot not running")
+
+    caption = row.get("url") or None
+    res = await _dl.send_files(app.bot, uid, existing, caption=caption)
+
+    # File(s) too large for Telegram → fall back to the signed share link.
+    if res.get("error") == "file_too_large":
+        enriched = _enrich_with_share_url(row)
+        share = enriched.get("share_url")
+        if share:
+            return {"ok": True, "delivered": "link", "share_url": share,
+                    "size_mb": enriched.get("size_mb")}
+        raise HTTPException(
+            status_code=413,
+            detail=f"file too large to re-send ({res.get('size_mb', '?')} MB)",
+        )
+    if res.get("error"):
+        raise HTTPException(status_code=502, detail=res["error"])
+
+    return {"ok": True, "delivered": "file", "count": len(existing)}
+
+
 @router.get("/api/miniapp/files/list")
 async def files_list(request: Request, path: str = ""):
     """Browse the host's /downloads directory. Returns folders + files
@@ -3290,13 +3354,18 @@ button.warn { background: #ff9500; color: #fff; }
 .page-header #brand-logo { max-height: 40px; max-width: 60%; flex: 1; object-fit: contain; object-position: left center; }
 /* Simplified download row — single clickable line: @user · description */
 .dl-row { padding: 10px 12px; border-radius: 8px; background: var(--section);
-          margin-bottom: 6px; }
-.dl-row a { color: var(--fg); text-decoration: none; display: block; }
+          margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+.dl-row a { color: var(--fg); text-decoration: none; display: block; flex: 1; min-width: 0; }
 .dl-row a:active { color: var(--button); }
 .dl-row .user { font-weight: 600; }
 .dl-row .desc { color: var(--muted); font-size: 13px; margin-top: 2px;
                 word-break: break-all; }
 .dl-row .when { color: var(--muted); font-size: 11px; margin-top: 4px; }
+.dl-row .redeliver { flex: 0 0 auto; font: inherit; font-size: 12px;
+                     padding: 8px 11px; border-radius: 8px; cursor: pointer;
+                     border: 1px solid var(--button); background: transparent;
+                     color: var(--button); }
+.dl-row .redeliver:disabled { opacity: .5; cursor: default; }
 /* Files page */
 .files-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
                 font-size: 13px; margin-bottom: 12px; color: var(--muted); }
@@ -3813,6 +3882,9 @@ async function loadDownloads() {
       } catch { desc = url; }
       if (!desc && (d.files || []).length) desc = d.files[0].split('/').pop();
       const u = encodeURIComponent(url);
+      const redeliver = d.id != null
+        ? `<button class=redeliver onclick="redeliverDownload(${d.id}, this)">Re-deliver</button>`
+        : '';
       return `
         <div class=dl-row>
           <a onclick="openExternal('${u}')">
@@ -3820,9 +3892,29 @@ async function loadDownloads() {
             <div class=desc>${esc(desc || url)}</div>
             <div class=when>${timeago(d.downloaded_at || d.created_at)}</div>
           </a>
+          ${redeliver}
         </div>`;
     }).join('');
   } catch(e) { showErr('Load failed: '+e); }
+}
+
+async function redeliverDownload(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const r = await api('/api/miniapp/downloads/redeliver', {
+      method: 'POST', body: JSON.stringify({ id })
+    });
+    if (r.delivered === 'link' && r.share_url) {
+      showOk('File too large to re-send — opening share link');
+      openExternal(encodeURIComponent(r.share_url));
+    } else {
+      showOk('Re-delivered to your chat');
+    }
+    if (btn) btn.textContent = 'Sent ✓';
+  } catch(e) {
+    showErr('Re-deliver failed: ' + e);
+    if (btn) { btn.disabled = false; btn.textContent = 'Re-deliver'; }
+  }
 }
 
 async function clearDownloadHistory() {

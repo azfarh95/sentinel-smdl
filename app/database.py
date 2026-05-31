@@ -665,12 +665,12 @@ async def record_download(chat_id: int, url: str, files: list[str],
 
 async def list_download_history(chat_id: int, limit: int = 50) -> list[dict]:
     """Return the most recent `limit` downloads for a specific chat_id, newest first.
-    Each row: {url, files (list), platform, uploader, downloaded_at}."""
+    Each row: {id, url, files (list), platform, uploader, downloaded_at}."""
     out: list[dict] = []
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
-            SELECT url, files, platform, uploader, downloaded_at
+            SELECT id, url, files, platform, uploader, downloaded_at
             FROM download_history
             WHERE chat_id = ?
             ORDER BY downloaded_at DESC
@@ -682,6 +682,26 @@ async def list_download_history(chat_id: int, limit: int = 50) -> list[dict]:
                 except Exception: d["files"] = []
                 out.append(d)
     return out
+
+
+async def get_download(chat_id: int, hist_id: int) -> dict | None:
+    """Fetch a single download_history row, scoped to chat_id so a user can
+    only ever address their own history. Returns {id, url, files (list),
+    platform, uploader, downloaded_at} or None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT id, url, files, platform, uploader, downloaded_at
+            FROM download_history
+            WHERE id = ? AND chat_id = ?
+        """, (int(hist_id), int(chat_id))) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    try: d["files"] = json.loads(d.get("files") or "[]")
+    except Exception: d["files"] = []
+    return d
 
 
 async def clear_download_history(chat_id: int) -> int:

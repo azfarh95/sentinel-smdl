@@ -112,12 +112,23 @@ async def lifespan(app: FastAPI):
         "ready": False,
         "last_error": None,
     }
-    init_task = asyncio.create_task(_init_bot_with_retry(state))
+    # The Telegram operator bot only runs when a token is configured. The
+    # public web/TWA build (community + play, TV surface) ships without one —
+    # it's reached over HTTP, not Telegram — so we skip bot startup entirely
+    # rather than loop forever on a missing-token error.
+    from .bot import SMDL_BOT_TOKEN as _bot_token
+    init_task = None
+    if _bot_token:
+        init_task = asyncio.create_task(_init_bot_with_retry(state))
+    else:
+        state["last_error"] = "disabled: no SMDL_BOT_TOKEN (web/TWA-only build)"
+        logger.info("Telegram bot disabled (no SMDL_BOT_TOKEN) — serving web/TWA only")
     app.state.bot_state = state
 
     yield
 
-    init_task.cancel()
+    if init_task is not None:
+        init_task.cancel()
     polling_task = state.get("polling_task")
     monitor_task = state.get("monitor_task")
     scraper_task = state.get("scraper_task")

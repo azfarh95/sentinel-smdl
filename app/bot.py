@@ -81,7 +81,11 @@ _live_url_fail_count: dict[tuple[int, str], int] = {}
 
 logger = logging.getLogger(__name__)
 
-SMDL_BOT_TOKEN = os.environ["SMDL_BOT_TOKEN"]
+# Empty in the public web/TWA build (no Telegram operator bot). Required only
+# when the bot is actually started — build() raises if it's missing. Keeping
+# this a soft read lets the FastAPI app import and serve /iptv, /pwa, etc.
+# without a token. See main.py lifespan (bot startup is gated on this value).
+SMDL_BOT_TOKEN = os.environ.get("SMDL_BOT_TOKEN", "")
 
 _app: Application | None = None
 
@@ -92,6 +96,12 @@ def get_application() -> Application:
 
 async def build() -> Application:
     global _app
+    if not SMDL_BOT_TOKEN:
+        raise RuntimeError(
+            "SMDL_BOT_TOKEN is not set — cannot build the Telegram bot. "
+            "This is expected in the public web/TWA build; main.py should "
+            "gate bot startup on the token's presence."
+        )
     # concurrent_updates=True is REQUIRED — without it, python-telegram-bot
     # processes updates sequentially. A long-running live recording would
     # block /stop_livestream and any other incoming message until the

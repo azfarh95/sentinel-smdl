@@ -33,6 +33,22 @@ dist/
 android-twa/*.keystore
 android-twa/app-release-*.a*b
 android-twa/*.apk
+android-twa/*.idsig
+
+# Bubblewrap-generated Android project (regenerated from twa-manifest.json via
+# `bubblewrap update`). twa-manifest.json is the tracked source of truth; the
+# gradle project itself is build output and must not be committed.
+android-twa/.gradle/
+android-twa/app/
+android-twa/gradle/
+android-twa/gradlew
+android-twa/gradlew.bat
+android-twa/build.gradle
+android-twa/settings.gradle
+android-twa/gradle.properties
+android-twa/manifest-checksum.txt
+android-twa/store_icon.png
+android-twa/build.log
 
 # Editor/OS
 .DS_Store

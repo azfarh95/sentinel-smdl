@@ -26,6 +26,14 @@ dist/
 *.egg-info/
 .pytest_cache/
 
+# Android TWA signing material — NEVER commit. Upload keystore + bubblewrap
+# build artifacts. Password lives in Windows Credential Manager, not on disk.
+*.keystore
+*.jks
+android-twa/*.keystore
+android-twa/app-release-*.a*b
+android-twa/*.apk
+
 # Editor/OS
 .DS_Store
 *.swp

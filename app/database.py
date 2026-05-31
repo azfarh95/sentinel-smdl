@@ -88,6 +88,17 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_ae_time
             ON auth_events (created_at DESC)
         """)
+        # Notifications-feed read marker — one row per user storing the last
+        # time they opened the consolidated feed. The feed itself is computed
+        # on read by merging existing sources (downloads / recordings / auth
+        # events); this table only tracks unread state, so we never have to
+        # write a row per event.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS notification_reads (
+                chat_id INTEGER PRIMARY KEY,
+                seen_at TEXT NOT NULL
+            )
+        """)
         # Approved groups — chat_ids of Telegram groups the owner has trusted.
         # Members of these groups can use the bot WITHOUT per-user approval.
         # Trade-off: bot replies are visible to the whole group; download
@@ -545,6 +556,31 @@ async def list_auth_events(limit: int = 50) -> list[dict]:
     return out
 
 
+async def get_notifications_seen_at(chat_id: int) -> str | None:
+    """Last time this user opened the notifications feed (ISO-8601) or None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT seen_at FROM notification_reads WHERE chat_id = ?",
+            (int(chat_id),),
+        ) as cur:
+            row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def mark_notifications_seen(chat_id: int, seen_at: str) -> None:
+    """Upsert the per-user feed read marker. Never raises (best-effort)."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO notification_reads (chat_id, seen_at)
+                VALUES (?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET seen_at = excluded.seen_at
+            """, (int(chat_id), seen_at))
+            await db.commit()
+    except Exception:
+        pass
+
+
 async def delete_user_account(chat_id: int) -> dict:
     """Hard-delete a user and ALL their personal data (Play account-deletion
     requirement / GDPR erasure). Telegram chat_id == user_id, so this purges
@@ -560,6 +596,7 @@ async def delete_user_account(chat_id: int) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         for table, col in (
             ("download_history", "chat_id"),
+            ("notification_reads", "chat_id"),
             ("stickers", "user_id"),
             ("sticker_drafts", "user_id"),
             ("sticker_packs", "user_id"),

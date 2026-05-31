@@ -1697,6 +1697,88 @@ async def downloads_redeliver(request: Request):
     return {"ok": True, "delivered": "file", "count": len(existing)}
 
 
+@router.get("/api/miniapp/notifications")
+async def notifications_feed(request: Request, limit: int = 40):
+    """Consolidated, read-only activity feed for the calling user.
+
+    Merges events that already live in other tables — no per-event write
+    path — into one newest-first stream:
+      • downloads   (this user's download_history)
+      • recordings  (owner only: iptv_recordings state changes)
+      • approvals   (owner only: auth_events)
+
+    Unread = events newer than the user's last feed-open marker. Opening the
+    feed (POST /notifications/seen) advances that marker."""
+    p = await _verify(request)
+    require_scope(p, "smdl.downloader")
+    uid = int(p["user"]["id"])
+    is_owner = bool(p.get("user", {}).get("is_owner"))
+    limit = max(1, min(limit, 100))
+
+    items: list[dict] = []
+
+    # — Downloads (per-user) —
+    try:
+        for d in await _db.list_download_history(uid, limit=limit):
+            files = d.get("files") or []
+            items.append({
+                "type":     "download",
+                "ts":       d.get("downloaded_at"),
+                "title":    d.get("uploader") or d.get("platform") or "Download",
+                "subtitle": (files[0].split("/")[-1] if files else (d.get("url") or "")),
+                "status":   "ok",
+            })
+    except Exception:
+        logger.exception("notifications: downloads merge failed")
+
+    # — Recordings + approvals (owner only) —
+    if is_owner:
+        try:
+            from . import iptv as _iptv
+            for r in await _iptv.list_iptv_recordings(limit=limit):
+                ts = r.get("finished_at") or r.get("started_at") or r.get("requested_at")
+                items.append({
+                    "type":     "recording",
+                    "ts":       ts,
+                    "title":    r.get("channel_id") or "Recording",
+                    "subtitle": f"{r.get('duration_min', '?')}m · {r.get('status', '')}",
+                    "status":   r.get("status") or "queued",
+                })
+        except Exception:
+            logger.exception("notifications: recordings merge failed")
+        try:
+            for a in await _db.list_auth_events(limit=limit):
+                items.append({
+                    "type":     "auth",
+                    "ts":       a.get("created_at"),
+                    "title":    (a.get("action") or "auth").replace("_", " "),
+                    "subtitle": (a.get("detail") or (f"user {a.get('chat_id')}" if a.get("chat_id") else "")),
+                    "status":   a.get("action") or "",
+                })
+        except Exception:
+            logger.exception("notifications: auth merge failed")
+
+    # Newest first (ISO-8601 UTC sorts lexically). Drop ts-less rows to the end.
+    items.sort(key=lambda x: x.get("ts") or "", reverse=True)
+    items = items[:limit]
+
+    seen_at = await _db.get_notifications_seen_at(uid)
+    unread = sum(1 for it in items if it.get("ts") and (not seen_at or it["ts"] > seen_at))
+
+    return {"items": items, "unread": unread, "seen_at": seen_at}
+
+
+@router.post("/api/miniapp/notifications/seen")
+async def notifications_seen(request: Request):
+    """Advance the user's feed read marker to now — clears the unread badge."""
+    p = await _verify(request)
+    require_scope(p, "smdl.downloader")
+    uid = int(p["user"]["id"])
+    now = datetime.now(timezone.utc).isoformat()
+    await _db.mark_notifications_seen(uid, now)
+    return {"ok": True, "seen_at": now}
+
+
 @router.get("/api/miniapp/files/list")
 async def files_list(request: Request, path: str = ""):
     """Browse the host's /downloads directory. Returns folders + files
@@ -3366,6 +3448,21 @@ button.warn { background: #ff9500; color: #fff; }
                      border: 1px solid var(--button); background: transparent;
                      color: var(--button); }
 .dl-row .redeliver:disabled { opacity: .5; cursor: default; }
+/* Activity feed */
+.notif-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px;
+             border-radius: 8px; background: var(--section); margin-bottom: 6px; }
+.notif-row.notif-new { box-shadow: inset 3px 0 0 var(--button); }
+.notif-ico { flex: 0 0 auto; font-size: 16px; line-height: 1.4; width: 20px; text-align: center; }
+.notif-body { flex: 1; min-width: 0; }
+.notif-title { font-weight: 600; text-transform: capitalize; }
+.notif-sub { color: var(--muted); font-size: 13px; margin-top: 2px; word-break: break-all; }
+.notif-meta { flex: 0 0 auto; text-align: right; }
+.notif-status { display: block; font-size: 11px; text-transform: capitalize; }
+.notif-when { color: var(--muted); font-size: 11px; }
+.tile-badge { position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px;
+              padding: 0 5px; border-radius: 9px; background: #d33; color: #fff;
+              font-size: 11px; line-height: 18px; text-align: center; font-weight: 700; }
+.home-tile .ico { position: relative; }
 /* Files page */
 .files-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
                 font-size: 13px; margin-bottom: 12px; color: var(--muted); }
@@ -3466,6 +3563,11 @@ button.warn { background: #ff9500; color: #fff; }
         <div class=name>Downloads</div>
         <div class=desc>Recent yt-dlp / gallery-dl jobs · file delivery links</div>
       </div>
+      <div class=home-tile data-tile=notifications id=tile-notifications onclick="goto('notifications')">
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span class=tile-badge id=notif-badge style="display:none"></span></div>
+        <div class=name>Activity</div>
+        <div class=desc>Downloads · recordings · approvals in one feed</div>
+      </div>
       <div class=home-tile data-tile=streams onclick="goto('watchlist')">
         <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8.5a5 5 0 0 0 0 7"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M5 5.5a9 9 0 0 0 0 13"/><path d="M19 5.5a9 9 0 0 1 0 13"/></svg></div>
         <div class=name>Streams</div>
@@ -3513,6 +3615,14 @@ button.warn { background: #ff9500; color: #fff; }
       </div>
     </div>
     <div id=downloads-list><div class=empty><span class=spin></span> Loading…</div></div>
+  </div>
+
+  <div class=page id=page-notifications>
+    <div class=page-header>
+      <h1>Activity</h1>
+      <button class="small sec" onclick="loadNotifications()" title="Refresh">🔄</button>
+    </div>
+    <div id=notifications-list><div class=empty><span class=spin></span> Loading…</div></div>
   </div>
 
   <div class=page id=page-files>
@@ -3584,6 +3694,9 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
   <div class=sidebar-item id=nav-downloads onclick="goto('downloads')">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div><div class=label>DL</div>
+  </div>
+  <div class=sidebar-item id=nav-notifications onclick="goto('notifications')">
+    <div class=icon style="position:relative"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span class=tile-badge id=notif-badge-nav style="display:none"></span></div><div class=label>Activity</div>
   </div>
   <div class=sidebar-item id=nav-watchlist onclick="goto('watchlist')">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8.5a5 5 0 0 0 0 7"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M5 5.5a9 9 0 0 0 0 13"/><path d="M19 5.5a9 9 0 0 1 0 13"/></svg></div><div class=label>Streams</div>
@@ -3842,12 +3955,13 @@ function goto(page) {
   const navMap = {
     home: 'nav-home', downloads: 'nav-downloads', watchlist: 'nav-watchlist',
     files: 'nav-files', scraper: 'tab-scraper', admin: 'tab-admin',
-    settings: 'nav-settings',
+    settings: 'nav-settings', notifications: 'nav-notifications',
   };
   const targetId = navMap[page];
   document.querySelectorAll('.sidebar-item').forEach(el =>
     el.classList.toggle('active', el.id === targetId));
   if (page === 'downloads') loadDownloads();
+  else if (page === 'notifications') loadNotifications();
   else if (page === 'watchlist') loadWatchlist();
   else if (page === 'files') loadFiles(filesCwd);
   else if (page === 'scraper') loadScraper();
@@ -3858,6 +3972,65 @@ function goto(page) {
   // tick up and a streamer going LIVE flips colour without manual reload.
   if (watchlistTimer) { clearInterval(watchlistTimer); watchlistTimer = null; }
   if (page === 'watchlist') watchlistTimer = setInterval(loadWatchlist, 5000);
+}
+
+const NOTIF_ICONS = {
+  download:  { e: '⬇', c: 'var(--button)' },
+  recording: { e: '⏺', c: '#e85' },
+  auth:      { e: '👤', c: '#7c9' },
+};
+const NOTIF_STATUS_COLOR = {
+  finished: '#5b8', failed: '#d66', cancelled: '#b98', recording: '#e85',
+  queued: 'var(--muted)', approve: '#5b8', approve_by_code: '#5b8',
+  deny: '#d66', revoke: '#d66', restore: '#5b8',
+};
+
+function setNotifBadge(n) {
+  const txt = n > 99 ? '99+' : String(n);
+  ['notif-badge', 'notif-badge-nav'].forEach(id => {
+    const b = document.getElementById(id);
+    if (!b) return;
+    if (n > 0) { b.textContent = txt; b.style.display = ''; }
+    else b.style.display = 'none';
+  });
+}
+
+async function refreshNotifBadge() {
+  try {
+    const j = await api('/api/miniapp/notifications?limit=40');
+    setNotifBadge(j.unread || 0);
+  } catch (e) { /* badge is best-effort */ }
+}
+
+async function loadNotifications() {
+  const root = document.getElementById('notifications-list');
+  try {
+    const j = await api('/api/miniapp/notifications?limit=40');
+    if (!j.items.length) {
+      root.innerHTML = '<div class=empty>No activity yet.</div>';
+    } else {
+      root.innerHTML = j.items.map(it => {
+        const ic = NOTIF_ICONS[it.type] || { e: '•', c: 'var(--muted)' };
+        const sc = NOTIF_STATUS_COLOR[it.status] || 'var(--muted)';
+        const fresh = (it.ts && (!j.seen_at || it.ts > j.seen_at)) ? ' notif-new' : '';
+        return `
+          <div class="notif-row${fresh}">
+            <div class=notif-ico style="color:${ic.c}">${ic.e}</div>
+            <div class=notif-body>
+              <div class=notif-title>${esc(it.title || '')}</div>
+              <div class=notif-sub>${esc(it.subtitle || '')}</div>
+            </div>
+            <div class=notif-meta>
+              ${it.status ? `<span class=notif-status style="color:${sc}">${esc(it.status)}</span>` : ''}
+              <span class=notif-when>${timeago(it.ts)}</span>
+            </div>
+          </div>`;
+      }).join('');
+    }
+    // Opening the feed clears unread — mark seen, then drop the badge.
+    try { await api('/api/miniapp/notifications/seen', { method: 'POST' }); } catch (e) {}
+    setNotifBadge(0);
+  } catch (e) { showErr('Load failed: ' + e); }
 }
 
 async function loadDownloads() {
@@ -5859,6 +6032,8 @@ initPreviewGestures();
 // Theater + IPTV + Files + Scraper modules in place, Home (the tile
 // grid) is the right entry point.
 goto('home');
+// Surface the unread-activity badge on the home tile (best-effort).
+refreshNotifBadge();
 </script>
 </body></html>"""
 

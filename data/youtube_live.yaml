@@ -33,6 +33,15 @@ channels:
     # Same handle as cna — variants for different content shows. yt-dlp
     # resolves to whichever live stream is currently active.
 
+  - id: 8world
+    name: 8world 8视界 (24/7)
+    # Mediacorp's official Chinese-news 24/7 live stream (Channel 8 news
+    # brand). Pinned by channel id, not @handle — the @8world handle is a
+    # separate feed; this UC… channel is the one running the 24/7 simulcast.
+    url: https://www.youtube.com/channel/UCUqUtr0w-K8W4AfpbHiYSaQ/live
+    country: SG
+    categories: [news]
+
   # ── Malaysia ────────────────────────────────────────────────────
   - id: astro-awani
     name: Astro Awani

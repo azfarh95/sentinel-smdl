@@ -81,6 +81,21 @@ channels:
     country: SG
     categories: [news]
 
+  # ── Singapore — lifestyle / documentary ─────────────────────────
+  # CNA's non-news sub-brands. They livestream occasionally (features,
+  # events) rather than 24/7 — the live/off-air badge handles dark periods.
+  - id: cna-lifestyle
+    name: CNA Lifestyle
+    handle: CNALifestyle
+    country: SG
+    categories: [lifestyle]
+
+  - id: cna-insider
+    name: CNA Insider
+    handle: cnainsider
+    country: SG
+    categories: [lifestyle, documentary]
+
   # ── Malaysia ────────────────────────────────────────────────────
   - id: astro-awani
     name: Astro Awani
@@ -186,6 +201,24 @@ channels:
     country: MY
     categories: [entertainment]
 
+  - id: astro-ria
+    name: Astro Ria
+    handle: AstroRia
+    country: MY
+    categories: [entertainment]
+
+  - id: astro-arena
+    name: Astro Arena
+    handle: AstroArenaOfficial
+    country: MY
+    categories: [sports]
+
+  - id: astro-ceria
+    name: Astro Ceria
+    handle: AstroCeriaOfficial
+    country: MY
+    categories: [kids]
+
   - id: didik-tv
     name: DidikTV (RTM)
     handle: DidikTV
@@ -224,6 +257,12 @@ channels:
     country: MY
     categories: [radio, music]
 
+  - id: sinar-fm
+    name: Sinar FM
+    handle: SinarOfficial
+    country: MY
+    categories: [radio, music]
+
   # ── Indonesia ───────────────────────────────────────────────────
   - id: kompastv
     name: KompasTV
@@ -255,6 +294,56 @@ channels:
     handle: beritasatu
     country: ID
     categories: [news]
+
+  - id: inews-id
+    name: iNews
+    handle: inewsofficial
+    country: ID
+    categories: [news]
+
+  # ── Indonesia — general / entertainment ─────────────────────────
+  - id: trans7
+    name: Trans7
+    handle: TRANS7OFFICIAL
+    country: ID
+    categories: [general, entertainment]
+
+  - id: sctv
+    name: SCTV
+    handle: SCTVOfficial
+    country: ID
+    categories: [general, entertainment]
+
+  - id: rcti
+    name: RCTI
+    handle: RCTI
+    country: ID
+    categories: [general, entertainment]
+
+  - id: gtv-id
+    name: GTV
+    handle: GTVID
+    country: ID
+    categories: [general, entertainment]
+
+  - id: mnctv
+    name: MNCTV
+    handle: MNCTV
+    country: ID
+    categories: [general, entertainment]
+
+  - id: tvri
+    name: TVRI Nasional
+    handle: tvrinasional
+    country: ID
+    categories: [general]
+
+  # ── Indonesia — religious ───────────────────────────────────────
+  - id: rodja-tv
+    name: Rodja TV
+    handle: RodjaTV
+    country: ID
+    categories: [religious]
 
   # ── International English ───────────────────────────────────────
   - id: bbc-news

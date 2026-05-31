@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from telegram.error import TelegramError
 
@@ -466,7 +466,7 @@ _EDIT_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <div class="back" onclick="location.href='/stickers'">← Back to drafts</div>
+  <div class="back" onclick="location.href='/app?tab=stickers'">← Back to drafts</div>
   <h1>Make sticker</h1>
 
   <div class="video-wrap">
@@ -670,9 +670,16 @@ async def start_cleanup_loop() -> None:
         await asyncio.sleep(STICKER_CLEANUP_INTERVAL_SECONDS)
 
 
-@router.get("/stickers", response_class=HTMLResponse)
+@router.get("/stickers")
 async def stickers_page():
-    return HTMLResponse(_LIST_HTML)
+    """Standalone drafts list folded into /app?tab=stickers 2026-06-01.
+
+    The list now lives as a tab in the unified SMDL Mini App; this URL
+    stays as a 302 so existing inline buttons (the bot's "Open sticker
+    editor", any historical menu entry, old shared links) continue to
+    land in the right place. _LIST_HTML is retained in the module so the
+    standalone surface can be brought back trivially if needed."""
+    return RedirectResponse(url="/app?tab=stickers", status_code=302)
 
 
 @router.get("/stickers/{draft_id}/edit", response_class=HTMLResponse)

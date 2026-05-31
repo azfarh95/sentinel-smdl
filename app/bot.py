@@ -1220,15 +1220,18 @@ async def build() -> Application:
 
     # ── Sticker maker ──────────────────────────────────────────────────────
     def _stickers_url() -> str | None:
-        """Derive the /stickers MiniApp URL from WEBAPP_URL. WEBAPP_URL is
-        the dashboard route (usually .../app); /stickers lives at the same
-        host. Returns None if WEBAPP_URL isn't configured."""
+        """Open the unified Mini App at its Stickers tab. WEBAPP_URL is the
+        /app route; we deep-link via `?tab=stickers` (the SPA reads the
+        query param on boot — see miniapp.py). The standalone /stickers
+        page was folded into /app 2026-06-01 — this used to point there.
+        Returns None if WEBAPP_URL isn't configured."""
         base = os.environ.get("WEBAPP_URL", "").strip().rstrip("/")
         if not base:
             return None
-        if base.endswith("/app"):
-            base = base[:-4]
-        return f"{base}/stickers"
+        # Normalise to .../app (don't double-suffix if already /app).
+        if not base.endswith("/app"):
+            base = f"{base}/app"
+        return f"{base}?tab=stickers"
 
     def _sticker_keyboard() -> InlineKeyboardMarkup | None:
         url = _stickers_url()

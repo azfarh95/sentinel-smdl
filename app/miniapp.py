@@ -3841,6 +3841,11 @@ button.warn { background: #ff9500; color: #fff; }
         <div class=name>IPTV</div>
         <div class=desc>11k+ public channels · EPG · scheduled DVR</div>
       </div>
+      <div class=home-tile data-tile=stickers onclick="goto('stickers')">
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M14 8.5h.01"/><path d="M9 9.5h.01"/><path d="M8.5 14a4 4 0 0 0 7 0"/></svg></div>
+        <div class=name>Stickers</div>
+        <div class=desc>Crop &amp; trim videos into Telegram sticker packs</div>
+      </div>
       <div class="home-tile admin-only" data-tile=files id=tile-files onclick="goto('files')">
         <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
         <div class=name>Files</div>
@@ -3940,6 +3945,20 @@ button.warn { background: #ff9500; color: #fff; }
     <div id=watchlist-list><div class=empty><span class=spin></span> Loading…</div></div>
   </div>
 
+  <div class=page id=page-stickers>
+    <h1>Sticker Maker</h1>
+    <div class=card id=stickers-pack-card>
+      <div class=empty><span class=spin></span> Loading…</div>
+    </div>
+    <h2 style="margin:18px 4px 8px;font-size:15px;color:var(--muted);font-weight:600">Drafts</h2>
+    <div id=stickers-drafts>
+      <div class=empty>Send a video or GIF to <b>@Sentinel_Media_bot</b> to start a draft.</div>
+    </div>
+    <div style="margin-top:18px;text-align:center">
+      <button class=sec onclick=stickersDeleteAll() style="color:#e88">🗑 Delete all my sticker data</button>
+    </div>
+  </div>
+
   <div class=page id=page-scraper>
     <h1>Profile Scraper</h1>
     <div id=scraper-content><div class=empty><span class=spin></span> Loading…</div></div>
@@ -3989,6 +4008,9 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
   <div class=sidebar-item id=nav-live onclick="location.href='/iptv'">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/><path d="M6 12a4 4 0 0 1 4-4"/></svg></div><div class=label>IPTV</div>
+  </div>
+  <div class=sidebar-item id=nav-stickers onclick="goto('stickers')">
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M14 8.5h.01"/><path d="M9 9.5h.01"/><path d="M8.5 14a4 4 0 0 0 7 0"/></svg></div><div class=label>Stickers</div>
   </div>
   <div class="sidebar-item admin-only" id=nav-files onclick="goto('files')">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class=label>Files</div>
@@ -4245,7 +4267,7 @@ function goto(page) {
     home: 'nav-home', downloads: 'nav-downloads', watchlist: 'nav-watchlist',
     files: 'nav-files', scraper: 'tab-scraper', admin: 'tab-admin',
     settings: 'nav-settings', notifications: 'nav-notifications',
-    search: 'nav-search', library: 'nav-library',
+    search: 'nav-search', library: 'nav-library', stickers: 'nav-stickers',
   };
   const targetId = navMap[page];
   document.querySelectorAll('.sidebar-item').forEach(el =>
@@ -4259,6 +4281,7 @@ function goto(page) {
   else if (page === 'scraper') loadScraper();
   else if (page === 'settings') loadSettings();
   else if (page === 'admin') loadAdmin();
+  else if (page === 'stickers') loadStickers();
 
   // Watchlist auto-refresh so an in-progress recording's size + duration
   // tick up and a streamer going LIVE flips colour without manual reload.
@@ -4562,6 +4585,104 @@ async function loadDownloads() {
         </div>`;
     }).join('');
   } catch(e) { showErr('Load failed: '+e); }
+}
+
+// ── Stickers tab ──────────────────────────────────────────────────────────
+// The drafts list used to live on a standalone /stickers page; folded into
+// /app 2026-06-01 so the four community surfaces share one Mini App. The
+// canvas editor at /stickers/{id}/edit stays a sub-page (different layout).
+
+function _fmtStickerDur(n) {
+  if (!n) return '—';
+  return Number(n).toFixed(1) + 's';
+}
+
+function _fmtStickerExpires(iso) {
+  if (!iso) return '';
+  const d = new Date(iso); const now = new Date();
+  const mins = Math.max(0, Math.round((d - now) / 60000));
+  if (mins < 60) return `expires in ${mins}m`;
+  const hrs = Math.floor(mins / 60); const rest = mins % 60;
+  return `expires in ${hrs}h${rest}m`;
+}
+
+async function loadStickers() {
+  const packEl = document.getElementById('stickers-pack-card');
+  const draftsEl = document.getElementById('stickers-drafts');
+  let data;
+  try {
+    data = await api('/api/sticker_drafts');
+  } catch (e) {
+    packEl.innerHTML = '<div class=empty style="color:#e88">Load failed: ' + esc(String(e)) + '</div>';
+    return;
+  }
+  if (data.pack && data.pack.telegram_url) {
+    packEl.innerHTML =
+      '<div style="font-size:13px;color:var(--muted);margin-bottom:4px">Your sticker pack</div>' +
+      '<div style="font-weight:600;margin-bottom:6px">📦 ' + esc(data.pack.pack_title || '') + '</div>' +
+      '<a id=stickers-pack-link style="color:var(--accent);word-break:break-all;cursor:pointer">' +
+      esc(data.pack.telegram_url) + '</a>';
+    const pl = document.getElementById('stickers-pack-link');
+    if (pl) pl.addEventListener('click', ev => {
+      ev.preventDefault();
+      if (tg && tg.openTelegramLink) tg.openTelegramLink(data.pack.telegram_url);
+      else window.open(data.pack.telegram_url, '_blank');
+    });
+  } else {
+    packEl.innerHTML = '<div class=empty>No sticker pack yet — finalise your first draft to start one.</div>';
+  }
+  const drafts = data.drafts || [];
+  if (!drafts.length) {
+    draftsEl.innerHTML = '<div class=empty>Send a video or GIF to <b>@Sentinel_Media_bot</b> to start a draft.</div>';
+    return;
+  }
+  draftsEl.innerHTML = '';
+  for (const d of drafts) {
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.style.cssText = 'display:flex;gap:10px;align-items:center;margin-bottom:8px;padding:10px;';
+    const status = d.status && d.status !== 'awaiting_edit'
+      ? '<span style="display:inline-block;padding:1px 6px;border-radius:6px;font-size:10px;background:#333;color:#bbb;margin-left:4px">' + esc(d.status) + '</span>'
+      : '';
+    const err = d.error
+      ? '<div style="color:#f88;font-size:11px;margin-top:2px">' + esc(d.error) + '</div>'
+      : '';
+    div.innerHTML =
+      '<video data-draft-id="' + d.id + '" muted playsinline ' +
+      'style="width:80px;height:80px;object-fit:cover;background:#000;border-radius:8px;flex:0 0 auto"></video>' +
+      '<div style="flex:1;font-size:13px;min-width:0">' +
+      '<div>' + _fmtStickerDur(d.duration_s) + ' · ' + (d.width || '?') + '×' + (d.height || '?') + status + '</div>' +
+      '<div style="color:var(--muted);font-size:11px;margin-top:2px">' + esc(_fmtStickerExpires(d.expires_at)) + '</div>' +
+      err +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' +
+      '<button onclick="location.href=\'/stickers/' + d.id + '/edit\'">Make sticker</button>' +
+      '<button class=sec onclick="stickersDeleteDraft(' + d.id + ')">Delete</button>' +
+      '</div></div>';
+    draftsEl.appendChild(div);
+    const videoEl = div.querySelector('video');
+    fetch('/api/sticker_drafts/' + d.id + '/preview', {
+      headers: { 'X-Init-Data': initData },
+    }).then(r => r.ok ? r.blob() : null)
+      .then(b => { if (b) videoEl.src = URL.createObjectURL(b); })
+      .catch(() => {});
+  }
+}
+
+async function stickersDeleteDraft(id) {
+  if (!confirm('Delete this draft?')) return;
+  try {
+    await api('/api/sticker_drafts/' + id + '/delete', { method: 'POST', body: '{}' });
+    loadStickers();
+  } catch (e) { showErr('Delete failed: ' + e); }
+}
+
+async function stickersDeleteAll() {
+  if (!confirm('Wipe ALL your sticker drafts + intermediate files?\nAlready-published stickers in your pack are unaffected.')) return;
+  try {
+    const r = await api('/api/sticker_drafts/delete_all', { method: 'POST', body: '{}' });
+    showOk('Deleted ' + (r.deleted || 0) + ' drafts.');
+    loadStickers();
+  } catch (e) { showErr('Wipe failed: ' + e); }
 }
 
 async function redeliverDownload(id, btn) {
@@ -6520,11 +6641,18 @@ applyBrandLogo();
 initTileReorder();
 // Wire arrow-key + swipe nav for the file-preview gallery (#77).
 initPreviewGestures();
-// Boot navigation: land on Home. Earlier this was hardcoded to
-// 'watchlist' from when SMDL was primarily a stream-watcher; with the
-// Theater + IPTV + Files + Scraper modules in place, Home (the tile
-// grid) is the right entry point.
-goto('home');
+// Boot navigation: land on Home unless the URL deep-links a specific
+// tab via ?tab=<name>. Deep-links are how external entry points (the
+// bot's "Open sticker editor" button, a redirected /stickers URL, etc.)
+// route into the SPA without duplicating Mini App surfaces.
+const _bootTabs = new Set(['home','downloads','notifications','search','watchlist','library','stickers','files','scraper','settings','admin']);
+let _bootTab = 'home';
+try {
+  const qp = new URLSearchParams(window.location.search);
+  const t = (qp.get('tab') || '').trim().toLowerCase();
+  if (t && _bootTabs.has(t)) _bootTab = t;
+} catch (e) { /* old browsers: stay on home */ }
+goto(_bootTab);
 // Surface the unread-activity badge on the home tile (best-effort).
 refreshNotifBadge();
 </script>

@@ -42,6 +42,23 @@ channels:
     country: SG
     categories: [news]
 
+  # BERITA (Malay) and Seithi (Tamil) are Mediacorp's official news
+  # channels for the Suria / Vasantham communities. Unlike 8world/CNA
+  # they are NOT 24/7 — they go live only during scheduled bulletins, so
+  # the /live page resolves during news windows and errors gracefully the
+  # rest of the day. Pinned to /live so it always grabs the current bulletin.
+  - id: berita-mediacorp
+    name: BERITA Mediacorp (Malay)
+    url: https://www.youtube.com/channel/UCUnNm_u4ibQrL4LvVsx9cYw/live
+    country: SG
+    categories: [news]
+
+  - id: seithi-mediacorp
+    name: Seithi Mediacorp (Tamil)
+    handle: seithi.mediacorp
+    country: SG
+    categories: [news]
+
   # ── Malaysia ────────────────────────────────────────────────────
   - id: astro-awani
     name: Astro Awani

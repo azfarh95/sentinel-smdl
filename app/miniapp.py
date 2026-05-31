@@ -1950,6 +1950,99 @@ async def files_list(request: Request, path: str = ""):
     }
 
 
+# Media-library index. Extension → kind. .ts included for IPTV DVR captures.
+_LIB_KINDS = {
+    "video": {".mp4", ".mov", ".avi", ".mkv", ".webm", ".ts", ".m4v"},
+    "audio": {".mp3", ".m4a", ".ogg", ".flac", ".wav", ".opus"},
+    "image": {".jpg", ".jpeg", ".png", ".webp", ".gif"},
+}
+_LIB_EXT_KIND = {ext: kind for kind, exts in _LIB_KINDS.items() for ext in exts}
+# Single-root in-memory cache so polling the page doesn't re-walk the tree.
+_LIBRARY_CACHE: dict = {"ts": 0.0, "entries": None}
+_LIBRARY_TTL_S = 30.0
+
+
+def _scan_library() -> list[dict]:
+    """Recursively index media files under DOWNLOADS_DIR, newest-first.
+    Cached for _LIBRARY_TTL_S to keep repeated page loads cheap. Each entry:
+    {name, path (rel), ext, kind, size, mtime, share_url}."""
+    import os, time as _t
+    from pathlib import Path as _Path
+    from .file_serve import sign_share_url, DOWNLOADS_DIR
+
+    now = _t.time()
+    cached = _LIBRARY_CACHE.get("entries")
+    if cached is not None and (now - _LIBRARY_CACHE["ts"]) < _LIBRARY_TTL_S:
+        return cached
+
+    root = _Path(DOWNLOADS_DIR).resolve()
+    entries: list[dict] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune hidden dirs + the thumbnail cache in place.
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for fn in filenames:
+            ext = _Path(fn).suffix.lower()
+            kind = _LIB_EXT_KIND.get(ext)
+            if not kind:
+                continue
+            ap = _Path(dirpath) / fn
+            try:
+                st = ap.stat()
+            except OSError:
+                continue
+            rel = str(ap.relative_to(root)).replace("\\", "/")
+            entries.append({
+                "name":      fn,
+                "path":      rel,
+                "ext":       ext,
+                "kind":      kind,
+                "size":      st.st_size,
+                "mtime":     int(st.st_mtime),
+                "share_url": sign_share_url(rel),
+            })
+    entries.sort(key=lambda e: e["mtime"], reverse=True)
+    _LIBRARY_CACHE["entries"] = entries
+    _LIBRARY_CACHE["ts"] = now
+    return entries
+
+
+@router.get("/api/miniapp/library")
+async def library_index(request: Request, kind: str = "all",
+                        limit: int = 120, offset: int = 0):
+    """Personal media-server view over the download tree. Returns a flat,
+    newest-first list of media files (optionally filtered by kind) plus a
+    per-kind summary (count + total bytes) so the UI can render section
+    tabs. Owner-only — same boundary as the Files browser."""
+    p = await _verify(request)
+    require_scope(p, "smdl.admin")
+    _require_owner(p)
+
+    limit = max(1, min(limit, 300))
+    offset = max(0, offset)
+
+    entries = await asyncio.to_thread(_scan_library)
+
+    summary = {k: {"count": 0, "bytes": 0} for k in _LIB_KINDS}
+    for e in entries:
+        s = summary[e["kind"]]
+        s["count"] += 1
+        s["bytes"] += e["size"]
+
+    if kind in _LIB_KINDS:
+        filtered = [e for e in entries if e["kind"] == kind]
+    else:
+        filtered = entries
+
+    page = filtered[offset:offset + limit]
+    return {
+        "items":   page,
+        "total":   len(filtered),
+        "offset":  offset,
+        "limit":   limit,
+        "summary": summary,
+    }
+
+
 @router.get("/api/miniapp/files/thumb")
 async def files_thumb(request: Request, path: str):
     """Cached thumbnail for image/video files under DOWNLOADS_DIR (#32).
@@ -3569,6 +3662,27 @@ button.warn { background: #ff9500; color: #fff; }
 .search-title { font-weight: 600; }
 .search-sub { color: var(--muted); font-size: 13px; margin-top: 2px; word-break: break-all; }
 .search-tag { background: var(--bg); padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+/* Library page */
+.lib-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+.lib-tab { padding: 6px 12px; border-radius: 999px; background: var(--section);
+           border: 1px solid var(--border); color: var(--muted); cursor: pointer;
+           font-size: 13px; user-select: none; }
+.lib-tab.active { background: var(--button); border-color: var(--button); color: #fff; }
+.lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 10px; }
+.lib-card { background: var(--section); border-radius: 10px; overflow: hidden;
+            cursor: pointer; border: 1px solid var(--border); }
+.lib-card:active { background: var(--bg); }
+.lib-thumb { position: relative; width: 100%; aspect-ratio: 16/10; background: var(--bg);
+             display: flex; align-items: center; justify-content: center; font-size: 34px;
+             overflow: hidden; }
+.lib-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.lib-kind-tag { position: absolute; left: 6px; top: 6px; background: rgba(0,0,0,.55);
+                color: #fff; font-size: 11px; padding: 1px 6px; border-radius: 4px; }
+.lib-body { padding: 8px 10px; }
+.lib-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis; }
+.lib-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
 /* Files page */
 .files-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
                 font-size: 13px; margin-bottom: 12px; color: var(--muted); }
@@ -3699,6 +3813,11 @@ button.warn { background: #ff9500; color: #fff; }
         <div class=name>Files</div>
         <div class=desc>Browse + fetch from /downloads (SFTP-style)</div>
       </div>
+      <div class="home-tile admin-only" data-tile=library id=tile-library onclick="goto('library')">
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16"/><path d="M8 4v16"/><rect x="12" y="4" width="8" height="16" rx="1" transform="rotate(8 16 12)"/></svg></div>
+        <div class=name>Library</div>
+        <div class=desc>Every cached video · audio · image on the box</div>
+      </div>
       <div class="home-tile admin-only" data-tile=scraper id=tile-scraper onclick="goto('scraper')">
         <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></div>
         <div class=name>Scraper</div>
@@ -3744,6 +3863,16 @@ button.warn { background: #ff9500; color: #fff; }
              style="width:100%;box-sizing:border-box;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px">
     </div>
     <div id=search-results><div class=empty>Type at least 2 characters to search.</div></div>
+  </div>
+
+  <div class=page id=page-library>
+    <div class=page-header>
+      <h1>Library</h1>
+      <button class="small sec" onclick="loadLibrary(libKind, true)" title="Rescan">🔄</button>
+    </div>
+    <div class=lib-tabs id=lib-tabs></div>
+    <div id=library-grid><div class=empty><span class=spin></span> Scanning…</div></div>
+    <div id=library-more style="text-align:center;margin-top:12px"></div>
   </div>
 
   <div class=page id=page-files>
@@ -3830,6 +3959,9 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
   <div class="sidebar-item admin-only" id=nav-files onclick="goto('files')">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class=label>Files</div>
+  </div>
+  <div class="sidebar-item admin-only" id=nav-library onclick="goto('library')">
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16"/><path d="M8 4v16"/><rect x="12" y="4" width="8" height="16" rx="1" transform="rotate(8 16 12)"/></svg></div><div class=label>Library</div>
   </div>
   <div class="sidebar-item admin-only" id=tab-scraper onclick="goto('scraper')">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></div><div class=label>Scrape</div>
@@ -4080,7 +4212,7 @@ function goto(page) {
     home: 'nav-home', downloads: 'nav-downloads', watchlist: 'nav-watchlist',
     files: 'nav-files', scraper: 'tab-scraper', admin: 'tab-admin',
     settings: 'nav-settings', notifications: 'nav-notifications',
-    search: 'nav-search',
+    search: 'nav-search', library: 'nav-library',
   };
   const targetId = navMap[page];
   document.querySelectorAll('.sidebar-item').forEach(el =>
@@ -4088,6 +4220,7 @@ function goto(page) {
   if (page === 'downloads') loadDownloads();
   else if (page === 'search') { const si = document.getElementById('search-input'); if (si) si.focus(); }
   else if (page === 'notifications') loadNotifications();
+  else if (page === 'library') loadLibrary(libKind);
   else if (page === 'watchlist') loadWatchlist();
   else if (page === 'files') loadFiles(filesCwd);
   else if (page === 'scraper') loadScraper();
@@ -4233,6 +4366,131 @@ function renderSearchItem(kind, it) {
       '<div class=search-sub>' + esc(it.platform || '') + '</div></div>';
   }
   return '';
+}
+
+// ── Library / media-server index (#133) ────────────────────────────────
+let libKind = 'all';
+let _libItems = [];          // accumulated across "load more" pages
+let _libOffset = 0;
+let _libTotal = 0;
+let _libBusy = false;
+const _LIB_PAGE = 120;
+const LIB_KIND_META = {
+  all:   { label: 'All',    ico: '🗂' },
+  video: { label: 'Videos', ico: '🎬' },
+  audio: { label: 'Audio',  ico: '🎵' },
+  image: { label: 'Images', ico: '🖼' },
+};
+const LIB_THUMBABLE = { video: true, image: true, audio: false };
+
+function renderLibTabs(summary) {
+  const tabs = document.getElementById('lib-tabs');
+  if (!tabs) return;
+  const counts = { all: 0 };
+  for (const k of ['video', 'audio', 'image']) {
+    const c = (summary && summary[k] && summary[k].count) || 0;
+    counts[k] = c; counts.all += c;
+  }
+  tabs.innerHTML = ['all', 'video', 'audio', 'image'].map(k => {
+    const m = LIB_KIND_META[k];
+    const cls = 'lib-tab' + (k === libKind ? ' active' : '');
+    return '<div class="' + cls + '" onclick="setLibKind(\\'' + k + '\\')">' +
+           m.ico + ' ' + m.label + ' · ' + counts[k] + '</div>';
+  }).join('');
+}
+
+function setLibKind(k) {
+  if (k === libKind) return;
+  libKind = k;
+  loadLibrary(k);
+}
+
+function renderLibCard(it) {
+  const thumbable = LIB_THUMBABLE[it.kind];
+  const m = LIB_KIND_META[it.kind] || { ico: '📄' };
+  let inner;
+  if (thumbable) {
+    inner = '<img loading=lazy src="/api/miniapp/files/thumb?path=' +
+            encodeURIComponent(it.path) + '" ' +
+            'onerror="this.replaceWith(document.createTextNode(\\'' + m.ico + '\\'))">';
+  } else {
+    inner = m.ico;
+  }
+  const u = encodeURIComponent(it.share_url || '');
+  const n = encodeURIComponent(it.name || '');
+  const click = it.share_url
+    ? 'openPreview(\\'' + u + '\\', \\'' + n + '\\')'
+    : "showErr('No share URL — SHARE_SECRET/PUBLIC_BASE_URL not configured')";
+  return '<div class=lib-card onclick="' + click + '">' +
+    '<div class=lib-thumb>' + inner +
+      '<span class=lib-kind-tag>' + esc(it.ext || '') + '</span></div>' +
+    '<div class=lib-body><div class=lib-name>' + esc(it.name) + '</div>' +
+    '<div class=lib-meta>' + fmtSize(it.size) + ' · ' + fmtDate(it.mtime) + '</div>' +
+    '</div></div>';
+}
+
+async function loadLibrary(kind, force) {
+  if (_libBusy) return;
+  _libBusy = true;
+  libKind = kind || 'all';
+  _libOffset = 0;
+  _libItems = [];
+  const grid = document.getElementById('library-grid');
+  const more = document.getElementById('library-more');
+  if (more) more.innerHTML = '';
+  grid.innerHTML = '<div class=empty><span class=spin></span> Scanning…</div>';
+  try {
+    const j = await api('/api/miniapp/library?kind=' + encodeURIComponent(libKind) +
+                        '&limit=' + _LIB_PAGE + '&offset=0');
+    renderLibTabs(j.summary);
+    _libItems = j.items || [];
+    _libOffset = (j.offset || 0) + _libItems.length;
+    _libTotal = j.total || 0;
+    if (!_libItems.length) {
+      grid.innerHTML = '<div class=empty>Nothing cached in this category yet.</div>';
+    } else {
+      grid.innerHTML = '<div class=lib-grid>' +
+        _libItems.map(renderLibCard).join('') + '</div>';
+    }
+    renderLibMore();
+  } catch (e) {
+    grid.innerHTML = '<div class=empty>Library failed to load: ' + esc(String(e)) + '</div>';
+  } finally {
+    _libBusy = false;
+  }
+}
+
+function renderLibMore() {
+  const more = document.getElementById('library-more');
+  if (!more) return;
+  if (_libOffset < _libTotal) {
+    more.innerHTML = '<button class="small sec" onclick="loadMoreLibrary()">Load more · ' +
+      (_libTotal - _libOffset) + ' left</button>';
+  } else {
+    more.innerHTML = _libTotal ? '<div class=meta>' + _libTotal + ' items</div>' : '';
+  }
+}
+
+async function loadMoreLibrary() {
+  if (_libBusy || _libOffset >= _libTotal) return;
+  _libBusy = true;
+  const more = document.getElementById('library-more');
+  if (more) more.innerHTML = '<span class=spin></span>';
+  try {
+    const j = await api('/api/miniapp/library?kind=' + encodeURIComponent(libKind) +
+                        '&limit=' + _LIB_PAGE + '&offset=' + _libOffset);
+    const items = j.items || [];
+    _libItems = _libItems.concat(items);
+    _libOffset += items.length;
+    _libTotal = j.total || _libTotal;
+    const gridInner = document.querySelector('#library-grid .lib-grid');
+    if (gridInner) gridInner.insertAdjacentHTML('beforeend', items.map(renderLibCard).join(''));
+    renderLibMore();
+  } catch (e) {
+    if (more) more.innerHTML = '<div class=meta>Load more failed: ' + esc(String(e)) + '</div>';
+  } finally {
+    _libBusy = false;
+  }
 }
 
 async function loadDownloads() {

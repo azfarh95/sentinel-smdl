@@ -2508,7 +2508,8 @@ async def admin_deny_user(request: Request, body: DenyUserBody):
     _require_owner(p)
     # Use the existing ban path under the hood with a 'denied at pending'
     # marker; this keeps a paper trail without inventing a new status enum.
-    ok = await _db.ban_user(body.chat_id, reason=f"DENIED@pending: {body.reason}".strip())
+    ok = await _db.set_user_status(body.chat_id, "banned",
+                                   f"DENIED@pending: {body.reason}".strip())
     if not ok:
         return JSONResponse({"ok": False, "error": "User not found"}, status_code=404)
     return {"ok": True}

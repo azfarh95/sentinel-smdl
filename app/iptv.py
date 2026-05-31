@@ -833,6 +833,14 @@ import os as _os
 
 IPTV_DOWNLOAD_DIR = _os.environ.get("DOWNLOADS_DIR", "/downloads")
 
+# Live recording process registry — maps a recordings row id to its running
+# ffmpeg process so an owner can cancel it mid-flight. Populated by the worker
+# once the subprocess is spawned, cleared in its finally block. _CANCELLED
+# marks rows the owner stopped on purpose so the worker reports 'cancelled'
+# instead of 'failed' (non-zero exit from a terminate looks like a failure).
+_RECORDING_PROCS: dict[int, "asyncio.subprocess.Process"] = {}
+_CANCELLED: set[int] = set()
+
 
 async def _record_worker(
     job_id: int,
@@ -872,6 +880,7 @@ async def _record_worker(
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
+    _RECORDING_PROCS[job_id] = proc
     err_buf: list[bytes] = []
     try:
         async def _drain():
@@ -884,12 +893,19 @@ async def _record_worker(
     except Exception:
         logger.exception("iptv recording worker crashed")
     finally:
+        _RECORDING_PROCS.pop(job_id, None)
         rc = proc.returncode if proc.returncode is not None else -1
         finished = _iso_now()
         err_msg = (b"".join(err_buf[-4096:]).decode("utf-8", "replace") or "").strip()
-        # ffmpeg exits 0 on graceful stop AND on -t timeout. Anything else
-        # is a real failure (network died, codec error, etc.).
-        status = "finished" if rc == 0 else "failed"
+        cancelled = job_id in _CANCELLED
+        _CANCELLED.discard(job_id)
+        # ffmpeg exits 0 on graceful stop AND on -t timeout. A terminate from
+        # cancel yields a non-zero rc — report that as 'cancelled', not a real
+        # failure. The partial .ts is still playable (stream copy, no moov).
+        if cancelled:
+            status = "cancelled"
+        else:
+            status = "finished" if rc == 0 else "failed"
         async with aiosqlite.connect(db.DB_PATH) as conn:
             await conn.execute(
                 "UPDATE iptv_recordings SET status=?, finished_at=?, error=? WHERE id=?",
@@ -948,6 +964,63 @@ async def list_iptv_recordings(limit: int = 50) -> list[dict]:
         """, (int(limit),))
         rows = await cur.fetchall()
     return [dict(r) for r in rows]
+
+
+async def get_iptv_recording(job_id: int) -> dict | None:
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM iptv_recordings WHERE id = ?", (int(job_id),))
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def cancel_iptv_recording(job_id: int) -> dict:
+    """Stop an in-flight recording. Marks the row 'cancelled' (the worker's
+    finally block does the DB write) and keeps the partial .ts file. No-op
+    with ok=False if the job isn't currently recording."""
+    job_id = int(job_id)
+    proc = _RECORDING_PROCS.get(job_id)
+    if proc is None:
+        return {"ok": False, "error": "not recording (already finished or never started)"}
+    _CANCELLED.add(job_id)
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        pass
+    return {"ok": True, "id": job_id, "status": "cancelling"}
+
+
+async def delete_iptv_recording(job_id: int) -> dict:
+    """Delete a finished/failed/cancelled recording: removes the output file
+    then the DB row. Refuses while the job is still recording (cancel first)."""
+    job_id = int(job_id)
+    if job_id in _RECORDING_PROCS:
+        return {"ok": False, "error": "still recording — cancel it first"}
+    row = await get_iptv_recording(job_id)
+    if row is None:
+        return {"ok": False, "error": "no such recording"}
+    removed_file = False
+    out = row.get("output_path")
+    if out and _os.path.isfile(out):
+        try:
+            _os.remove(out)
+            removed_file = True
+        except OSError as exc:
+            logger.warning("delete recording %d: file removal failed: %s", job_id, exc)
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        await conn.execute("DELETE FROM iptv_recordings WHERE id = ?", (job_id,))
+        await conn.commit()
+    return {"ok": True, "id": job_id, "file_removed": removed_file}
+
+
+async def rerecord_iptv_recording(job_id: int) -> dict:
+    """Re-run the same channel for the same duration as a past recording."""
+    row = await get_iptv_recording(int(job_id))
+    if row is None:
+        raise KeyError(f"recording {job_id} not found")
+    return await start_iptv_recording(
+        row["channel_id"], duration_min=int(row.get("duration_min") or 5))
 
 
 async def get_now_next(tvg_id: str, lookahead_count: int = 3) -> list[dict]:

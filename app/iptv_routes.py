@@ -1018,6 +1018,43 @@ async def iptv_recordings(request: Request, limit: int = 50):
     return {"recordings": await _iptv.list_iptv_recordings(limit=limit)}
 
 
+@router.post("/api/iptv/recordings/{job_id}/cancel")
+async def iptv_recording_cancel(job_id: int, request: Request):
+    """Stop an in-flight recording (keeps the partial file)."""
+    await _verify_iptv(request)
+    result = await _iptv.cancel_iptv_recording(job_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error", "cannot cancel"))
+    return result
+
+
+@router.post("/api/iptv/recordings/{job_id}/delete")
+async def iptv_recording_delete(job_id: int, request: Request):
+    """Delete a finished/failed/cancelled recording's file + row."""
+    await _verify_iptv(request)
+    result = await _iptv.delete_iptv_recording(job_id)
+    if not result.get("ok"):
+        code = 409 if "still recording" in result.get("error", "") else 404
+        raise HTTPException(status_code=code, detail=result.get("error", "cannot delete"))
+    return result
+
+
+@router.post(
+    "/api/iptv/recordings/{job_id}/rerecord",
+    dependencies=[Depends(_grant_transport.requires(_entitlements.CAP_TV_RECORDER))],
+)
+async def iptv_recording_rerecord(job_id: int, request: Request):
+    """Re-run the same channel + duration as a past recording."""
+    await _verify_iptv(request)
+    try:
+        return await _iptv.rerecord_iptv_recording(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="recording not found")
+    except Exception as exc:
+        logger.exception("iptv re-record failed")
+        raise HTTPException(status_code=500, detail=f"re-record failed: {exc}")
+
+
 # ── Enhancement pass 2026-05-27: logo cache + now-playing + play history
 #    + scheduled DVR + M3U import + SG-curated ──────────────────────
 
@@ -3849,6 +3886,15 @@ _RECORDINGS_HTML = r"""<!doctype html>
     .status.recording{ background:#5a3a18; color:#ffd9a0; }
     .status.finished { background:#1f5230; color:#a9e8be; }
     .status.failed   { background:#5a2020; color:#f5b4b4; }
+    .status.cancelled{ background:#3a3030; color:#d8b8b8; }
+    .row .actions { display:flex; gap:8px; margin-top:10px; }
+    .row .actions button {
+      flex:1; font:inherit; font-size:12px; padding:7px 10px; border-radius:7px;
+      border:1px solid #2c333d; background:#1b1f27; color:#cfd2d8; cursor:pointer;
+    }
+    .row .actions button:hover { border-color:#5ac8fa; }
+    .row .actions button.danger { color:#f5b4b4; border-color:#5a2020; }
+    .row .actions button:disabled { opacity:.5; cursor:default; }
     .row .meta {
       display:flex; gap:6px; flex-wrap:wrap; font-size:11px;
       color:#8a8f99; margin-top:6px;
@@ -3941,6 +3987,29 @@ function fmtWhen(iso) {
   return d.toLocaleString([], { dateStyle:'short', timeStyle:'short' });
 }
 
+async function cancelRec(id) {
+  if (!confirm('Stop this recording? The partial file is kept.')) return;
+  try {
+    await api(`/api/iptv/recordings/${id}/cancel`, { method:'POST' });
+  } catch (e) { alert('Cancel failed: ' + e.message); }
+  await refresh();
+}
+
+async function deleteRec(id) {
+  if (!confirm('Delete this recording and its file? This cannot be undone.')) return;
+  try {
+    await api(`/api/iptv/recordings/${id}/delete`, { method:'POST' });
+  } catch (e) { alert('Delete failed: ' + e.message); }
+  await refresh();
+}
+
+async function rerecordRec(id) {
+  try {
+    await api(`/api/iptv/recordings/${id}/rerecord`, { method:'POST' });
+  } catch (e) { alert('Re-record failed: ' + e.message); }
+  await refresh();
+}
+
 async function refresh() {
   let data;
   try {
@@ -3956,11 +4025,13 @@ async function refresh() {
   const queued= rows.filter(r => r.status === 'queued').length;
   const ok    = rows.filter(r => r.status === 'finished').length;
   const bad   = rows.filter(r => r.status === 'failed').length;
+  const cancd = rows.filter(r => r.status === 'cancelled').length;
   document.getElementById('summary').innerHTML =
     `${rows.length} total · ` +
     (live  ? `<span class="live-dot"></span>${live} recording · ` : '') +
     (queued? `${queued} queued · ` : '') +
-    `${ok} finished · ${bad} failed`;
+    `${ok} finished · ${bad} failed` +
+    (cancd ? ` · ${cancd} cancelled` : '');
   if (!rows.length) {
     document.getElementById('list').innerHTML =
       `<div class="empty">No recordings yet. Tap <strong>⏺ Record 5 min</strong> on any channel's play page to start one.</div>`;
@@ -3985,6 +4056,15 @@ async function refresh() {
     const fileBlock = (status === 'finished' && r.output_path)
       ? `<div class="file">${escapeHtml(r.output_path)}</div>`
       : '';
+    const canCancel = (status === 'recording' || status === 'queued');
+    const canRedo   = (status === 'finished' || status === 'failed' || status === 'cancelled');
+    const canDelete = (status !== 'recording' && status !== 'queued');
+    const actions = `
+      <div class="actions">
+        ${canCancel ? `<button onclick="cancelRec(${r.id})">Cancel</button>` : ''}
+        ${canRedo   ? `<button onclick="rerecordRec(${r.id})">Re-record</button>` : ''}
+        ${canDelete ? `<button class="danger" onclick="deleteRec(${r.id})">Delete</button>` : ''}
+      </div>`;
     return `
       <div class="row" data-id="${r.id}">
         <div class="h">
@@ -4000,6 +4080,7 @@ async function refresh() {
         ${progressBar}
         ${errBlock}
         ${fileBlock}
+        ${actions}
       </div>
     `;
   }).join('');

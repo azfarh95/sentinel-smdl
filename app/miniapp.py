@@ -169,6 +169,19 @@ def _allowed_users() -> set[int]:
     return out
 
 
+# Surface scopes a non-owner Telegram user gets on the community build. These
+# are the user-facing pillars (browse/play/download/stickers/streamtracker);
+# they deliberately EXCLUDE the owner-sensitive scopes ("*", "smdl.admin",
+# "smdl.license") so owner-only routes still 403. Paid features *within* these
+# surfaces are gated separately by the entitlement rail (402), not by scope.
+COMMUNITY_USER_SCOPES = (
+    "smdl.iptv",
+    "smdl.downloader",
+    "smdl.stickers",
+    "smdl.streamtracker",
+)
+
+
 async def _check_access(payload: dict) -> int:
     """Returns the caller's user_id if authorised. Routes the decision through
     auth.classify() so the Mini App and the bot agree on who's in/out.
@@ -304,11 +317,18 @@ async def _verify(request: Request) -> dict:
                  or request.headers.get("x-telegram-init-data") or "")
     payload = _validate_init_data(init_data, bot_token)
     await _check_access(payload)
-    # initData auth implies owner — synthesise a wildcard session so
-    # require_scope() lets everything through.
+    # Synthesise a session for require_scope(). The OWNER gets a wildcard so
+    # everything passes. A non-owner is only reachable here on the community
+    # build (where _check_access opens the gate to all Telegram users); they
+    # get the user-facing surface scopes only — never the owner-sensitive ones
+    # — so owner-only routes still 403. Paid caps are gated by entitlements.
+    uid = (payload.get("user") or {}).get("id")
+    is_owner_user = bool(uid) and _is_owner(int(uid))
     payload["session"] = {
-        "version": "initdata", "user_id": "owner",
-        "scopes": ["*"], "jti": "", "iat": 0, "expired": False,
+        "version": "initdata",
+        "user_id": "owner" if is_owner_user else str(uid),
+        "scopes": ["*"] if is_owner_user else list(COMMUNITY_USER_SCOPES),
+        "jti": "", "iat": 0, "expired": False,
     }
     return payload
 

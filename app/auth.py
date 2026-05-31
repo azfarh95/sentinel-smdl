@@ -25,6 +25,7 @@ from typing import Literal
 from .config import OWNER_CHAT_ID
 from . import database as _db
 from . import stream_monitor as _sm
+from . import edition
 
 
 AuthResult = Literal["allow", "deny_banned", "deny_pending",
@@ -56,7 +57,14 @@ async def classify(chat_id: int) -> AuthResult:
 
     Group chats (negative chat_ids) go through approved_groups instead of the
     per-user users table. Owner-DM bypasses both. Admin-only mode blocks
-    everything except owner."""
+    everything except owner.
+
+    Edition-dependent: on the COMMUNITY build the access gate is open — an
+    unknown or pending individual user is allowed (free tier; paid features
+    are gated separately by entitlements → 402). On the PRIVATE (owner) build
+    the strict approve-before-access flow applies. Owner-only routes are
+    guarded independently (require_owner / is_owner) and are never opened by
+    this; the banned status and admin-only kill-switch hold in both editions."""
     if is_owner(chat_id):
         return "allow"
     mode = await get_admin_only_mode()
@@ -64,16 +72,31 @@ async def classify(chat_id: int) -> AuthResult:
         return "deny_admin_only"
     if int(chat_id) < 0:
         # Group / supergroup. Approved → allow whole group; else deny.
+        # Group gating stays approval-based even on community — a public
+        # Mini App is a per-user DM surface; group access is an owner concept.
         if await _db.is_group_approved(int(chat_id)):
             return "allow"
         return "deny_unknown"
     user = await _db.get_user(int(chat_id))
     if user is None:
+        # Community build: OPEN registration — any Telegram user (valid
+        # initData) is allowed at the free tier without /start or owner
+        # approval. This is the public-funnel build; the commercial gate is
+        # entitlements (402 on paid caps), not this access check. The private
+        # (owner) box keeps the strict approve-before-access flow below.
+        if edition.is_community():
+            return "allow"
         return "deny_unknown"
     status = (user.get("status") or "active").lower()
+    # Banned is honoured in BOTH editions — the owner can ban an abusive
+    # community user by setting their row to 'banned'.
     if status == "banned":
         return "deny_banned"
     if status == "pending":
+        # Pending (awaiting owner approval) is a private-box concept; the
+        # community build has no approval queue, so pending users are allowed.
+        if edition.is_community():
+            return "allow"
         return "deny_pending"
     return "allow"
 

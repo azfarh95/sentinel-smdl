@@ -158,8 +158,9 @@ def _video_id_from_url(url: str) -> str | None:
     return None
 
 
-def _resolve_video_id_sync(channel_url: str) -> str:
-    """yt-dlp the @handle/live page for the *currently live* video id."""
+def _resolve_video_meta_sync(channel_url: str) -> dict:
+    """yt-dlp the @handle/live page for the *currently live* video id and
+    its title. Returns {"id": str, "title": str|None}."""
     import yt_dlp
     ydl_opts: dict[str, Any] = {
         "quiet": True,
@@ -182,7 +183,12 @@ def _resolve_video_id_sync(channel_url: str) -> str:
     vid = info.get("id")
     if not vid:
         raise RuntimeError("no video id in yt-dlp output")
-    return vid
+    return {"id": vid, "title": info.get("title")}
+
+
+def _resolve_video_id_sync(channel_url: str) -> str:
+    """yt-dlp the @handle/live page for the *currently live* video id."""
+    return _resolve_video_meta_sync(channel_url)["id"]
 
 
 async def resolve_live_video_id(channel_url: str) -> str:
@@ -233,14 +239,17 @@ _OFFAIR_MARKERS = (
 
 async def probe_live_status(channel_url: str) -> dict:
     """Is this channel broadcasting right now? Returns
-    {"live": bool, "reason": None|"off_air"|"error"}.
+    {"live": bool, "reason": None|"off_air"|"error", "title": str|None}.
 
-    Caches both live and off-air results for a short TTL so the grid
-    badge sweep doesn't re-run yt-dlp for dark channels each load."""
+    `title` is the current live stream's title (when live) so the grid can
+    show "what's on now" without a second round-trip. Caches both live and
+    off-air results for a short TTL so the grid badge sweep doesn't re-run
+    yt-dlp for dark channels each load."""
     direct = _video_id_from_url(channel_url)
     if direct:
-        # Pinned video id (watch/embed/live URL) — treat as live; no probe.
-        return {"live": True, "reason": None}
+        # Pinned video id (watch/embed/live URL) — treat as live; no probe,
+        # so we have no title to surface.
+        return {"live": True, "reason": None, "title": None}
     now = time.time()
     hit = _status_cache.get(channel_url)
     if hit and hit[1] > now:
@@ -252,11 +261,11 @@ async def probe_live_status(channel_url: str) -> dict:
             return hit[0]
         loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(None, _resolve_video_id_sync, channel_url)
-            status = {"live": True, "reason": None}
+            meta = await loop.run_in_executor(None, _resolve_video_meta_sync, channel_url)
+            status = {"live": True, "reason": None, "title": meta.get("title")}
         except Exception as exc:
             msg = str(exc).lower()
             off_air = any(m in msg for m in _OFFAIR_MARKERS)
-            status = {"live": False, "reason": "off_air" if off_air else "error"}
+            status = {"live": False, "reason": "off_air" if off_air else "error", "title": None}
         _status_cache[channel_url] = (status, now + _STATUS_TTL_SEC)
         return status

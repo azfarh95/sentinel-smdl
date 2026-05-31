@@ -1878,6 +1878,23 @@ _BROWSE_HTML = r"""<!doctype html>
       color:#5ac8fa; border-bottom-color:#5ac8fa; font-weight:600;
     }
 
+    /* ── Genre strip — one-tap category browse ────────────────── */
+    .genre-strip {
+      display:flex; gap:7px; padding:10px 14px 4px;
+      overflow-x:auto; overflow-y:hidden; scrollbar-width:thin;
+      -webkit-overflow-scrolling:touch;
+    }
+    .genre-strip:empty { display:none; }
+    .genre-strip .gchip {
+      flex:0 0 auto; font:inherit; font-size:12.5px; cursor:pointer;
+      padding:6px 13px; border-radius:999px; white-space:nowrap;
+      background:#15181f; color:#cfd2d8; border:1px solid #232831;
+    }
+    .genre-strip .gchip:hover { border-color:#3a4150; }
+    .genre-strip .gchip.active {
+      background:#1f3a5a; color:#bfe0ff; border-color:#3390ec; font-weight:600;
+    }
+
     /* ── Last-watched horizontal scroller row ─────────────────── */
     .recent-grid {
       display:flex; gap:10px; padding:6px 14px 8px;
@@ -1952,6 +1969,7 @@ _BROWSE_HTML = r"""<!doctype html>
       display:flex; flex-direction:column; gap:6px; min-height:130px;
     }
     .card:active { transform: scale(.97); border-color:#3390ec; }
+    .card:focus-visible { outline:2px solid #3390ec; outline-offset:2px; border-color:#3390ec; }
     .card { position:relative; }
     .card .star-btn {
       position:absolute; top:6px; right:6px; width:28px; height:28px;
@@ -1967,6 +1985,12 @@ _BROWSE_HTML = r"""<!doctype html>
       aspect-ratio:1/1; background:#0d0f14; border-radius:8px;
       display:flex; align-items:center; justify-content:center; overflow:hidden;
     }
+    /* Skeleton shimmer while the logo loads — cleared on load/error. */
+    .card .logo-wrap.skel {
+      background:linear-gradient(100deg,#0d0f14 30%,#1b2029 50%,#0d0f14 70%);
+      background-size:200% 100%; animation:skel-shimmer 1.2s linear infinite;
+    }
+    @keyframes skel-shimmer { from{background-position:200% 0} to{background-position:-200% 0} }
     .card .logo-wrap img { max-width:80%; max-height:80%; object-fit:contain; }
     .card .logo-wrap .glyph { font-size:32px; opacity:.55; }
     .card .name { font-size:12px; line-height:1.2; font-weight:500;
@@ -2145,13 +2169,17 @@ _BROWSE_HTML = r"""<!doctype html>
     <button class="icon-btn" id="refresh-top-btn" title="Refresh all sources" aria-label="refresh">↻</button>
   </div>
 
-  <!-- Quick-tab strip: All / SG / Favorites -->
+  <!-- Quick-tab strip: All / Live now / SG / Favorites -->
   <div class="quick-tabs" id="quick-tabs">
     <button class="qt active" data-tab="all">All</button>
+    <button class="qt" data-tab="live">🔴 Live now</button>
     <button class="qt" data-tab="sg">🇸🇬 Singapore</button>
     <button class="qt" data-tab="fav">⭐ Favorites</button>
     <button class="qt" data-tab="recent" id="qt-recent" style="display:none">⏱ Last watched</button>
   </div>
+
+  <!-- Genre strip: one-tap browse by category (sets state.category) -->
+  <div class="genre-strip" id="genre-strip"></div>
 
   <!-- "Last watched" pinned row, only rendered when state.tab==='all' -->
   <section class="recent-row" id="recent-row" style="display:none">
@@ -2276,6 +2304,12 @@ const state = (() => {
 function _persistState() {
   try { localStorage.setItem(STATE_KEY, JSON.stringify(state)); } catch {}
 }
+// Deep-link support: /iptv?tab=live (e.g. the off-air player's "See what's
+// live" button) overrides the persisted tab on load.
+try {
+  const qTab = new URLSearchParams(location.search).get('tab');
+  if (qTab && ['all','live','sg','fav','recent'].includes(qTab)) state.tab = qTab;
+} catch {}
 
 // Country display-name + sort helpers. Modern Intl.DisplayNames maps
 // "SG" → "Singapore", "US" → "United States", etc. — used for both the
@@ -2484,6 +2518,7 @@ async function loadFilters() {
 function makeChip(label, value, active, kind) {
   const el = document.createElement('div');
   el.className = 'chip' + (active ? ' active' : '');
+  el.dataset.value = value == null ? '' : value;
   el.textContent = label;
   el.addEventListener('click', () => {
     state[kind] = value;
@@ -2496,6 +2531,9 @@ function makeChip(label, value, active, kind) {
     if (ftValue) ftValue.textContent = label;
     const tile = document.querySelector(`.filter-tile[data-facet="${kind}"]`);
     if (tile) tile.open = false;
+    // Keep the genre strip's active pill in sync when the category changes
+    // from the drawer facet.
+    if (kind === 'category') { try { renderGenreStrip(); } catch (_) {} }
     _autoCloseDrawerIfMobile();
   });
   return el;
@@ -2515,11 +2553,14 @@ async function loadChannels() {
       const params = new URLSearchParams();
       if (state.country) params.set('country', state.country);
       if (state.category) params.set('category', state.category);
-      if (state.source) params.set('source', state.source);
+      // The "Live now" tab is youtube-live-only; force that source so the
+      // (country,name)-ordered window can't hide live channels past row 300.
+      if (state.tab === 'live') params.set('source', 'youtube-live');
+      else if (state.source) params.set('source', state.source);
       if (state.q) params.set('q', state.q);
-      // favorites_only and the fav-tab need a wider fetch — a favorite
-      // outside the first 300 by (country,name) would otherwise be invisible.
-      const wide = state.favorites_only || state.tab === 'fav';
+      // favorites_only, the fav-tab, and the live-tab need a wider fetch — a
+      // match outside the first 300 by (country,name) would be invisible.
+      const wide = state.favorites_only || state.tab === 'fav' || state.tab === 'live';
       params.set('limit', wide ? '20000' : '300');
       data = await api('/api/iptv/v2/channels?' + params.toString());
     }
@@ -2538,6 +2579,12 @@ async function loadChannels() {
   if (state.status === 'alive') {
     data.channels = (data.channels || []).filter(c => (c.alive_count || 0) > 0);
   }
+  // "Live now" tab: keep only youtube-live channels currently broadcasting.
+  // Needs the status map resolved BEFORE render, so await it here.
+  if (state.tab === 'live') {
+    const map = await ensureLiveStatus();
+    data.channels = (data.channels || []).filter(c => (map[c.id] || {}).live);
+  }
   let channels = data.channels || [];
   // Favorites-only is purely a client-side filter — the server doesn't
   // know which channels you've starred. Apply after the fetch.
@@ -2547,10 +2594,13 @@ async function loadChannels() {
   document.getElementById('result-h').textContent =
     `Channels · ${channels.length}${channels.length >= 300 ? '+' : ''}${state.favorites_only ? ' ⭐' : ''}`;
   if (!channels.length) {
-    grid.innerHTML = state.favorites_only
-      ? `<div class="empty">No favorites yet. Tap the ☆ on any channel card to star it.</div>`
-      : `<div class="empty">No channels match.<br>
-         Try <strong>Refresh catalogue</strong> if this is your first visit.</div>`;
+    grid.innerHTML = (state.tab === 'live')
+      ? `<div class="empty">Nothing live right now.<br>
+         Off-air channels appear under <strong>All</strong> with an ○ Off-air badge.</div>`
+      : (state.favorites_only
+        ? `<div class="empty">No favorites yet. Tap the ☆ on any channel card to star it.</div>`
+        : `<div class="empty">No channels match.<br>
+           Try <strong>Refresh catalogue</strong> if this is your first visit.</div>`);
     return;
   }
   grid.innerHTML = '';
@@ -2563,7 +2613,8 @@ async function loadChannels() {
     // Same-origin <img> sends the auth cookie automatically.
     const logoHtml =
       `<img src="/iptv/logo/${encodeURIComponent(ch.id)}" alt="" loading="lazy"
-            onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'glyph',textContent:'📺'}))">`;
+            onload="this.closest('.logo-wrap')?.classList.remove('skel')"
+            onerror="const w=this.closest('.logo-wrap'); if(w)w.classList.remove('skel'); this.replaceWith(Object.assign(document.createElement('div'),{className:'glyph',textContent:'📺'}))">`;
     const np = (state.now_playing || {})[ch.id];
     const npHtml = np
       ? `<div class="np" title="${escapeAttr(np.title)}">● ${escapeHtml((np.title||'').slice(0,40))}${(np.title||'').length>40?'…':''}</div>`
@@ -2587,7 +2638,7 @@ async function loadChannels() {
     if (lb) badges.push(lb);
     card.innerHTML = `
       <button class="star-btn ${fav ? 'on' : ''}" aria-label="favorite">${fav ? '★' : '☆'}</button>
-      <div class="logo-wrap">${logoHtml}</div>
+      <div class="logo-wrap skel">${logoHtml}</div>
       <div class="name">${escapeHtml(ch.name)}</div>
       <div class="meta">${flag(ch.country||'')} ${escapeHtml(ch.country||'?')} · ${escapeHtml((ch.categories||[]).slice(0,1).join(''))}</div>
       ${npHtml}
@@ -2605,9 +2656,41 @@ async function loadChannels() {
       if (state.favorites_only && !on) card.style.display = 'none';
     });
     card.addEventListener('click', () => location.href = `/iptv/play/${encodeURIComponent(ch.id)}`);
+    card.tabIndex = 0;
+    card.setAttribute('role', 'link');
+    card.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        location.href = `/iptv/play/${encodeURIComponent(ch.id)}`;
+      }
+    });
     grid.appendChild(card);
   }
 }
+
+// Arrow-key roaming across the channel grid. Computes columns from the
+// rendered layout so Up/Down jump a full row; Home/End jump to ends.
+document.getElementById('grid')?.addEventListener('keydown', (e) => {
+  if (!['ArrowRight','ArrowLeft','ArrowUp','ArrowDown','Home','End'].includes(e.key)) return;
+  const cards = Array.from(document.querySelectorAll('#grid .card'));
+  if (!cards.length) return;
+  const cur = document.activeElement?.closest?.('.card');
+  let idx = cards.indexOf(cur);
+  if (idx < 0) { cards[0].focus(); e.preventDefault(); return; }
+  // Infer column count from cards sharing the first row's offsetTop.
+  const top0 = cards[0].offsetTop;
+  const cols = Math.max(1, cards.filter(c => c.offsetTop === top0).length);
+  let next = idx;
+  if (e.key === 'ArrowRight') next = idx + 1;
+  else if (e.key === 'ArrowLeft') next = idx - 1;
+  else if (e.key === 'ArrowDown') next = idx + cols;
+  else if (e.key === 'ArrowUp') next = idx - cols;
+  else if (e.key === 'Home') next = 0;
+  else if (e.key === 'End') next = cards.length - 1;
+  next = Math.max(0, Math.min(cards.length - 1, next));
+  cards[next]?.focus();
+  e.preventDefault();
+});
 
 document.getElementById('search')?.addEventListener('input', (e) => {
   state.q = e.target.value;
@@ -2842,6 +2925,48 @@ document.querySelectorAll('.quick-tabs .qt').forEach(btn => {
   });
 });
 
+// ── Genre strip — one-tap browse by category ───────────────────
+// Curated, ordered genres (matches the categories used in youtube_live.yaml
+// + iptv-org). Tapping sets state.category and reloads; "All" clears it.
+const _GENRES = [
+  ['', '🎬 All genres'], ['news', '📰 News'], ['sports', '⚽ Sports'],
+  ['entertainment', '🎭 Entertainment'], ['kids', '🧸 Kids'],
+  ['lifestyle', '🌿 Lifestyle'], ['documentary', '🎞 Documentary'],
+  ['music', '🎵 Music'], ['radio', '📻 Radio'], ['religious', '🕌 Religious'],
+  ['education', '📚 Education'], ['business', '📈 Business'], ['general', '📺 General'],
+];
+function renderGenreStrip() {
+  const strip = document.getElementById('genre-strip');
+  if (!strip) return;
+  strip.innerHTML = '';
+  for (const [val, label] of _GENRES) {
+    const b = document.createElement('button');
+    b.className = 'gchip' + ((state.category || '') === val ? ' active' : '');
+    b.textContent = label;
+    b.addEventListener('click', () => {
+      state.category = val || null;
+      // Genre browse implies the All tab (not the youtube-only Live tab).
+      if (state.tab === 'live' || state.tab === 'sg') state.tab = 'all';
+      document.querySelectorAll('.quick-tabs .qt').forEach(q =>
+        q.classList.toggle('active', q.dataset.tab === 'all'));
+      strip.querySelectorAll('.gchip').forEach(g => g.classList.remove('active'));
+      b.classList.add('active');
+      _syncCategoryChips();
+      _persistState();
+      loadChannels();
+    });
+    strip.appendChild(b);
+  }
+}
+// Keep the drawer's category facet label/active chip in sync when a genre
+// is picked from the strip (and vice-versa is handled by loadFilters).
+function _syncCategoryChips() {
+  const lbl = document.getElementById('ft-value-category');
+  if (lbl) lbl.textContent = state.category ? state.category : 'All';
+  document.querySelectorAll('#category-chips .chip').forEach(c =>
+    c.classList.toggle('active', (c.dataset.value || '') === (state.category || '')));
+}
+
 // ── "Last watched" pinned row ───────────────────────────────────
 async function loadLastWatched() {
   const wrap = document.getElementById('recent-row');
@@ -2905,6 +3030,7 @@ async function loadNowPlaying() {
 // batch endpoint which youtube-live channels are broadcasting right
 // now and stamps each card so a viewer sees off-air before tapping.
 let _liveStatusFetchAt = 0;
+let _liveStatusInflight = null;
 function liveBadgeHtml(cid) {
   const s = (state.live_status || {})[cid];
   if (!s) return '';   // not a youtube-live channel, or not yet resolved
@@ -2912,24 +3038,66 @@ function liveBadgeHtml(cid) {
     ? `<span class="b live">● LIVE</span>`
     : `<span class="b offair">○ Off-air</span>`;
 }
+// Fetch (or reuse cached) the youtube-live status map. Returns the map so
+// callers that must filter BEFORE render (the "Live now" tab) can await it.
+// Concurrent callers coalesce on one in-flight request.
+async function ensureLiveStatus() {
+  if (Date.now() - _liveStatusFetchAt < 2 * 60 * 1000) return state.live_status;
+  if (_liveStatusInflight) return _liveStatusInflight;
+  _liveStatusInflight = (async () => {
+    try {
+      const r = await api('/api/iptv/youtube/live_status');
+      state.live_status = r.statuses || {};
+      _liveStatusFetchAt = Date.now();
+    } catch (e) { /* keep whatever we had */ }
+    finally { _liveStatusInflight = null; }
+    return state.live_status;
+  })();
+  return _liveStatusInflight;
+}
 async function loadLiveStatus() {
-  // Cache 2 min — the server already negative-caches per channel, this
-  // just avoids re-fetching the whole map on every grid re-render.
-  if (Date.now() - _liveStatusFetchAt < 2 * 60 * 1000) return;
-  try {
-    const r = await api('/api/iptv/youtube/live_status');
-    state.live_status = r.statuses || {};
-    _liveStatusFetchAt = Date.now();
-    document.querySelectorAll('#grid .card').forEach(card => {
-      const cid = card.dataset.channelId;
-      if (!cid || !(cid in state.live_status)) return;
-      const badges = card.querySelector('.badges');
-      if (!badges) return;
+  await ensureLiveStatus();
+  const map = state.live_status || {};
+  document.querySelectorAll('#grid .card').forEach(card => {
+    const cid = card.dataset.channelId;
+    if (!cid || !(cid in map)) return;
+    const s = map[cid];
+    const badges = card.querySelector('.badges');
+    if (badges) {
       // Drop any prior live/off-air chip, then stamp the fresh one.
       badges.querySelectorAll('.b.live, .b.offair').forEach(b => b.remove());
       badges.insertAdjacentHTML('beforeend', liveBadgeHtml(cid));
-    });
-  } catch (e) { /* silently skip */ }
+    }
+    // Surface the live stream's title as the "Now:" line (only when the
+    // EPG didn't already provide one for this card).
+    if (s.live && s.title && !card.querySelector('.np')) {
+      const npDiv = document.createElement('div');
+      npDiv.className = 'np';
+      npDiv.title = s.title;
+      npDiv.textContent = '● ' + s.title.slice(0, 40) + (s.title.length > 40 ? '…' : '');
+      const b = card.querySelector('.badges');
+      if (b) card.insertBefore(npDiv, b); else card.appendChild(npDiv);
+    }
+    card.dataset.live = s.live ? '1' : '0';
+  });
+  // Float live channels to the top (stable) on the open browse views.
+  // The dedicated "Live now" tab is already filtered, so skip it there.
+  if (state.tab !== 'live') reorderLiveFirst();
+}
+// Stable partition: cards whose youtube-live status is live move ahead of
+// everything else, preserving original relative order within each group.
+function reorderLiveFirst() {
+  const grid = document.getElementById('grid');
+  if (!grid) return;
+  const cards = [...grid.querySelectorAll('.card')];
+  if (!cards.length) return;
+  const live = cards.filter(c => c.dataset.live === '1');
+  if (!live.length) return;   // nothing to hoist
+  const rest = cards.filter(c => c.dataset.live !== '1');
+  const frag = document.createDocumentFragment();
+  live.forEach(c => frag.appendChild(c));
+  rest.forEach(c => frag.appendChild(c));
+  grid.appendChild(frag);
 }
 
 // ── M3U import modal (owner-only — endpoint enforces "*" scope) ─
@@ -2969,6 +3137,7 @@ document.getElementById('import-m3u-btn')?.addEventListener('click', openImportM
 
 (async () => {
   await _migrateFavoritesIfNeeded();
+  renderGenreStrip();
   loadFilters();
   loadChannels();
 })();
@@ -3002,16 +3171,40 @@ _PLAY_HTML = r"""<!doctype html>
     .badge { padding:2px 8px; border-radius:10px; background:#1a1d24; border:1px solid #2a2f3a; }
     .badge.alive { background:#163a23; border-color:#1f5230; color:#a9e8be; }
     .badge.dead  { background:#3a1818; border-color:#522020; color:#f5b4b4; }
-    .actions { display:flex; flex-direction:column; gap:8px; }
+    /* Player stage — pinned to the top of the page so the video is the
+       first thing you see; controls live below it. */
+    #player-stage {
+      width:100%; background:#000; border-radius:12px; overflow:hidden;
+      margin-bottom:14px; aspect-ratio:16/9; position:relative;
+    }
+    #player-stage:empty,
+    #player-stage.idle { display:none; }
+    #player-stage > video, #player-stage > iframe {
+      width:100%; height:100%; display:block; margin:0 !important; border-radius:0 !important;
+    }
+    /* Off-air / error notice needs its natural height, not the 16:9 box. */
+    #player-stage.msg {
+      aspect-ratio:auto; background:transparent; overflow:visible;
+    }
+    #player-stage.msg > #off-air-msg { margin:0 !important; }
+    /* Compact action bar — primary Play is prominent; the rest are small
+       wrapping ghost chips so the controls don't dominate the page. */
+    .actions { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin-bottom:6px; }
     .actions button {
-      font:inherit; border:0; padding:14px; border-radius:10px;
-      background:var(--tg-theme-button-color,#3390ec); color:#fff; font-size:15px; cursor:pointer;
+      font:inherit; border:0; padding:8px 12px; border-radius:9px;
+      background:#1a1d24; color:#cfd2d8; font-size:12.5px; cursor:pointer;
+      border:1px solid #2a2f3a; line-height:1.1;
+    }
+    .actions button:hover { border-color:#3a4150; }
+    #play-inline {
+      flex:1 1 100%; padding:13px; font-size:15px; font-weight:600;
+      background:var(--tg-theme-button-color,#3390ec); color:#fff; border-color:transparent;
     }
     .actions button.ghost {
       background:transparent; color:var(--tg-theme-link-color,#5ac8fa);
       border:1px solid currentColor;
     }
-    .actions button.warn { background:#a23; }
+    .actions button.warn { background:#2a1518; color:#f5b4b4; border-color:#522020; }
     /* Scheduling modal — overlays the page; matches the import modal style. */
     .sched-modal {
       position:fixed; inset:0; background:rgba(8,10,14,.85); z-index:80;
@@ -3108,6 +3301,10 @@ _PLAY_HTML = r"""<!doctype html>
 <div class="back" onclick="if(window.history.length>1)history.back();else location.href='/iptv'">← Back to channels</div>
 
 <div class="wrap">
+  <div id="player-stage" class="idle">
+    <video id="inline-video" controls playsinline></video>
+  </div>
+
   <div class="channel-h" id="header">
     <div class="logo" id="logo"><div style="font-size:28px;opacity:.55">📺</div></div>
     <div class="meta">
@@ -3132,6 +3329,8 @@ _PLAY_HTML = r"""<!doctype html>
 
   <div class="actions">
     <button id="play-inline">▶ Play</button>
+    <button class="ghost" id="fullscreen-btn">⛶ Fullscreen</button>
+    <button class="ghost" id="pip-btn" style="display:none">🗗 Picture-in-picture</button>
     <button class="ghost" id="cast-btn" style="display:none">📺 Cast</button>
     <button class="ghost" id="play-vlc">📤 Open in VLC / external player</button>
     <button class="ghost" id="copy-url">📋 Copy stream URL</button>
@@ -3165,8 +3364,6 @@ _PLAY_HTML = r"""<!doctype html>
   </div>
 
   <div class="url-box" id="url-box">…</div>
-
-  <video id="inline-video" controls playsinline></video>
 
   <div id="track-picker" class="track-picker" style="display:none">
     <label id="audio-pick-wrap" style="display:none">
@@ -3303,6 +3500,22 @@ async function loadChannel() {
   _refreshCurateButton();
   maybeShowExitWarning();
   loadEpg();
+  autoStartPlayback();
+}
+
+// Auto-start the stream on page load and try to go fullscreen-landscape.
+// Fullscreen needs a user gesture, so the programmatic attempt usually
+// no-ops on first load; we arm a one-shot tap fallback on the stage.
+async function autoStartPlayback() {
+  try {
+    await playInline();
+  } catch (_) { return; }
+  // Only chase fullscreen if a player actually rendered (not off-air/error).
+  const stage = document.getElementById('player-stage');
+  if (!stage || stage.classList.contains('idle')) return;
+  if (document.getElementById('off-air-msg')) return;
+  goFullscreenLandscape();
+  if (!document.fullscreenElement) armFullscreenOnGesture();
 }
 
 // Source picker (Phase 2) — only shown when the channel has >1 source.
@@ -3517,17 +3730,60 @@ async function resolveStreamUrl() {
 function clearOffAir() {
   const el = document.getElementById('off-air-msg');
   if (el) el.remove();
+  document.getElementById('player-stage')?.classList.remove('msg');
+}
+
+// Reveal the top player stage (hidden until the first play attempt so the
+// page doesn't show an empty black box before anything is playing).
+function revealStage() {
+  const stage = document.getElementById('player-stage');
+  if (stage) stage.classList.remove('idle');
+}
+
+// Best-effort go-fullscreen-landscape. Programmatic fullscreen requires a
+// user gesture; when called outside one (autoplay path) it silently no-ops
+// and we fall back to the first tap anywhere on the stage.
+function goFullscreenLandscape() {
+  const stage = document.getElementById('player-stage');
+  const target = document.getElementById('inline-frame') || document.getElementById('inline-video') || stage;
+  if (!target) return;
+  const fs = target.requestFullscreen || target.webkitRequestFullscreen || target.webkitEnterFullscreen;
+  try {
+    const p = fs && fs.call(target);
+    if (p && p.then) p.catch(() => {});
+  } catch (_) {}
+  try {
+    if (screen.orientation && screen.orientation.lock) {
+      screen.orientation.lock('landscape').catch(() => {});
+    }
+  } catch (_) {}
+}
+
+let _fsGestureArmed = false;
+// If programmatic fullscreen was blocked (no gesture), arm a one-shot
+// listener so the very next tap on the stage enters fullscreen landscape.
+function armFullscreenOnGesture() {
+  if (_fsGestureArmed) return;
+  _fsGestureArmed = true;
+  const stage = document.getElementById('player-stage');
+  if (!stage) return;
+  const handler = () => {
+    if (!document.fullscreenElement) goFullscreenLandscape();
+  };
+  stage.addEventListener('pointerdown', handler, { once: true });
 }
 
 // Some youtube-live channels (RTM, BERNAMA, …) cycle their live feed on
 // and off air. When the pre-flight says the channel isn't broadcasting,
 // show a clear message in the player area instead of a broken player.
 function showOffAir(reason) {
+  revealStage();
   const v = document.getElementById('inline-video');
   v.style.display = 'none';
   const frame = document.getElementById('inline-frame');
   if (frame) frame.style.display = 'none';
   clearOffAir();
+  document.getElementById('player-stage')?.classList.add('msg');
   const off_air = (reason === 'off_air');
   const box = document.createElement('div');
   box.id = 'off-air-msg';
@@ -3544,11 +3800,17 @@ function showOffAir(reason) {
     '<div style="font-size:40px; line-height:1; margin-bottom:10px">📡</div>'
     + '<div style="font-size:16px; font-weight:600; margin-bottom:6px">' + escapeHtml(title) + '</div>'
     + '<div style="color:#aab2bf; max-width:420px; margin:0 auto 14px">' + escapeHtml(sub) + '</div>'
+    + '<div style="display:flex; gap:8px; justify-content:center; flex-wrap:wrap">'
     + '<button id="off-air-retry" style="padding:9px 18px; border:0; border-radius:9px;'
-    + 'background:#3a6df0; color:#fff; font-weight:600; cursor:pointer">Try again</button>';
+    + 'background:#3a6df0; color:#fff; font-weight:600; cursor:pointer">Try again</button>'
+    + '<button id="off-air-browse" style="padding:9px 18px; border:1px solid #2a313c; border-radius:9px;'
+    + 'background:transparent; color:#e6e9ef; font-weight:600; cursor:pointer">🔴 See what’s live</button>'
+    + '</div>';
   v.insertAdjacentElement('afterend', box);
   const retry = box.querySelector('#off-air-retry');
   if (retry) retry.addEventListener('click', () => playInline());
+  const browse = box.querySelector('#off-air-browse');
+  if (browse) browse.addEventListener('click', () => { location.href = '/iptv?tab=live'; });
 }
 
 // Community edition plays YouTube via the official IFrame Player (a
@@ -3563,6 +3825,7 @@ async function playYouTubeEmbed() {
   } catch (e) {
     return toast('Could not load stream: ' + e.message, 4000);
   }
+  revealStage();
   const v = document.getElementById('inline-video');
   v.style.display = 'none';
   let frame = document.getElementById('inline-frame');
@@ -3593,6 +3856,7 @@ async function playInline() {
   }
   const url = await resolveStreamUrl();
   if (!url) return;
+  revealStage();
   const v = document.getElementById('inline-video');
   v.style.display = 'block';
   const kind = streamTypeOf(url);
@@ -3773,6 +4037,26 @@ async function _playInlineCore(kind, v) {
 }
 
 document.getElementById('play-inline').addEventListener('click', playInline);
+
+document.getElementById('fullscreen-btn')?.addEventListener('click', () => {
+  const stage = document.getElementById('player-stage');
+  if (!stage || stage.classList.contains('idle')) {
+    return toast('Start playback first', 1800);
+  }
+  goFullscreenLandscape();
+});
+
+document.getElementById('pip-btn')?.addEventListener('click', async () => {
+  const v = document.getElementById('inline-video');
+  if (!v || v.style.display === 'none') return toast('PiP needs the in-app player', 2200);
+  try {
+    if (document.pictureInPictureElement) {
+      await document.exitPictureInPicture();
+    } else {
+      await v.requestPictureInPicture();
+    }
+  } catch (e) { toast('PiP unavailable: ' + e.message, 2500); }
+});
 
 document.getElementById('copy-url').addEventListener('click', async () => {
   if (!CHANNEL?.url) return toast('No URL');
@@ -4029,6 +4313,15 @@ document.getElementById('inline-video')?.addEventListener('playing',
   _maybeFirePlayBeacon, { once: true });
 document.getElementById('play-vlc')?.addEventListener('click',
   _maybeFirePlayBeacon);
+
+// PiP only works on the native <video> (HLS/DASH path), not the YouTube
+// iframe — reveal the button once the inline player is actually playing.
+document.getElementById('inline-video')?.addEventListener('playing', () => {
+  if (document.pictureInPictureEnabled) {
+    const b = document.getElementById('pip-btn');
+    if (b) b.style.display = '';
+  }
+});
 
 loadChannel();
 </script>

@@ -2455,12 +2455,14 @@ async def admin_list_users(request: Request):
 async def admin_ban_user(request: Request, body: UserStatusBody):
     p = await _verify(request)
     require_scope(p, "smdl.admin")
-    _require_owner(p)
+    actor = _require_owner(p)
     if _auth.is_owner(body.chat_id):
         return JSONResponse({"ok": False, "error": "Cannot ban the owner."}, status_code=400)
     ok = await _db.set_user_status(body.chat_id, "banned", body.reason)
     if not ok:
         return JSONResponse({"ok": False, "error": "No such user."}, status_code=404)
+    await _db.log_auth_event("revoke", chat_id=body.chat_id, actor_id=actor,
+                             detail=(body.reason or None))
     return {"ok": True}
 
 
@@ -2468,10 +2470,11 @@ async def admin_ban_user(request: Request, body: UserStatusBody):
 async def admin_unban_user(request: Request, body: UserStatusBody):
     p = await _verify(request)
     require_scope(p, "smdl.admin")
-    _require_owner(p)
+    actor = _require_owner(p)
     ok = await _db.set_user_status(body.chat_id, "active")
     if not ok:
         return JSONResponse({"ok": False, "error": "No such user."}, status_code=404)
+    await _db.log_auth_event("restore", chat_id=body.chat_id, actor_id=actor)
     return {"ok": True}
 
 
@@ -2483,12 +2486,13 @@ class ApproveByCodeBody(BaseModel):
 async def admin_approve_user(request: Request, body: UserStatusBody):
     p = await _verify(request)
     require_scope(p, "smdl.admin")
-    _require_owner(p)
+    actor = _require_owner(p)
     ok = await _db.approve_user(body.chat_id)
     if not ok:
         return JSONResponse({"ok": False,
                              "error": "User not found, or is banned (unban first)."},
                             status_code=400)
+    await _db.log_auth_event("approve", chat_id=body.chat_id, actor_id=actor)
     return {"ok": True}
 
 
@@ -2505,13 +2509,15 @@ async def admin_deny_user(request: Request, body: DenyUserBody):
     first place."""
     p = await _verify(request)
     require_scope(p, "smdl.admin")
-    _require_owner(p)
+    actor = _require_owner(p)
     # Use the existing ban path under the hood with a 'denied at pending'
     # marker; this keeps a paper trail without inventing a new status enum.
     ok = await _db.set_user_status(body.chat_id, "banned",
                                    f"DENIED@pending: {body.reason}".strip())
     if not ok:
         return JSONResponse({"ok": False, "error": "User not found"}, status_code=404)
+    await _db.log_auth_event("deny", chat_id=body.chat_id, actor_id=actor,
+                             detail=(body.reason or None))
     return {"ok": True}
 
 
@@ -2523,19 +2529,31 @@ async def admin_approve_by_code(request: Request, body: ApproveByCodeBody):
     error message — no oracle for code-guessing attackers."""
     p = await _verify(request)
     require_scope(p, "smdl.admin")
-    _require_owner(p)
+    actor = _require_owner(p)
     row = await _db.find_user_by_pending_code(body.code or "")
     if row is None:
         return JSONResponse({"ok": False,
                              "error": "Code not recognised, expired, or already used."},
                             status_code=404)
     await _db.approve_user(int(row["chat_id"]))
+    await _db.log_auth_event("approve_by_code", chat_id=int(row["chat_id"]),
+                             actor_id=actor)
     return {
         "ok": True,
         "chat_id": int(row["chat_id"]),
         "username": row.get("username"),
         "first_name": row.get("first_name"),
     }
+
+
+@router.get("/api/miniapp/admin/audit")
+async def admin_audit(request: Request):
+    """Recent moderation events (approve/deny/revoke/restore). Owner-only."""
+    p = await _verify(request)
+    require_scope(p, "smdl.admin")
+    _require_owner(p)
+    rows = await _db.list_auth_events(limit=50)
+    return {"items": rows, "count": len(rows)}
 
 
 # ── Admin: approved groups ───────────────────────────────────────────────────
@@ -5223,6 +5241,40 @@ async function loadAdmin() {
       console.warn('repair card failed:', _e);
     }
 
+    // 2d. Moderation audit — recent approve/deny/revoke/restore actions.
+    //     Best-effort: a failed fetch hides the card but never blocks the
+    //     rest of the admin load.
+    let auditHtml = '';
+    try {
+      const audit = await api('/api/miniapp/admin/audit');
+      const ACT = {
+        approve:         { icon: '✅', label: 'Approved',        color: 'var(--success)' },
+        approve_by_code: { icon: '✅', label: 'Approved by code', color: 'var(--success)' },
+        deny:            { icon: '🚫', label: 'Denied',          color: 'var(--destructive)' },
+        revoke:          { icon: '⛔', label: 'Revoked',         color: 'var(--destructive)' },
+        restore:         { icon: '↩', label: 'Restored',        color: '#ff9500' },
+      };
+      const rows = (audit.items || []).map(ev => {
+        const a = ACT[ev.action] || { icon: '•', label: ev.action, color: 'var(--fg)' };
+        return `
+          <div class="user-row" style="padding:8px 0;border-top:1px solid var(--separator)">
+            <div class=grow>
+              <div class=name><span style="color:${a.color}">${a.icon} ${esc(a.label)}</span>
+                <span class=meta style="font-family:ui-monospace;margin-left:6px">chat ${ev.chat_id ?? '—'}</span>
+              </div>
+              <div class=meta>${timeago(ev.created_at)}${ev.detail ? ' · ' + esc(ev.detail) : ''}</div>
+            </div>
+          </div>`;
+      }).join('');
+      auditHtml = `
+        <div class=card>
+          <div class=field>🧾 Moderation log (${audit.count || 0})</div>
+          ${rows || '<div class=meta style="margin-top:6px">No moderation actions recorded yet.</div>'}
+        </div>`;
+    } catch(_e) {
+      console.warn('audit card failed:', _e);
+    }
+
     // Sub-tab layout. Each pill swaps which pane is visible without
     // re-fetching the data. State (current pill) is preserved across
     // loadAdmin() refreshes via the `_adminActiveSubtab` module global.
@@ -5240,7 +5292,7 @@ async function loadAdmin() {
     root.innerHTML =
       lockdownBanner
       + subtabsNav
-      + `<div class=subtab-pane id=subpane-approval>${pendingHtml + usersHtml + groupsHtml}</div>`
+      + `<div class=subtab-pane id=subpane-approval>${pendingHtml + usersHtml + auditHtml + groupsHtml}</div>`
       + `<div class=subtab-pane id=subpane-permissions>${sitesHtml}</div>`
       + `<div class=subtab-pane id=subpane-tools>${modeHtml + repairHtml}</div>`
       + `<div class=subtab-pane id=subpane-server>${securityHtml + settingsHtml}</div>`;

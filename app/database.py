@@ -71,6 +71,23 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN pending_code TEXT")
         if "pending_expires_at" not in cols:
             await db.execute("ALTER TABLE users ADD COLUMN pending_expires_at TEXT")
+        # Moderation audit trail — one row per owner action on a user
+        # (approve / deny / ban / unban / approve_by_code). Gives the Server
+        # tab a legible history instead of inferring state from the users row.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS auth_events (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id    INTEGER,
+                action     TEXT NOT NULL,
+                actor_id   INTEGER,
+                detail     TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ae_time
+            ON auth_events (created_at DESC)
+        """)
         # Approved groups — chat_ids of Telegram groups the owner has trusted.
         # Members of these groups can use the bot WITHOUT per-user approval.
         # Trade-off: bot replies are visible to the whole group; download
@@ -493,6 +510,39 @@ async def set_user_status(chat_id: int, status: str, reason: str | None = None) 
             """, (int(chat_id),))
         await db.commit()
         return (cur.rowcount or 0) > 0
+
+
+async def log_auth_event(action: str, chat_id: int | None = None,
+                         actor_id: int | None = None,
+                         detail: str | None = None) -> None:
+    """Append a moderation event. Never raises — an audit-log write must not
+    block the action it records."""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO auth_events (chat_id, action, actor_id, detail, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (None if chat_id is None else int(chat_id), action,
+                  None if actor_id is None else int(actor_id), detail, now))
+            await db.commit()
+    except Exception:
+        pass
+
+
+async def list_auth_events(limit: int = 50) -> list[dict]:
+    out: list[dict] = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT id, chat_id, action, actor_id, detail, created_at
+            FROM auth_events
+            ORDER BY id DESC
+            LIMIT ?
+        """, (int(limit),)) as cur:
+            async for row in cur:
+                out.append(dict(row))
+    return out
 
 
 async def delete_user_account(chat_id: int) -> dict:

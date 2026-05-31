@@ -59,6 +59,28 @@ channels:
     country: SG
     categories: [news]
 
+  # SG news publishers that livestream only occasionally (events, press
+  # conferences, breaking news) — off-air most of the day. The /live page
+  # resolves when they're streaming; the UI live/off-air badge tells the
+  # viewer up front rather than surfacing a broken player on tap.
+  - id: straits-times
+    name: The Straits Times
+    handle: TheStraitsTimes
+    country: SG
+    categories: [news]
+
+  - id: today-online
+    name: TODAY
+    handle: TODAYonline
+    country: SG
+    categories: [news]
+
+  - id: mothership-sg
+    name: Mothership
+    handle: mothershipsg
+    country: SG
+    categories: [news]
+
   # ── Malaysia ────────────────────────────────────────────────────
   - id: astro-awani
     name: Astro Awani

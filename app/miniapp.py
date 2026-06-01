@@ -3361,6 +3361,48 @@ body.sidebar-collapsed .sidebar-item .icon { font-size: 16px; }
 body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
 /* Home tile grid — landing page for the Mini App. 2 cols on phones. */
 .home-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 6px; }
+/* Cluster home tiles — single column, wider, more vertical padding. The
+   description lists the actual sub-pages in the cluster so the home view
+   teaches the structure without a separate label row. */
+.home-clusters { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 6px; }
+.home-cluster-tile { background: var(--surface); border: 1px solid var(--separator);
+                      border-radius: var(--tile-radius); padding: 16px;
+                      display: flex; gap: 14px; align-items: center;
+                      cursor: pointer; box-shadow: var(--glow);
+                      transition: border-color .15s, transform .08s;
+                      -webkit-tap-highlight-color: transparent; color: var(--fg); }
+.home-cluster-tile:hover { border-color: var(--accent-line); box-shadow: var(--glow-strong); }
+.home-cluster-tile:active { transform: scale(0.99); }
+.home-cluster-tile .ico { flex: 0 0 auto; width: 36px; height: 36px;
+                           color: var(--accent); display: flex; align-items: center; justify-content: center; }
+.home-cluster-tile .ico svg { width: 100%; height: 100%; }
+.home-cluster-tile .meta { flex: 1; min-width: 0; }
+.home-cluster-tile .name { font-size: 16px; font-weight: 600; margin-bottom: 3px; }
+.home-cluster-tile .desc { font-size: 12px; color: var(--muted); line-height: 1.4; }
+/* Sub-sidebar (flyout) — slides in to the right of the main 56px-wide
+   icon strip when a cluster icon is tapped. Position: fixed so it floats
+   above page content without shifting the layout. */
+.subsidebar { position: fixed; top: 0; left: 56px; bottom: 0;
+              width: 0; background: var(--surface);
+              border-right: 1px solid var(--separator);
+              overflow: hidden; transition: width .18s ease;
+              z-index: 5; padding-top: env(safe-area-inset-top, 0); }
+body.sidebar-collapsed .subsidebar { left: 28px; }
+.subsidebar.show { width: 168px; box-shadow: 4px 0 18px rgba(0,0,0,0.45); }
+.subsidebar-header { font-size: 11px; color: var(--muted); text-transform: uppercase;
+                      letter-spacing: 0.08em; padding: 14px 14px 8px; opacity: 0.75; }
+.subsidebar-item { display: flex; align-items: center; gap: 10px;
+                    padding: 10px 14px; cursor: pointer; color: var(--fg);
+                    -webkit-tap-highlight-color: transparent;
+                    transition: background .12s; user-select: none; }
+.subsidebar-item:hover, .subsidebar-item.current { background: var(--section); }
+.subsidebar-item.current { color: var(--button); font-weight: 600; }
+.subsidebar-item .icon { width: 18px; height: 18px; flex: 0 0 auto; opacity: 0.85; }
+.subsidebar-item .icon svg { width: 100%; height: 100%; }
+/* Main-sidebar cluster icon: "expanded" state highlights when its
+   sub-sidebar flyout is open. */
+.sidebar-item { position: relative; }
+.sidebar-item.expanded { background: var(--section); color: var(--button); }
 .home-tile { background: var(--surface); border-radius: var(--tile-radius); padding: 16px 12px;
              cursor: pointer; border: 1px solid var(--separator); position: relative;
              overflow: hidden; text-align: left; color: var(--fg);
@@ -3808,68 +3850,48 @@ button.warn { background: #ff9500; color: #fff; }
     <div class=page-header>
       <img id=brand-logo alt="" style="display:none" />
       <h1 id=brand-text>Sentinel Media</h1>
-      <button class="small sec" id=tiles-arrange-btn onclick="toggleTileEdit()" title="Drag tiles to reorder · saved on this device">✥ Arrange</button>
+      <button class="small sec" id=tiles-arrange-btn onclick="toggleTileEdit()" title="Drag tiles to reorder · saved on this device" style="display:none">✥ Arrange</button>
     </div>
-    <div class=home-tiles id=home-tiles>
-      <div class=home-tile data-tile=downloads onclick="goto('downloads')">
+    <!-- Cluster home: 5 big tiles. Tap a tile → navigate to that cluster's
+         default sub-page; the sub-sidebar (or the page's own subnav, if
+         any) handles further hops within the cluster. The description on
+         each tile lists the actual sub-pages so the home view teaches
+         the structure without a separate label row. -->
+    <div class=home-clusters id=home-tiles>
+      <div class=home-cluster-tile data-tile=cluster-watch onclick="clusterEnter('watch')">
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/></svg></div>
+        <div class=meta>
+          <div class=name>🎬 Watch</div>
+          <div class=desc>IPTV · Theater · Streams</div>
+        </div>
+      </div>
+      <div class=home-cluster-tile data-tile=cluster-get onclick="clusterEnter('get')">
         <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div>
-        <div class=name>Downloads</div>
-        <div class=desc>Recent yt-dlp / gallery-dl jobs · file delivery links</div>
+        <div class=meta>
+          <div class=name>📥 Get</div>
+          <div class=desc>Downloads · Search<span class=admin-only> · Library · Files</span></div>
+        </div>
       </div>
-      <div class=home-tile data-tile=notifications id=tile-notifications onclick="goto('notifications')">
-        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span class=tile-badge id=notif-badge style="display:none"></span></div>
-        <div class=name>Activity</div>
-        <div class=desc>Downloads · recordings · approvals in one feed</div>
-      </div>
-      <div class=home-tile data-tile=search id=tile-search onclick="goto('search')">
-        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
-        <div class=name>Search</div>
-        <div class=desc>One box across IPTV · Theater · downloads · streams</div>
-      </div>
-      <div class=home-tile data-tile=streams onclick="goto('watchlist')">
-        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8.5a5 5 0 0 0 0 7"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M5 5.5a9 9 0 0 0 0 13"/><path d="M19 5.5a9 9 0 0 1 0 13"/></svg></div>
-        <div class=name>Streams</div>
-        <div class=desc>Auto-record streams from twitch · youtube · kick</div>
-      </div>
-      <div class=home-tile data-tile=theater onclick="location.href='/app/stremio'">
-        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m10 9 5 3-5 3z"/></svg></div>
-        <div class=name>Theater</div>
-        <div class=desc>Movies + series · stream &amp; cache to G:\</div>
-      </div>
-      <div class=home-tile data-tile=iptv onclick="location.href='/iptv'">
-        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/><path d="M6 12a4 4 0 0 1 4-4"/></svg></div>
-        <div class=name>IPTV</div>
-        <div class=desc>11k+ public channels · EPG · scheduled DVR</div>
-      </div>
-      <div class=home-tile data-tile=stickers onclick="goto('stickers')">
+      <div class=home-cluster-tile data-tile=cluster-make onclick="clusterEnter('make')">
         <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M14 8.5h.01"/><path d="M9 9.5h.01"/><path d="M8.5 14a4 4 0 0 0 7 0"/></svg></div>
-        <div class=name>Stickers</div>
-        <div class=desc>Crop &amp; trim videos into Telegram sticker packs</div>
+        <div class=meta>
+          <div class=name>🎨 Make</div>
+          <div class=desc>Stickers · Streamer (Twitch opt-in)</div>
+        </div>
       </div>
-      <div class=home-tile data-tile=streamer onclick="goto('streamer')">
-        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M2 12s2-6 10-6 10 6 10 6-2 6-10 6-10-6-10-6"/></svg></div>
-        <div class=name>Streamer</div>
-        <div class=desc>Sign in with Twitch &amp; opt in to community recording</div>
+      <div class=home-cluster-tile data-tile=cluster-inbox onclick="clusterEnter('inbox')">
+        <div class=ico style="position:relative"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span class=tile-badge id=notif-badge style="display:none"></span></div>
+        <div class=meta>
+          <div class=name>🔔 Inbox</div>
+          <div class=desc>Downloads · recordings · approvals — one feed</div>
+        </div>
       </div>
-      <div class="home-tile admin-only" data-tile=files id=tile-files onclick="goto('files')">
-        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
-        <div class=name>Files</div>
-        <div class=desc>Browse + fetch from /downloads (SFTP-style)</div>
-      </div>
-      <div class="home-tile admin-only" data-tile=library id=tile-library onclick="goto('library')">
-        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16"/><path d="M8 4v16"/><rect x="12" y="4" width="8" height="16" rx="1" transform="rotate(8 16 12)"/></svg></div>
-        <div class=name>Library</div>
-        <div class=desc>Every cached video · audio · image on the box</div>
-      </div>
-      <div class="home-tile admin-only" data-tile=scraper id=tile-scraper onclick="goto('scraper')">
-        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></div>
-        <div class=name>Scraper</div>
-        <div class=desc>Profile monitoring · age-gated platforms</div>
-      </div>
-      <div class="home-tile admin-only" data-tile=server id=tile-admin onclick="goto('admin')">
+      <div class="home-cluster-tile admin-only" data-tile=cluster-admin onclick="clusterEnter('admin')">
         <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
-        <div class=name>Server</div>
-        <div class=desc>Server settings · users · site blocklist · kill switch</div>
+        <div class=meta>
+          <div class=name>⚙️ Admin</div>
+          <div class=desc>Server · Scraper · Settings</div>
+        </div>
       </div>
     </div>
   </div>
@@ -4072,51 +4094,40 @@ button.warn { background: #ff9500; color: #fff; }
   <div class=sidebar-toggle id=nav-toggle onclick="toggleSidebar()" title="Collapse / expand nav">
     <span id=nav-toggle-icon>«</span>
   </div>
-  <div class="sidebar-item active" id=nav-home onclick="goto('home')">
+  <!-- Sidebar now collapses to 6 entries: Home + 5 cluster icons. The
+       cluster icons expand a flyout sub-sidebar (#subsidebar) with the
+       actual sub-pages. Direct goto() targets (nav-watchlist, nav-files,
+       etc.) are kept available via the sub-sidebar — no functional loss,
+       just one extra tap to switch surfaces. -->
+  <div class="sidebar-item active" id=nav-home onclick="clusterNavHome()" title="Home">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9"/><path d="M9 21v-6h6v6"/></svg></div><div class=label>Home</div>
   </div>
-  <div class=sidebar-item id=nav-downloads onclick="goto('downloads')">
-    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div><div class=label>DL</div>
+  <div class=sidebar-item id=nav-cluster-watch onclick="clusterOpen('watch')" title="Watch — Theater / IPTV / Streams">
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/></svg></div><div class=label>Watch</div>
   </div>
-  <div class=sidebar-item id=nav-notifications onclick="goto('notifications')">
-    <div class=icon style="position:relative"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span class=tile-badge id=notif-badge-nav style="display:none"></span></div><div class=label>Activity</div>
+  <div class=sidebar-item id=nav-cluster-get onclick="clusterOpen('get')" title="Get — Downloads / Search / Library / Files">
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div><div class=label>Get</div>
   </div>
-  <div class=sidebar-item id=nav-search onclick="goto('search')">
-    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div><div class=label>Search</div>
+  <div class=sidebar-item id=nav-cluster-make onclick="clusterOpen('make')" title="Make — Stickers / Streamer">
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M14 8.5h.01"/><path d="M9 9.5h.01"/><path d="M8.5 14a4 4 0 0 0 7 0"/></svg></div><div class=label>Make</div>
   </div>
-  <div class=sidebar-item id=nav-watchlist onclick="goto('watchlist')">
-    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8.5a5 5 0 0 0 0 7"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M5 5.5a9 9 0 0 0 0 13"/><path d="M19 5.5a9 9 0 0 1 0 13"/></svg></div><div class=label>Streams</div>
+  <div class=sidebar-item id=nav-cluster-inbox onclick="clusterOpen('inbox')" title="Inbox — Activity">
+    <div class=icon style="position:relative"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span class=tile-badge id=notif-badge-nav style="display:none"></span></div><div class=label>Inbox</div>
   </div>
-  <div class=sidebar-item id=nav-live onclick="location.href='/iptv'">
-    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/><path d="M6 12a4 4 0 0 1 4-4"/></svg></div><div class=label>IPTV</div>
-  </div>
-  <div class=sidebar-item id=nav-stickers onclick="goto('stickers')">
-    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M14 8.5h.01"/><path d="M9 9.5h.01"/><path d="M8.5 14a4 4 0 0 0 7 0"/></svg></div><div class=label>Stickers</div>
-  </div>
-  <div class=sidebar-item id=nav-streamer onclick="goto('streamer')">
-    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M2 12s2-6 10-6 10 6 10 6-2 6-10 6-10-6-10-6"/></svg></div><div class=label>Streamer</div>
-  </div>
-  <div class="sidebar-item admin-only" id=nav-files onclick="goto('files')">
-    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class=label>Files</div>
-  </div>
-  <div class="sidebar-item admin-only" id=nav-library onclick="goto('library')">
-    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16"/><path d="M8 4v16"/><rect x="12" y="4" width="8" height="16" rx="1" transform="rotate(8 16 12)"/></svg></div><div class=label>Library</div>
-  </div>
-  <div class="sidebar-item admin-only" id=tab-scraper onclick="goto('scraper')">
-    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></div><div class=label>Scrape</div>
-  </div>
-  <div class="sidebar-item admin-only" id=tab-admin onclick="goto('admin')">
-    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div><div class=label>Server</div>
+  <div class="sidebar-item admin-only" id=nav-cluster-admin onclick="clusterOpen('admin')" title="Admin — Server / Scraper / Settings">
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div><div class=label>Admin</div>
   </div>
   <div class=sidebar-spacer></div>
   <div class=sidebar-divider></div>
-  <div class=sidebar-item id=nav-account onclick="location.href='/account'">
+  <div class=sidebar-item id=nav-account onclick="location.href='/account'" title="Account">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0 1 16 0"/></svg></div><div class=label>Account</div>
   </div>
-  <div class=sidebar-item id=nav-settings onclick="goto('settings')">
-    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h8M16 6h4"/><path d="M4 12h4M12 12h8"/><path d="M4 18h8M16 18h4"/><circle cx="14" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="14" cy="18" r="2"/></svg></div><div class=label>Settings</div>
-  </div>
 </div>
+
+<!-- Sub-sidebar flyout. Hidden by default. Populated by _renderSubsidebar()
+     when a cluster icon is tapped; closes via outside click, navigation,
+     or tapping the same cluster icon again. -->
+<div class=subsidebar id=subsidebar></div>
 
 <script>
 const tg = window.Telegram?.WebApp;
@@ -4340,6 +4351,123 @@ function timeago(iso) {
 function bytes(n) { if (!n) return '0 B'; const u = ['B','KB','MB','GB']; let i = 0; while (n>=1024 && i<u.length-1) { n/=1024; i++; } return n.toFixed(1)+' '+u[i]; }
 function duration(s) { if (s<60) return s+'s'; const m = Math.floor(s/60); const sec = s%60; if (m<60) return m+'m '+sec+'s'; return Math.floor(m/60)+'h '+(m%60)+'m'; }
 
+// ── Cluster nav (5-tile home + sidebar flyout sub-sidebar) ────────────────
+// Pages are grouped into 5 clusters. The HOME tiles call clusterEnter()
+// which navigates to the cluster's default sub-page. The SIDEBAR cluster
+// icons call clusterOpen() which toggles a flyout sub-sidebar listing the
+// cluster's pages. The same key feeds both: order pages by most-likely
+// default-of-cluster so clusterEnter lands on the right thing.
+
+const _CLUSTERS = {
+  watch: { label: '🎬 Watch', pages: [
+    ['iptv',      'IPTV'],
+    ['theater',   'Theater'],
+    ['watchlist', 'Streams'],
+  ]},
+  get:   { label: '📥 Get', pages: [
+    ['downloads', 'Downloads'],
+    ['search',    'Search'],
+    ['library',   'Library'],
+    ['files',     'Files'],
+  ]},
+  make:  { label: '🎨 Make', pages: [
+    ['stickers',  'Stickers'],
+    ['streamer',  'Streamer'],
+  ]},
+  inbox: { label: '🔔 Inbox', pages: [
+    ['notifications', 'Activity'],
+  ]},
+  admin: { label: '⚙️ Admin', pages: [
+    ['admin',     'Server'],
+    ['scraper',   'Scraper'],
+    ['settings',  'Settings'],
+  ]},
+};
+
+// Reverse index for sub-page → cluster lookup (used in goto() and
+// _renderSubsidebar to highlight the active cluster icon + sub-page).
+const _PAGE_TO_CLUSTER = (() => {
+  const m = {};
+  for (const [key, cluster] of Object.entries(_CLUSTERS)) {
+    for (const entry of cluster.pages) m[entry[0]] = key;
+  }
+  return m;
+})();
+
+let _openCluster = null;
+
+function _clusterNavigate(pageId) {
+  // Theater + IPTV leave the SPA; everything else routes through goto().
+  if (pageId === 'theater') { location.href = '/app/stremio'; return; }
+  if (pageId === 'iptv')    { location.href = '/iptv'; return; }
+  goto(pageId);
+}
+
+function clusterEnter(key) {
+  // From a home cluster-tile click: navigate to the cluster's first
+  // sub-page. The sub-sidebar stays closed — user explicitly opens it
+  // from the sidebar later if they want to switch siblings.
+  const c = _CLUSTERS[key];
+  if (!c || !c.pages.length) return;
+  clusterClose();
+  _clusterNavigate(c.pages[0][0]);
+}
+
+function clusterNavHome() {
+  // Sidebar Home icon: close any open flyout, then navigate to home.
+  clusterClose();
+  goto('home');
+}
+
+function clusterOpen(key) {
+  // Sidebar cluster icon: toggle the flyout sub-sidebar. Doesn't
+  // navigate — user picks the sub-page from the flyout.
+  if (_openCluster === key) { clusterClose(); return; }
+  _openCluster = key;
+  _renderSubsidebar(key);
+  document.getElementById('subsidebar').classList.add('show');
+  document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('expanded'));
+  const el = document.getElementById('nav-cluster-' + key);
+  if (el) el.classList.add('expanded');
+}
+
+function clusterClose() {
+  if (!_openCluster) return;
+  _openCluster = null;
+  document.getElementById('subsidebar').classList.remove('show');
+  document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('expanded'));
+}
+
+function _renderSubsidebar(key) {
+  const cluster = _CLUSTERS[key];
+  const root = document.getElementById('subsidebar');
+  if (!cluster) { root.innerHTML = ''; return; }
+  let html = '<div class=subsidebar-header>' + esc(cluster.label) + '</div>';
+  for (const entry of cluster.pages) {
+    const pageId = entry[0], label = entry[1];
+    const cls = pageId === current ? 'subsidebar-item current' : 'subsidebar-item';
+    // Sub-sidebar entries close the flyout on tap so the user sees the
+    // page immediately. clusterNav() centralises that.
+    html += '<div class="' + cls + '" onclick="clusterNav(\\'' + pageId + '\\')">' + esc(label) + '</div>';
+  }
+  root.innerHTML = html;
+}
+
+function clusterNav(pageId) {
+  clusterClose();
+  _clusterNavigate(pageId);
+}
+
+// Click outside the sidebar/subsidebar closes the flyout.
+document.addEventListener('click', (e) => {
+  if (!_openCluster) return;
+  const sidebar = document.querySelector('.sidebar');
+  const subsidebar = document.getElementById('subsidebar');
+  if (sidebar && sidebar.contains(e.target)) return;
+  if (subsidebar && subsidebar.contains(e.target)) return;
+  clusterClose();
+});
+
 function goto(page) {
   if (page !== current) pushHistory(current);
   current = page;
@@ -4347,16 +4475,17 @@ function goto(page) {
   // Mark the sidebar entry active. Map page name → element id; 'live'
   // never lands here because it navigates away via location.href, so
   // we never light up nav-live from this function.
-  const navMap = {
-    home: 'nav-home', downloads: 'nav-downloads', watchlist: 'nav-watchlist',
-    files: 'nav-files', scraper: 'tab-scraper', admin: 'tab-admin',
-    settings: 'nav-settings', notifications: 'nav-notifications',
-    search: 'nav-search', library: 'nav-library', stickers: 'nav-stickers',
-    streamer: 'nav-streamer',
-  };
-  const targetId = navMap[page];
+  // After the cluster reorg: every sub-page maps to its CLUSTER icon in
+  // the main sidebar. Home is the only page with its own dedicated icon.
+  // _PAGE_TO_CLUSTER is built once from _CLUSTERS above.
+  const targetId = page === 'home'
+    ? 'nav-home'
+    : ('nav-cluster-' + (_PAGE_TO_CLUSTER[page] || ''));
   document.querySelectorAll('.sidebar-item').forEach(el =>
     el.classList.toggle('active', el.id === targetId));
+  // If the sub-sidebar flyout is open while we navigate, refresh its
+  // "current" highlight so the active page is marked.
+  if (_openCluster) _renderSubsidebar(_openCluster);
   if (page === 'downloads') loadDownloads();
   else if (page === 'search') { const si = document.getElementById('search-input'); if (si) si.focus(); }
   else if (page === 'notifications') loadNotifications();

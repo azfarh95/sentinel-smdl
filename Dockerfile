@@ -21,4 +21,11 @@ USER smdl
 
 EXPOSE 8096
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8096", "--no-access-log"]
+# --proxy-headers + --forwarded-allow-ips='*' trust X-Forwarded-Proto / -For /
+# -Host from the Cloudflare Tunnel that terminates TLS in front of us. Without
+# these, request.base_url comes back as http:// and OAuth redirect_uri params
+# get built with the wrong scheme — Twitch/Google then reject the round-trip
+# as a redirect-URI mismatch. We can scope -allow-ips=* because the container
+# is bound to 127.0.0.1 (or the tunnel-internal network) and the only thing
+# reaching us speaks for the proxy.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8096", "--no-access-log", "--proxy-headers", "--forwarded-allow-ips=*"]

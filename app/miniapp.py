@@ -4759,17 +4759,35 @@ function stickersSwitchKind(k) {
 async function loadStreamer() {
   const root = document.getElementById('streamer-content');
   root.innerHTML = '<div class=empty><span class=spin></span> Loading…</div>';
-  let data = null;
-  let unauth = false;
+  // Direct fetch instead of api() — api() drops the HTTP status code into
+  // a single string ("twitch_signin_required") and we lose the ability to
+  // distinguish 401 (no Twitch session yet → show sign-in CTA) from 4xx/5xx
+  // (real error → show the message). The streamer tab MUST paint the
+  // sign-in branch on 401.
+  let r;
   try {
-    data = await api('/api/streamer/me');
+    r = await fetch('/api/streamer/me', { headers: { 'X-Init-Data': initData } });
   } catch (e) {
-    const m = String(e || '');
-    if (m.includes('401')) unauth = true;
-    else { root.innerHTML = '<div class=empty style="color:#e88">Load failed: ' + esc(m) + '</div>'; return; }
+    root.innerHTML = '<div class=empty style="color:#e88">Network error: ' + esc(String(e)) + '</div>';
+    return;
   }
-  if (unauth || !data) {
+  if (r.status === 401) {
+    // 401 here means EITHER (a) no v2 session cookie at all OR (b) we have
+    // a session but it's not Twitch — both end at the sign-in CTA.
     _renderTwitchSignIn(root);
+    return;
+  }
+  if (!r.ok) {
+    let detail = '';
+    try { detail = (await r.json()).detail || ''; }
+    catch { detail = await r.text().catch(() => '') || ''; }
+    root.innerHTML = '<div class=empty style="color:#e88">Load failed (' + r.status + '): ' + esc(detail) + '</div>';
+    return;
+  }
+  let data = null;
+  try { data = await r.json(); }
+  catch (e) {
+    root.innerHTML = '<div class=empty style="color:#e88">Bad response: ' + esc(String(e)) + '</div>';
     return;
   }
   _renderStreamerDashboard(root, data);

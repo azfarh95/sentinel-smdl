@@ -3846,6 +3846,11 @@ button.warn { background: #ff9500; color: #fff; }
         <div class=name>Stickers</div>
         <div class=desc>Crop &amp; trim videos into Telegram sticker packs</div>
       </div>
+      <div class=home-tile data-tile=streamer onclick="goto('streamer')">
+        <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M2 12s2-6 10-6 10 6 10 6-2 6-10 6-10-6-10-6"/></svg></div>
+        <div class=name>Streamer</div>
+        <div class=desc>Sign in with Twitch &amp; opt in to community recording</div>
+      </div>
       <div class="home-tile admin-only" data-tile=files id=tile-files onclick="goto('files')">
         <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
         <div class=name>Files</div>
@@ -4027,6 +4032,14 @@ button.warn { background: #ff9500; color: #fff; }
     </div>
   </div>
 
+  <div class=page id=page-streamer>
+    <h1>Streamer Console</h1>
+    <div class=meta style="font-size:12px;color:var(--muted);margin-bottom:14px">
+      Sign in with Twitch to opt your channel into community recording. Your consent is the license recorders operate under, so you stay in control of duration, who can record, and when to revoke.
+    </div>
+    <div id=streamer-content><div class=empty><span class=spin></span> Loading…</div></div>
+  </div>
+
   <div class=page id=page-scraper>
     <h1>Profile Scraper</h1>
     <div id=scraper-content><div class=empty><span class=spin></span> Loading…</div></div>
@@ -4079,6 +4092,9 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
   <div class=sidebar-item id=nav-stickers onclick="goto('stickers')">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M14 8.5h.01"/><path d="M9 9.5h.01"/><path d="M8.5 14a4 4 0 0 0 7 0"/></svg></div><div class=label>Stickers</div>
+  </div>
+  <div class=sidebar-item id=nav-streamer onclick="goto('streamer')">
+    <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M2 12s2-6 10-6 10 6 10 6-2 6-10 6-10-6-10-6"/></svg></div><div class=label>Streamer</div>
   </div>
   <div class="sidebar-item admin-only" id=nav-files onclick="goto('files')">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class=label>Files</div>
@@ -4336,6 +4352,7 @@ function goto(page) {
     files: 'nav-files', scraper: 'tab-scraper', admin: 'tab-admin',
     settings: 'nav-settings', notifications: 'nav-notifications',
     search: 'nav-search', library: 'nav-library', stickers: 'nav-stickers',
+    streamer: 'nav-streamer',
   };
   const targetId = navMap[page];
   document.querySelectorAll('.sidebar-item').forEach(el =>
@@ -4350,6 +4367,7 @@ function goto(page) {
   else if (page === 'settings') loadSettings();
   else if (page === 'admin') loadAdmin();
   else if (page === 'stickers') loadStickers();
+  else if (page === 'streamer') loadStreamer();
 
   // Watchlist auto-refresh so an in-progress recording's size + duration
   // tick up and a streamer going LIVE flips colour without manual reload.
@@ -4729,6 +4747,189 @@ function stickersSwitchKind(k) {
         : 'Videos / GIFs, ≤ 50 MB each. Drop multiple at once.';
   }
   loadStickers();
+}
+
+// ── Streamer tab (Twitch sign-in + recording-consent dashboard) ───────────
+// The signed-in identity is whatever the Mini App resolved (TG initData,
+// Google OIDC, or the user_id from the v2 session cookie). To set
+// recording consent on a Twitch channel, the caller MUST have a Twitch
+// session — proves they control that Twitch user_id. We trial-fetch
+// /api/streamer/me; 401 means no Twitch link yet → show the sign-in CTA.
+
+async function loadStreamer() {
+  const root = document.getElementById('streamer-content');
+  root.innerHTML = '<div class=empty><span class=spin></span> Loading…</div>';
+  let data = null;
+  let unauth = false;
+  try {
+    data = await api('/api/streamer/me');
+  } catch (e) {
+    const m = String(e || '');
+    if (m.includes('401')) unauth = true;
+    else { root.innerHTML = '<div class=empty style="color:#e88">Load failed: ' + esc(m) + '</div>'; return; }
+  }
+  if (unauth || !data) {
+    _renderTwitchSignIn(root);
+    return;
+  }
+  _renderStreamerDashboard(root, data);
+}
+
+function _renderTwitchSignIn(root) {
+  // Round-trip to the consent dashboard after sign-in.
+  const next = encodeURIComponent('/app?tab=streamer');
+  root.innerHTML =
+    '<div class=card style="padding:20px;text-align:center">' +
+      '<div style="font-size:46px;line-height:1;margin-bottom:8px">📺</div>' +
+      '<div style="font-weight:600;font-size:16px;margin-bottom:4px">Sign in with Twitch</div>' +
+      '<div class=meta style="font-size:12px;color:var(--muted);margin-bottom:14px">' +
+        'Twitch confirms you own your channel so we can attach your consent to your authentic identity. We only ask for basic profile (login, display name, email).' +
+      '</div>' +
+      '<a id=tw-signin class=btn style="display:inline-block;padding:10px 18px;background:#9146FF;color:white;border-radius:8px;text-decoration:none;font-weight:600">' +
+        '🟣 Sign in with Twitch' +
+      '</a>' +
+      '<div class=meta style="margin-top:14px;font-size:11px;color:var(--muted)">' +
+        'You can revoke consent at any time. Existing recordings made under a prior grant are not affected; revoke only blocks future records.' +
+      '</div>' +
+    '</div>';
+  const a = document.getElementById('tw-signin');
+  if (a) a.href = '/auth/twitch/start?next=' + next;
+}
+
+function _renderStreamerDashboard(root, data) {
+  const ident = data.identity || {};
+  const consent = data.consent || null;
+  const has = consent && consent.allow_recording && !consent.revoked;
+  // Identity card.
+  let html = '<div class=card style="display:flex;gap:12px;align-items:center;margin-bottom:12px">';
+  if (ident.profile_image_url) {
+    html += '<img src="' + esc(ident.profile_image_url) + '" alt="" style="width:54px;height:54px;border-radius:50%;object-fit:cover">';
+  }
+  html += '<div style="flex:1">' +
+            '<div style="font-weight:600;font-size:15px">' + esc(ident.twitch_display || ident.twitch_login) + '</div>' +
+            '<div class=meta style="font-size:12px;color:var(--muted)">@' + esc(ident.twitch_login || '') +
+              (ident.broadcaster_type ? (' · <span style="color:#9146FF">' + esc(ident.broadcaster_type) + '</span>') : '') +
+            '</div>' +
+          '</div>' +
+          '<button class=sec onclick=streamerSignOut() style="font-size:11px;align-self:flex-start">Sign out</button>' +
+          '</div>';
+  // Consent toggle card.
+  html += '<div class=card style="margin-bottom:12px">' +
+            '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+              '<span style="font-weight:600;flex:1">Allow community recording</span>' +
+              '<label class=switch style="position:relative;display:inline-block;width:42px;height:22px;cursor:pointer">' +
+                '<input type=checkbox id=streamer-allow ' + (has ? 'checked' : '') + ' style="opacity:0;width:0;height:0">' +
+                '<span id=streamer-allow-slider style="position:absolute;inset:0;background:' + (has ? '#284' : '#444') + ';border-radius:22px;transition:background .15s"></span>' +
+                '<span style="position:absolute;top:3px;left:' + (has ? '23px' : '3px') + ';width:16px;height:16px;background:white;border-radius:50%;transition:left .15s" id=streamer-allow-knob></span>' +
+              '</label>' +
+            '</div>' +
+            '<div class=field style="font-size:12px;color:var(--muted);margin-bottom:6px">Max recording duration per job (1 – 720 minutes)</div>' +
+            '<input id=streamer-max-dur type=number min=1 max=720 value=' + ((consent && consent.max_duration_min) || 240) + ' style="padding:6px 8px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);width:120px;font-size:13px">' +
+            '<div class=field style="font-size:12px;color:var(--muted);margin-top:10px;margin-bottom:6px">Who can record</div>' +
+            '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type=radio name=streamer-who value=all ' + ((!consent || consent.allow_all_users) ? 'checked' : '') + '> Anyone signed in</label>' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type=radio name=streamer-who value=list ' + ((consent && !consent.allow_all_users) ? 'checked' : '') + '> Only specific users</label>' +
+            '</div>' +
+            '<div id=streamer-list-wrap style="margin-top:8px;display:' + ((consent && !consent.allow_all_users) ? 'block' : 'none') + '">' +
+              '<input id=streamer-list type=text placeholder="comma-separated session ids, e.g. twitch:12345, 898259417" value="' + esc(((consent && (consent.allowed_users || [])).join(', ')) || '') + '" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:12px">' +
+            '</div>' +
+            '<div class=field style="font-size:12px;color:var(--muted);margin-top:10px;margin-bottom:6px">Notes shown to recorders (optional, ≤ 512 chars)</div>' +
+            '<textarea id=streamer-notes rows=3 placeholder="e.g. OK for personal archives, no re-uploads please" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:13px;resize:vertical">' + esc((consent && consent.notes) || '') + '</textarea>' +
+            '<div style="display:flex;gap:6px;margin-top:12px;align-items:center">' +
+              '<button onclick=streamerSaveConsent() id=streamer-save>💾 Save</button>' +
+              '<button class=sec onclick=streamerRevoke() style="color:#e88">🚫 Revoke consent</button>' +
+              '<span style="flex:1"></span>' +
+              '<span id=streamer-save-status class=meta style="font-size:11px"></span>' +
+            '</div>' +
+          '</div>';
+  // Audit list of recordings.
+  html += '<h2 style="margin:18px 4px 8px;font-size:15px;color:var(--muted);font-weight:600">Recent recordings of your channel</h2>' +
+          '<div id=streamer-recordings><div class=empty>Loading…</div></div>';
+  root.innerHTML = html;
+  // Wire the "who" radio toggle.
+  document.querySelectorAll('input[name=streamer-who]').forEach(r => r.addEventListener('change', () => {
+    document.getElementById('streamer-list-wrap').style.display =
+      r.value === 'list' && r.checked ? 'block' : (r.value === 'list' ? 'none' : 'none');
+    document.getElementById('streamer-list-wrap').style.display =
+      (document.querySelector('input[name=streamer-who]:checked') || {}).value === 'list' ? 'block' : 'none';
+  }));
+  // Visual slider state — toggle the slider + knob when the checkbox flips.
+  const allow = document.getElementById('streamer-allow');
+  if (allow) allow.addEventListener('change', () => {
+    const on = allow.checked;
+    document.getElementById('streamer-allow-slider').style.background = on ? '#284' : '#444';
+    document.getElementById('streamer-allow-knob').style.left = on ? '23px' : '3px';
+  });
+  // Audit list — fire async, don't block the dashboard paint.
+  _loadStreamerRecordings();
+}
+
+async function _loadStreamerRecordings() {
+  const wrap = document.getElementById('streamer-recordings');
+  if (!wrap) return;
+  try {
+    const r = await api('/api/streamer/recordings');
+    const list = r.recordings || [];
+    if (!list.length) {
+      wrap.innerHTML = '<div class=empty>Nobody has recorded your channel yet.</div>';
+      return;
+    }
+    wrap.innerHTML = list.map(rec =>
+      '<div class=card style="padding:8px;margin-bottom:6px;display:flex;align-items:center;gap:8px">' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(rec.url || '') + '</div>' +
+          '<div class=meta style="font-size:11px;color:var(--muted)">recorded ' + timeago(rec.downloaded_at || '') + ' · by chat_id ' + esc(String(rec.chat_id || '?')) + '</div>' +
+        '</div>' +
+      '</div>'
+    ).join('');
+  } catch (e) {
+    wrap.innerHTML = '<div class=empty style="color:#e88">Couldn\\'t load history: ' + esc(String(e)) + '</div>';
+  }
+}
+
+async function streamerSaveConsent() {
+  const btn = document.getElementById('streamer-save');
+  const status = document.getElementById('streamer-save-status');
+  const allow = document.getElementById('streamer-allow').checked;
+  const max = parseInt(document.getElementById('streamer-max-dur').value || '240', 10);
+  const who = (document.querySelector('input[name=streamer-who]:checked') || {}).value || 'all';
+  const list = (document.getElementById('streamer-list').value || '').split(',').map(s => s.trim()).filter(Boolean);
+  const notes = (document.getElementById('streamer-notes').value || '').trim();
+  if (max < 1 || max > 720) { showErr('Duration must be 1 – 720 minutes'); return; }
+  btn.disabled = true; status.textContent = 'saving…';
+  try {
+    await api('/api/streamer/consent', { method: 'POST',
+      body: JSON.stringify({
+        allow_recording: allow,
+        max_duration_min: max,
+        allow_all_users: who === 'all',
+        allowed_users: list,
+        notes: notes || null,
+      }) });
+    status.textContent = '✓ saved';
+    setTimeout(() => { status.textContent = ''; }, 2000);
+  } catch (e) {
+    status.textContent = '';
+    showErr('Save failed: ' + e);
+  } finally { btn.disabled = false; }
+}
+
+async function streamerRevoke() {
+  if (!confirm('Revoke your recording consent? Future recordings will be blocked. Existing recordings are unaffected.')) return;
+  try {
+    await api('/api/streamer/revoke', { method: 'POST', body: '{}' });
+    showOk('Consent revoked');
+    loadStreamer();
+  } catch (e) { showErr('Revoke failed: ' + e); }
+}
+
+async function streamerSignOut() {
+  if (!confirm('Sign out of your Twitch session on this Mini App?')) return;
+  try {
+    await fetch('/auth/twitch/signout', { method: 'POST', headers: { 'X-Init-Data': initData } });
+    showOk('Signed out');
+    loadStreamer();
+  } catch (e) { showErr('Sign-out failed: ' + e); }
 }
 
 async function loadStickers() {
@@ -7416,7 +7617,7 @@ initPreviewGestures();
 // tab via ?tab=<name>. Deep-links are how external entry points (the
 // bot's "Open sticker editor" button, a redirected /stickers URL, etc.)
 // route into the SPA without duplicating Mini App surfaces.
-const _bootTabs = new Set(['home','downloads','notifications','search','watchlist','library','stickers','files','scraper','settings','admin']);
+const _bootTabs = new Set(['home','downloads','notifications','search','watchlist','library','stickers','streamer','files','scraper','settings','admin']);
 let _bootTab = 'home';
 try {
   const qp = new URLSearchParams(window.location.search);

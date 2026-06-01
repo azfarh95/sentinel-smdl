@@ -486,6 +486,108 @@ async def upload_draft(request: Request,
     }
 
 
+# ── Smart trim (ffmpeg scene-detect → "best" 3s window) ────────────────────
+
+
+async def _best_window_for(src: Path, target_s: float = 3.0) -> tuple[float, float]:
+    """Pick a `target_s`-second window from `src` that's likely the most
+    interesting bit. Heuristic:
+
+      1. ffmpeg select='gt(scene,0.3)' lists scene-change timestamps.
+      2. For each candidate, score = number of scene-changes inside
+         (timestamp, timestamp + target_s). Highest score wins.
+      3. Fall back to the middle of the clip if scene detect found
+         nothing (typical for very static clips or single-shot videos).
+    """
+    import shutil as _sh
+    import asyncio as _asyncio
+    if not _sh.which("ffmpeg"):
+        return 0.0, target_s
+    # ffmpeg scene change detector — emit pts_time on the stderr-printed
+    # log via showinfo, then we parse.
+    cmd = [
+        "ffmpeg", "-nostats", "-loglevel", "info",
+        "-i", str(src),
+        "-vf", "select='gt(scene,0.3)',showinfo",
+        "-f", "null", "-",
+    ]
+    try:
+        proc = await _asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=_asyncio.subprocess.DEVNULL,
+            stderr=_asyncio.subprocess.PIPE,
+        )
+        try:
+            _, err = await _asyncio.wait_for(proc.communicate(), timeout=30)
+        except _asyncio.TimeoutError:
+            proc.kill(); await proc.wait()
+            err = b""
+    except Exception as e:
+        logger.debug("smart-trim ffmpeg launched failed: %s", e)
+        return 0.0, target_s
+    text = err.decode("utf-8", errors="replace")
+    # ffmpeg's showinfo prints lines like:
+    # [Parsed_showinfo_1 @ 0x...] n:  12 pts:  19260 pts_time:0.642
+    import re as _re
+    timestamps: list[float] = []
+    for m in _re.finditer(r"pts_time:\s*(\d+(?:\.\d+)?)", text):
+        try: timestamps.append(float(m.group(1)))
+        except Exception: pass
+    # Always include duration from ffmpeg's "Duration:" header so we can
+    # clamp the window to the clip length.
+    dur_match = _re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    duration = 0.0
+    if dur_match:
+        h, m, s = dur_match.groups()
+        duration = int(h) * 3600 + int(m) * 60 + float(s)
+    if duration <= 0:
+        # Last resort — fall back to the probe helper.
+        meta = await probe(src)
+        duration = float(meta.get("duration_s") or 0.0)
+    if duration <= target_s:
+        return 0.0, min(target_s, duration or target_s)
+    if not timestamps:
+        # No scene changes detected — middle of the clip.
+        mid = duration / 2.0
+        start = max(0.0, mid - target_s / 2.0)
+        return start, start + target_s
+    # Score each candidate start = how many scene-changes fall inside
+    # [start, start + target_s]. Best score wins.
+    best_start = timestamps[0]
+    best_score = 0
+    for t in timestamps:
+        if t + target_s > duration:
+            break
+        score = sum(1 for x in timestamps if t <= x < t + target_s)
+        if score > best_score:
+            best_start = t
+            best_score = score
+    return best_start, min(duration, best_start + target_s)
+
+
+# Re-export probe so the helper above can call it without an extra import dance.
+probe = _sp.probe
+
+
+@router.get("/api/sticker_drafts/{draft_id}/best_window")
+async def best_window(draft_id: int, request: Request,
+                      target: float = 3.0) -> dict:
+    """Recommend a `target`-second start/end window for the editor's
+    "smart trim" button. Scoped to the caller's drafts."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    d = await _db.sticker_draft_get(int(draft_id), user_id)
+    if not d:
+        raise HTTPException(404, "draft not found")
+    src = Path(d["file_path"])
+    if not src.exists():
+        raise HTTPException(410, "draft file gone")
+    t_secs = max(0.5, min(float(target), 3.0))
+    start, end = await _best_window_for(src, target_s=t_secs)
+    return {"start": round(start, 3), "end": round(end, 3)}
+
+
 # ── Make a draft from an existing SMDL download ────────────────────────────
 
 
@@ -1119,28 +1221,69 @@ _EDIT_HTML = r"""<!doctype html>
     :root { color-scheme: dark light; }
     body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
          margin:0;padding:12px;background:var(--tg-theme-bg-color,#111);
-         color:var(--tg-theme-text-color,#eee);}
+         color:var(--tg-theme-text-color,#eee);
+         touch-action:manipulation;}
     h1{font-size:16px;margin:0 0 10px;}
     .video-wrap{position:relative;display:inline-block;max-width:100%;
-                background:#000;border-radius:8px;overflow:hidden;}
+                background:#000;border-radius:8px;overflow:hidden;
+                touch-action:none;}
     .video-wrap video{display:block;width:100%;max-height:50vh;}
+    .crop-overlay{position:absolute;inset:0;pointer-events:none;}
+    .crop-overlay.on{pointer-events:auto;}
+    .crop-box{position:absolute;border:2px solid #fff;
+              box-shadow:0 0 0 9999px rgba(0,0,0,0.45);
+              box-sizing:border-box;cursor:move;
+              transition:border-color .12s;}
+    .crop-box.dragging{border-color:#5ac8fa;}
+    .crop-handle{position:absolute;width:14px;height:14px;background:#fff;
+                 border-radius:3px;border:1px solid #333;}
+    .crop-handle.nw{left:-8px;top:-8px;cursor:nw-resize;}
+    .crop-handle.ne{right:-8px;top:-8px;cursor:ne-resize;}
+    .crop-handle.sw{left:-8px;bottom:-8px;cursor:sw-resize;}
+    .crop-handle.se{right:-8px;bottom:-8px;cursor:se-resize;}
     .section{margin-top:14px;}
     .section label{display:block;font-size:12px;
                     color:var(--tg-theme-hint-color,#999);margin-bottom:4px;}
-    input[type=range]{width:100%;}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+    .meta{font-size:11px;color:var(--tg-theme-hint-color,#888);}
+    .pill{font-size:11px;background:#222;border:1px solid #333;border-radius:999px;
+          padding:3px 10px;color:#bbb;cursor:pointer;user-select:none;}
+    .pill.on{background:#284;border-color:#284;color:#dfd;}
+    /* Scrubber timeline */
+    .timeline{position:relative;height:42px;margin-top:6px;user-select:none;
+              touch-action:none;}
+    .timeline-track{position:absolute;left:0;right:0;top:18px;height:6px;
+                    background:#2a2a2a;border-radius:3px;}
+    .timeline-range{position:absolute;top:0;bottom:0;
+                    background:rgba(51,144,236,0.4);
+                    border:1px solid #5ac8fa;border-radius:3px;}
+    .timeline-cursor{position:absolute;top:-6px;width:2px;height:18px;
+                     background:#fff;pointer-events:none;}
+    .timeline-handle{position:absolute;top:6px;width:18px;height:30px;
+                     background:#5ac8fa;border-radius:6px;
+                     transform:translateX(-50%);cursor:ew-resize;
+                     box-shadow:0 1px 3px rgba(0,0,0,0.7);
+                     display:flex;align-items:center;justify-content:center;
+                     font-size:10px;color:#003;}
+    .timeline-handle.dragging{background:#fff;}
+    .timeline-labels{display:flex;justify-content:space-between;
+                     font-size:11px;color:var(--tg-theme-hint-color,#999);
+                     font-variant-numeric:tabular-nums;}
     .emojirow{display:flex;gap:6px;flex-wrap:wrap;}
     .emojirow button{font-size:22px;padding:6px 10px;background:#222;border:1px solid #444;
                      border-radius:8px;color:#fff;cursor:pointer;}
     .emojirow button.active{background:#3390ec;border-color:#3390ec;}
     input[type=text]{padding:6px 8px;border-radius:6px;border:1px solid #555;
                      background:#181818;color:#fff;font-size:18px;width:80px;}
+    button.action{font-size:13px;padding:8px 14px;background:#222;border:1px solid #444;
+                  color:#eee;border-radius:8px;cursor:pointer;}
+    button.action:disabled{opacity:.5;cursor:default;}
+    button.action:hover{background:#2a2a2a;}
     #make-btn{margin-top:16px;font-size:16px;padding:12px 20px;width:100%;
               background:var(--tg-theme-button-color,#3390ec);color:#fff;border:0;
               border-radius:10px;cursor:pointer;}
     #make-btn:disabled{opacity:.6;cursor:wait;}
     #progress{margin-top:10px;font-size:13px;color:var(--tg-theme-hint-color,#999);}
-    .trim{display:flex;gap:8px;align-items:center;font-size:12px;}
-    .trim-times{font-variant-numeric:tabular-nums;color:var(--tg-theme-hint-color,#999);}
     .back{display:inline-block;margin-bottom:8px;color:#5ac8fa;cursor:pointer;}
   </style>
 </head>
@@ -1148,24 +1291,49 @@ _EDIT_HTML = r"""<!doctype html>
   <div class="back" onclick="location.href='/app?tab=stickers'">← Back to drafts</div>
   <h1>Make sticker</h1>
 
-  <div class="video-wrap">
-    <video id="vid" controls muted playsinline></video>
+  <div class="video-wrap" id="video-wrap">
+    <video id="vid" muted playsinline></video>
+    <div class="crop-overlay" id="crop-overlay">
+      <div class="crop-box" id="crop-box">
+        <div class="crop-handle nw" data-h="nw"></div>
+        <div class="crop-handle ne" data-h="ne"></div>
+        <div class="crop-handle sw" data-h="sw"></div>
+        <div class="crop-handle se" data-h="se"></div>
+      </div>
+    </div>
   </div>
-  <div style="font-size:11px;color:var(--tg-theme-hint-color,#888);margin-top:6px;">
-    The center of the video fills the 512×512 sticker frame (sides are cropped).
+  <div class="meta" style="margin-top:6px">
+    <span id="crop-mode-hint">Center fill: the middle of the video is cropped square into the sticker.</span>
   </div>
 
   <div class="section">
-    <label>Trim (≤ 3 seconds)</label>
-    <div class="trim">
-      <span>Start</span>
-      <input type="range" id="t-start" min="0" max="100" step="0.05" value="0">
-      <span class="trim-times" id="t-start-l">0.0s</span>
+    <label>Trim window (≤ 3 seconds)</label>
+    <div class="timeline" id="timeline">
+      <div class="timeline-track">
+        <div class="timeline-range" id="timeline-range"></div>
+      </div>
+      <div class="timeline-cursor" id="timeline-cursor" style="left:0"></div>
+      <div class="timeline-handle" id="handle-start" style="left:0%">⟨</div>
+      <div class="timeline-handle" id="handle-end" style="left:100%">⟩</div>
     </div>
-    <div class="trim">
-      <span>End</span>
-      <input type="range" id="t-end" min="0" max="100" step="0.05" value="3">
-      <span class="trim-times" id="t-end-l">3.0s</span>
+    <div class="timeline-labels">
+      <span id="t-start-l">0.0s</span>
+      <span id="t-cur-l" style="color:#fff">—</span>
+      <span id="t-end-l">3.0s</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="action" id="smart-trim-btn">🎯 Smart trim</button>
+      <button class="action" id="preview-btn">▶ Preview window</button>
+      <span class="meta" id="smart-trim-status"></span>
+    </div>
+  </div>
+
+  <div class="section">
+    <label>Crop</label>
+    <div class="row">
+      <span class="pill" id="crop-mode-toggle">Center fill</span>
+      <span class="pill on" id="aspect-lock-toggle">🔒 1 : 1</span>
+      <span class="meta">Toggle "Pick region" to drag a box on the video.</span>
     </div>
   </div>
 
@@ -1210,10 +1378,10 @@ async function api(path, opts = {}) {
 }
 
 const vid = document.getElementById('vid');
-const tStart = document.getElementById('t-start');
-const tEnd   = document.getElementById('t-end');
+const wrap = document.getElementById('video-wrap');
 const tStartL = document.getElementById('t-start-l');
 const tEndL   = document.getElementById('t-end-l');
+const tCurL   = document.getElementById('t-cur-l');
 const emojiGrid = document.getElementById('emoji-grid');
 const emojiCustom = document.getElementById('emoji-custom');
 const makeBtn = document.getElementById('make-btn');
@@ -1237,10 +1405,6 @@ emojiCustom.addEventListener('input', () => {
   }
 });
 
-// Telegram WebView doesn't share cookies with the system browser, so the
-// preview endpoint requires X-Init-Data — but a plain <video src> request
-// can't set custom headers. Fetch the bytes ourselves and feed them to the
-// player as a blob URL.
 (async () => {
   try {
     const r = await fetch(`/api/sticker_drafts/${DRAFT_ID}/preview`, {
@@ -1257,28 +1421,270 @@ emojiCustom.addEventListener('input', () => {
   }
 })();
 
+// ── Scrubber state ──────────────────────────────────────────────────────
+const MAX_TRIM_S = 3.0;
+let videoDur = 0;
+let trimStart = 0;
+let trimEnd   = MAX_TRIM_S;
+
+const timeline = document.getElementById('timeline');
+const handleStart = document.getElementById('handle-start');
+const handleEnd   = document.getElementById('handle-end');
+const tRange      = document.getElementById('timeline-range');
+const tCursor     = document.getElementById('timeline-cursor');
+
+function _fmt(t) { return (Math.max(0, t)).toFixed(1) + 's'; }
+
+function syncScrubberUI() {
+  const w = timeline.clientWidth || 1;
+  const pStart = videoDur ? (trimStart / videoDur) : 0;
+  const pEnd   = videoDur ? (trimEnd   / videoDur) : 1;
+  handleStart.style.left = (pStart * 100) + '%';
+  handleEnd.style.left   = (pEnd   * 100) + '%';
+  tRange.style.left  = (pStart * 100) + '%';
+  tRange.style.width = ((pEnd - pStart) * 100) + '%';
+  tStartL.textContent = _fmt(trimStart);
+  tEndL.textContent   = _fmt(trimEnd);
+}
+
+function setTrim(s, e, opts) {
+  if (videoDur <= 0) { trimStart = s; trimEnd = e; syncScrubberUI(); return; }
+  s = Math.max(0, Math.min(s, videoDur));
+  e = Math.max(0, Math.min(e, videoDur));
+  if (e < s) { e = s; }
+  // Clamp the window to MAX_TRIM_S — when the user is dragging the start
+  // and the window would exceed, push the end with it. Same in reverse.
+  if (e - s > MAX_TRIM_S) {
+    if (opts && opts.movingEnd) s = e - MAX_TRIM_S;
+    else e = s + MAX_TRIM_S;
+  }
+  trimStart = s; trimEnd = e;
+  syncScrubberUI();
+  if (opts && opts.seekVideo !== false) {
+    try { vid.currentTime = (opts && opts.movingEnd) ? trimEnd : trimStart; }
+    catch (err) {}
+  }
+}
+
 vid.addEventListener('loadedmetadata', () => {
-  const dur = vid.duration || 3;
-  tStart.max = dur.toFixed(2);
-  tEnd.max   = dur.toFixed(2);
-  tEnd.value = Math.min(dur, 3).toFixed(2);
-  updateTrimLabels();
+  videoDur = vid.duration || 0;
+  // Initial window: [0, min(3, dur)].
+  setTrim(0, Math.min(MAX_TRIM_S, videoDur), { seekVideo: false });
 });
 
-function updateTrimLabels() {
-  let s = +tStart.value, e = +tEnd.value;
-  if (e - s > 3) { e = s + 3; tEnd.value = e.toFixed(2); }
-  if (s > e)     { s = e; tStart.value = s.toFixed(2); }
-  tStartL.textContent = s.toFixed(1) + 's';
-  tEndL.textContent   = e.toFixed(1) + 's';
-  vid.currentTime = s;
-}
-tStart.addEventListener('input', updateTrimLabels);
-tEnd.addEventListener('input', updateTrimLabels);
+vid.addEventListener('timeupdate', () => {
+  if (!videoDur) return;
+  const p = vid.currentTime / videoDur;
+  tCursor.style.left = (p * 100) + '%';
+  tCurL.textContent = _fmt(vid.currentTime);
+});
 
-// Pack-kind comes in as a `?kind=video|static|custom_emoji` query param
-// when the editor is opened from the unified Mini App's drafts list.
-// Defaults to 'video' for direct hits to /stickers/<id>/edit.
+let _dragHandle = null;
+function _xToTime(clientX) {
+  const r = timeline.getBoundingClientRect();
+  const x = Math.max(0, Math.min(clientX - r.left, r.width));
+  return (x / r.width) * videoDur;
+}
+function _startHandleDrag(which, ev) {
+  ev.preventDefault();
+  _dragHandle = which;
+  (which === 'start' ? handleStart : handleEnd).classList.add('dragging');
+  try { (which === 'start' ? handleStart : handleEnd).setPointerCapture(ev.pointerId); } catch (e) {}
+}
+function _moveHandleDrag(ev) {
+  if (!_dragHandle) return;
+  const t = _xToTime(ev.clientX);
+  if (_dragHandle === 'start') setTrim(t, trimEnd, { movingEnd: false });
+  else                          setTrim(trimStart, t, { movingEnd: true });
+}
+function _endHandleDrag(ev) {
+  if (!_dragHandle) return;
+  (_dragHandle === 'start' ? handleStart : handleEnd).classList.remove('dragging');
+  _dragHandle = null;
+}
+handleStart.addEventListener('pointerdown', e => _startHandleDrag('start', e));
+handleEnd.addEventListener('pointerdown',   e => _startHandleDrag('end',   e));
+window.addEventListener('pointermove', _moveHandleDrag);
+window.addEventListener('pointerup',   _endHandleDrag);
+window.addEventListener('pointercancel', _endHandleDrag);
+
+// Tap on the empty part of the track to seek the video (handy for preview).
+timeline.addEventListener('click', e => {
+  if (_dragHandle) return;
+  if (e.target.classList.contains('timeline-handle')) return;
+  try { vid.currentTime = _xToTime(e.clientX); } catch (err) {}
+});
+
+// Preview the trimmed window — play from trimStart, pause at trimEnd.
+let _previewing = false;
+document.getElementById('preview-btn').addEventListener('click', () => {
+  if (_previewing) { vid.pause(); _previewing = false; return; }
+  try {
+    vid.currentTime = trimStart;
+    vid.play();
+    _previewing = true;
+    const onTU = () => {
+      if (vid.currentTime >= trimEnd - 0.05) {
+        vid.pause(); vid.removeEventListener('timeupdate', onTU);
+        _previewing = false;
+      }
+    };
+    vid.addEventListener('timeupdate', onTU);
+  } catch (e) {}
+});
+
+// Smart trim — backend ffmpeg scene-detect picks a 3-second window.
+document.getElementById('smart-trim-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('smart-trim-btn');
+  const status = document.getElementById('smart-trim-status');
+  btn.disabled = true; status.textContent = 'analysing…';
+  try {
+    const r = await api(`/api/sticker_drafts/${DRAFT_ID}/best_window?target=${MAX_TRIM_S}`);
+    setTrim(+r.start, +r.end);
+    status.textContent = `picked ${r.start.toFixed(1)}–${r.end.toFixed(1)}s`;
+  } catch (e) {
+    status.textContent = '✗ ' + e.message;
+  } finally { btn.disabled = false; }
+});
+
+// ── Crop overlay state ──────────────────────────────────────────────────
+const cropOverlay = document.getElementById('crop-overlay');
+const cropBox     = document.getElementById('crop-box');
+const cropModeToggle = document.getElementById('crop-mode-toggle');
+const aspectLockToggle = document.getElementById('aspect-lock-toggle');
+const cropHint    = document.getElementById('crop-mode-hint');
+
+let cropMode = false;     // false = center-fill (no client crop), true = pick region
+let aspectLock = true;    // 1:1 default
+// Box position in *displayed pixels* — converted to source pixels on submit.
+let cropX = 0, cropY = 0, cropW = 0, cropH = 0;
+
+function refreshCropOverlay() {
+  cropOverlay.classList.toggle('on', cropMode);
+  cropBox.style.display = cropMode ? '' : 'none';
+  if (!cropMode) {
+    cropHint.textContent = 'Center fill: the middle of the video is cropped square into the sticker.';
+    return;
+  }
+  cropHint.textContent = aspectLock
+    ? 'Pick region (1:1): drag the box to position the square sticker frame.'
+    : 'Pick region (free): drag the box or its corners.';
+  // First-time positioning: center the box at 60% of the SHORTER displayed dim.
+  if (cropW === 0 || cropH === 0) {
+    const vr = vid.getBoundingClientRect();
+    const wr = wrap.getBoundingClientRect();
+    if (!vr.width || !vr.height) return;
+    const short = Math.min(vr.width, vr.height) * 0.6;
+    cropW = aspectLock ? short : vr.width * 0.6;
+    cropH = aspectLock ? short : vr.height * 0.6;
+    cropX = (vr.width  - cropW) / 2 + (vr.left - wr.left);
+    cropY = (vr.height - cropH) / 2 + (vr.top  - wr.top);
+  }
+  drawCropBox();
+}
+function drawCropBox() {
+  cropBox.style.left   = cropX + 'px';
+  cropBox.style.top    = cropY + 'px';
+  cropBox.style.width  = cropW + 'px';
+  cropBox.style.height = cropH + 'px';
+}
+function clampCropToVideo() {
+  const vr = vid.getBoundingClientRect();
+  const wr = wrap.getBoundingClientRect();
+  const vL = vr.left - wr.left, vT = vr.top - wr.top;
+  cropX = Math.max(vL, Math.min(cropX, vL + vr.width  - cropW));
+  cropY = Math.max(vT, Math.min(cropY, vT + vr.height - cropH));
+  cropW = Math.min(cropW, vr.width);
+  cropH = Math.min(cropH, vr.height);
+}
+
+cropModeToggle.addEventListener('click', () => {
+  cropMode = !cropMode;
+  cropModeToggle.classList.toggle('on', cropMode);
+  cropModeToggle.textContent = cropMode ? 'Pick region' : 'Center fill';
+  refreshCropOverlay();
+});
+aspectLockToggle.addEventListener('click', () => {
+  aspectLock = !aspectLock;
+  aspectLockToggle.classList.toggle('on', aspectLock);
+  aspectLockToggle.textContent = aspectLock ? '🔒 1 : 1' : 'Free';
+  if (cropMode && aspectLock) {
+    const m = Math.min(cropW, cropH);
+    cropW = m; cropH = m;
+    drawCropBox();
+  }
+  refreshCropOverlay();
+});
+
+// Drag the whole box.
+let _boxDrag = null;
+cropBox.addEventListener('pointerdown', e => {
+  if (e.target.classList.contains('crop-handle')) return; // handle drag covered below
+  e.preventDefault(); e.stopPropagation();
+  _boxDrag = { dx: e.clientX - cropBox.getBoundingClientRect().left,
+               dy: e.clientY - cropBox.getBoundingClientRect().top };
+  cropBox.classList.add('dragging');
+  try { cropBox.setPointerCapture(e.pointerId); } catch (err) {}
+});
+window.addEventListener('pointermove', e => {
+  if (_boxDrag) {
+    const wr = wrap.getBoundingClientRect();
+    cropX = e.clientX - wr.left - _boxDrag.dx;
+    cropY = e.clientY - wr.top  - _boxDrag.dy;
+    clampCropToVideo(); drawCropBox();
+  }
+  if (_handleDrag) {
+    const wr = wrap.getBoundingClientRect();
+    const x = e.clientX - wr.left, y = e.clientY - wr.top;
+    const r = _handleDrag.start;
+    let nx = r.x, ny = r.y, nw = r.w, nh = r.h;
+    if (_handleDrag.h.includes('w')) { nx = x; nw = r.x + r.w - x; }
+    if (_handleDrag.h.includes('e')) { nw = x - r.x; }
+    if (_handleDrag.h.includes('n')) { ny = y; nh = r.y + r.h - y; }
+    if (_handleDrag.h.includes('s')) { nh = y - r.y; }
+    if (aspectLock) {
+      const sz = Math.max(40, Math.min(nw, nh));
+      nw = sz; nh = sz;
+      // Re-anchor so the dragged corner stays under the pointer.
+      if (_handleDrag.h.includes('w')) nx = r.x + r.w - nw;
+      if (_handleDrag.h.includes('n')) ny = r.y + r.h - nh;
+    }
+    cropX = nx; cropY = ny; cropW = Math.max(40, nw); cropH = Math.max(40, nh);
+    clampCropToVideo(); drawCropBox();
+  }
+});
+window.addEventListener('pointerup', () => {
+  if (_boxDrag) { _boxDrag = null; cropBox.classList.remove('dragging'); }
+  _handleDrag = null;
+});
+
+// Resize via corner handles.
+let _handleDrag = null;
+cropBox.querySelectorAll('.crop-handle').forEach(h => {
+  h.addEventListener('pointerdown', e => {
+    e.preventDefault(); e.stopPropagation();
+    _handleDrag = { h: h.dataset.h, start: { x: cropX, y: cropY, w: cropW, h: cropH } };
+    try { h.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+});
+
+// Convert displayed-pixel crop to source-pixel crop for the encoder.
+function cropToSourcePixels() {
+  if (!cropMode || !cropW || !cropH || !vid.videoWidth) return null;
+  const vr = vid.getBoundingClientRect();
+  const wr = wrap.getBoundingClientRect();
+  const vL = vr.left - wr.left, vT = vr.top - wr.top;
+  const sx = vid.videoWidth  / vr.width;
+  const sy = vid.videoHeight / vr.height;
+  return {
+    x: Math.round(Math.max(0, (cropX - vL) * sx)),
+    y: Math.round(Math.max(0, (cropY - vT) * sy)),
+    w: Math.round(cropW * sx),
+    h: Math.round(cropH * sy),
+  };
+}
+
+// Pack-kind query param → make body.
 const _editorPackKind = (() => {
   try {
     const k = new URLSearchParams(location.search).get('kind') || '';
@@ -1291,19 +1697,17 @@ makeBtn.addEventListener('click', async () => {
   progressEl.textContent = 'Encoding sticker… (5–20s)';
   const body = {
     emoji:      chosenEmoji,
-    trim_start: +tStart.value,
-    trim_end:   +tEnd.value,
+    trim_start: trimStart,
+    trim_end:   trimEnd,
     pack_kind:  _editorPackKind,
   };
+  const crop = cropToSourcePixels();
+  if (crop) Object.assign(body, { crop_x: crop.x, crop_y: crop.y, crop_w: crop.w, crop_h: crop.h });
   try {
     const r = await api(`/api/sticker_drafts/${DRAFT_ID}/make`, {
       method: 'POST', body: JSON.stringify(body),
     });
-    // Use the Telegram WebApp SDK to open t.me/addstickers/... in the
-    // native sticker viewer; a plain <a href> would try to render the
-    // URL inside this WebView, where Telegram just shows the cover and
-    // an inert "+" button.
-    progressEl.innerHTML = `✅ Added! <a href="#" id="open-pack-link" style="color:#5ac8fa">Open your pack</a><br><span style="font-size:12px">You can make another variant — different emoji / trim — or go back.</span>`;
+    progressEl.innerHTML = `✅ Added! <a href="#" id="open-pack-link" style="color:#5ac8fa">Open your pack</a><br><span style="font-size:12px">You can make another variant — different emoji / trim / crop — or go back.</span>`;
     const link = document.getElementById('open-pack-link');
     link.addEventListener('click', ev => {
       ev.preventDefault();

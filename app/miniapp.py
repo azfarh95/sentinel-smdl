@@ -3951,6 +3951,26 @@ button.warn { background: #ff9500; color: #fff; }
       <button class=sec data-kind=video onclick="stickersSwitchKind('video')" style="font-size:12px">🎬 Video</button>
       <button class=sec data-kind=static onclick="stickersSwitchKind('static')" style="font-size:12px">🖼 Static</button>
       <button class=sec data-kind=custom_emoji onclick="stickersSwitchKind('custom_emoji')" style="font-size:12px">😀 Emoji</button>
+      <span style="flex:1"></span>
+      <button class=sec onclick="stickersToggleLookup()" style="font-size:12px" title="View any TG pack + clone stickers into yours">🔍 Look up pack</button>
+    </div>
+    <div id=stickers-lookup-card class=card style="display:none;margin-bottom:10px">
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+        <span style="font-weight:600;flex:1">Look up any sticker pack</span>
+        <button class=sec onclick="stickersToggleLookup()" style="font-size:11px">✕</button>
+      </div>
+      <div class=meta style="font-size:11px;margin-bottom:8px;color:var(--muted)">
+        Paste a <code>t.me/addstickers/...</code> URL or just the pack name. Telegram limits us to read-only for packs not created by <b>@Sentinel_Media_bot</b>, but you can <i>clone</i> any sticker into one of your own packs and then fully edit it from there.
+      </div>
+      <div style="display:flex;gap:6px">
+        <input id=stickers-lookup-input type=text placeholder="t.me/addstickers/yourpack or yourpack_name" style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:13px">
+        <button onclick="stickersDoLookup()">Look up</button>
+      </div>
+      <div id=stickers-lookup-meta style="margin-top:10px;display:none">
+        <div id=stickers-lookup-title style="font-weight:600;margin-bottom:4px"></div>
+        <div id=stickers-lookup-status class=meta style="font-size:11px;margin-bottom:6px"></div>
+      </div>
+      <div id=stickers-lookup-grid></div>
     </div>
     <div class=card id=stickers-pack-card>
       <div class=empty><span class=spin></span> Loading…</div>
@@ -5012,6 +5032,132 @@ async function stickersRemoveFromPack(btn) {
     showOk('Removed from pack');
     stickersLoadPackContents();
   } catch (e) { showErr('Remove failed: ' + e); }
+}
+
+// ── Look-up + clone for packs not created by our bot ─────────────────────
+// TG API: a bot can only mutate packs it created. So for packs we don't
+// own, we expose a read-only view and a "Clone into your own pack" button
+// per-sticker — the bytes get re-uploaded into one of THIS user's owned
+// packs (video/static/emoji), where every existing edit affordance works.
+
+let _stickersLookupOpen = false;
+let _stickersLookupData = null;     // last successful lookup result
+
+function stickersToggleLookup() {
+  _stickersLookupOpen = !_stickersLookupOpen;
+  const card = document.getElementById('stickers-lookup-card');
+  card.style.display = _stickersLookupOpen ? '' : 'none';
+  if (_stickersLookupOpen) {
+    setTimeout(() => document.getElementById('stickers-lookup-input').focus(), 50);
+  }
+}
+
+async function stickersDoLookup() {
+  const inp = document.getElementById('stickers-lookup-input');
+  const meta = document.getElementById('stickers-lookup-meta');
+  const titleEl = document.getElementById('stickers-lookup-title');
+  const status = document.getElementById('stickers-lookup-status');
+  const grid = document.getElementById('stickers-lookup-grid');
+  const raw = (inp.value || '').trim();
+  if (!raw) { showErr('Paste a pack URL or name first'); return; }
+  meta.style.display = 'block';
+  titleEl.textContent = 'Looking up…';
+  status.textContent = '';
+  grid.innerHTML = '<div class=empty><span class=spin></span> Fetching pack…</div>';
+  try {
+    const data = await api('/api/sticker_set/lookup?name=' + encodeURIComponent(raw));
+    _stickersLookupData = data;
+    titleEl.textContent = '📦 ' + data.title;
+    const stickers = data.stickers || [];
+    const ownership = data.owned_by_us
+      ? '✓ This bot owns this pack — switch to that kind to edit it fully.'
+      : '🔒 Read-only — pack owned by another bot. Clone individual stickers into yours to edit.';
+    status.innerHTML = esc(ownership) + ' · ' + stickers.length + ' sticker' + (stickers.length === 1 ? '' : 's') +
+      ' · <a href="#" id=stickers-lookup-tg style="color:var(--accent)">' + esc(data.url) + '</a>';
+    const link = document.getElementById('stickers-lookup-tg');
+    if (link) link.addEventListener('click', ev => {
+      ev.preventDefault();
+      if (tg && tg.openTelegramLink) tg.openTelegramLink(data.url);
+      else window.open(data.url, '_blank');
+    });
+    if (!stickers.length) {
+      grid.innerHTML = '<div class=empty>Pack has no stickers.</div>';
+      return;
+    }
+    const inner = document.createElement('div');
+    inner.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px';
+    stickers.forEach((s, idx) => inner.appendChild(_renderLookupSticker(s, idx, data)));
+    grid.innerHTML = '';
+    grid.appendChild(inner);
+  } catch (e) {
+    grid.innerHTML = '<div class=empty style="color:#e88">Lookup failed: ' + esc(String(e)) + '</div>';
+    titleEl.textContent = '';
+    status.textContent = '';
+  }
+}
+
+function _renderLookupSticker(s, idx, packData) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.style.cssText = 'padding:8px;display:flex;flex-direction:column;gap:6px;position:relative';
+  card.dataset.fileId = s.file_id;
+  const tagEl = s.is_video ? 'video' : 'img';
+  const media = document.createElement(tagEl);
+  media.style.cssText = 'width:100%;aspect-ratio:1;object-fit:contain;background:#000;border-radius:6px';
+  if (s.is_video) { media.setAttribute('muted',''); media.setAttribute('playsinline',''); media.setAttribute('loop',''); media.setAttribute('autoplay',''); }
+  // Reuse the existing proxy (any caller can fetch any sticker by file_id —
+  // file_ids are stable, not enumerable).
+  fetch('/api/sticker_pack/sticker_file/' + encodeURIComponent(s.file_id), {
+    headers: { 'X-Init-Data': initData },
+  }).then(r => r.ok ? r.blob() : null)
+    .then(b => { if (b) media.src = URL.createObjectURL(b); })
+    .catch(() => {});
+  card.appendChild(media);
+  const metaRow = document.createElement('div');
+  metaRow.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:13px';
+  metaRow.innerHTML = '<span style="font-size:18px">' + esc(s.emoji || '🎬') + '</span>' +
+    '<span class=meta style="font-size:11px;color:var(--muted)">#' + (idx + 1) + '</span>';
+  card.appendChild(metaRow);
+  // Clone button. Target kind defaults match the source format —
+  // video → video, static → static. Emoji pack is always available.
+  const compatibleVideo  = !!s.is_video;
+  const compatibleStatic = !s.is_video && !s.is_animated;
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px';
+  let buttons = '';
+  if (compatibleVideo) {
+    buttons += '<button class=sec style="font-size:11px;padding:4px 6px" onclick="stickersCloneTo(this,\\'video\\')" title="Clone into your Video pack">→ Video</button>';
+    buttons += '<button class=sec style="font-size:11px;padding:4px 6px" onclick="stickersCloneTo(this,\\'custom_emoji\\')" title="Clone into your Emoji pack">→ 😀 Emoji</button>';
+  } else if (compatibleStatic) {
+    buttons += '<button class=sec style="font-size:11px;padding:4px 6px" onclick="stickersCloneTo(this,\\'static\\')" title="Clone into your Static pack">→ Static</button>';
+    buttons += '<button class=sec style="font-size:11px;padding:4px 6px" onclick="stickersCloneTo(this,\\'custom_emoji\\')" title="Clone into your Emoji pack">→ 😀 Emoji</button>';
+  }
+  actions.innerHTML = buttons || '<span class=meta style="font-size:11px;color:var(--muted)">animated — clone not supported</span>';
+  card.appendChild(actions);
+  return card;
+}
+
+async function stickersCloneTo(btn, targetKind) {
+  const card = btn.closest('[data-file-id]');
+  if (!card) return;
+  const file_id = card.dataset.fileId;
+  const emoji = (prompt('Emoji for the cloned sticker:', '🎬') || '').trim();
+  if (!emoji) { showErr('Cancelled'); return; }
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = '…';
+  try {
+    const r = await api('/api/sticker_pack/clone_sticker', {
+      method: 'POST',
+      body: JSON.stringify({ source_file_id: file_id, target_kind: targetKind, emoji }),
+    });
+    showOk('Cloned to your ' + targetKind + ' pack');
+    // If the active kind matches the clone target, refresh the contents
+    // grid so the user sees the new sticker land immediately.
+    if (_stickersKind === targetKind) loadStickers();
+  } catch (e) {
+    showErr('Clone failed: ' + e);
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
 }
 
 async function stickersDeletePack() {

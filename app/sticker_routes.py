@@ -110,6 +110,18 @@ class DeletePackBody(BaseModel):
     confirm: bool = False
 
 
+class CloneStickerBody(BaseModel):
+    # The Telegram file_id of the sticker we're copying. The bot fetches
+    # the bytes via get_file → downloads → re-uploads as a NEW sticker in
+    # the caller's pack-of-`target_kind`. The original pack is untouched.
+    source_file_id: str
+    # video / static / custom_emoji
+    target_kind: str = "video"
+    # Emoji to assign to the cloned sticker. Multi-emoji can be set later
+    # via /api/sticker_pack/sticker/emojis on the copy.
+    emoji: str = "🎬"
+
+
 class FromDownloadBody(BaseModel):
     # Absolute path or a path under DOWNLOADS_DIR — the upload-from-download
     # flow trusts paths that come from the user's own download history (they
@@ -484,6 +496,178 @@ async def upload_draft(request: Request,
         "height":      meta.get("height"),
         "bytes":       written,
     }
+
+
+# ── Lookup any sticker set + clone individual stickers ────────────────────
+#
+# Telegram's bot API only lets the bot that CREATED a pack mutate it
+# (delete/rename/re-emoji/etc.). For packs owned by other bots — including
+# the user's own packs created with @Stickers or with the owner-only
+# @azsmdl_bot on the other deployment — we can still READ the set and
+# CLONE individual stickers into one of THIS bot's owned packs, where
+# the user gets full edit power again.
+
+
+def _parse_pack_name(url_or_name: str) -> str:
+    """Accept either a t.me/addstickers/<name>(?...) URL or a bare pack
+    name. Returns the canonical pack name. Invalid input → empty string."""
+    s = (url_or_name or "").strip()
+    if not s:
+        return ""
+    # Drop URL prefix variants.
+    for prefix in ("https://t.me/addstickers/", "http://t.me/addstickers/",
+                   "t.me/addstickers/", "tg://addstickers?set="):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    # Trim querystring / fragment if any.
+    for sep in ("?", "#", "/"):
+        if sep in s:
+            s = s.split(sep, 1)[0]
+    return s
+
+
+async def _owned_by_us(bot, pack_name: str) -> bool:
+    """Heuristic: our bot's packs always end in `_by_<bot_username>`. TG
+    doesn't expose pack ownership directly; this naming convention is the
+    only reliable signal short of attempting a mutation."""
+    try:
+        u = await get_bot_username_safe(bot)
+    except Exception:
+        return False
+    return bool(u) and pack_name.lower().endswith(f"_by_{u.lower()}")
+
+
+async def get_bot_username_safe(bot) -> str:
+    """Cached bot username. Tries the existing cache in sticker_telegram
+    first so we don't re-hit get_me when sticker_telegram already did."""
+    from .sticker_telegram import _BOT_USERNAME, get_bot_username
+    if _BOT_USERNAME:
+        return _BOT_USERNAME
+    return await get_bot_username(bot)
+
+
+@router.get("/api/sticker_set/lookup")
+async def lookup_sticker_set(request: Request, name: str | None = "") -> dict:
+    """Look up ANY Telegram sticker set by URL or name. Returns the same
+    serialised shape as /api/sticker_pack/contents plus an `owned_by_us`
+    flag the frontend uses to decide whether to enable mutation buttons.
+    """
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    pack_name = _parse_pack_name(name or "")
+    if not pack_name:
+        raise HTTPException(400, "URL or pack name is required")
+    tg_app = _require_bot()
+    try:
+        tg_set = await tg_app.bot.get_sticker_set(name=pack_name)
+    except TelegramError as e:
+        msg = str(e).lower()
+        if "not found" in msg or "stickerset_invalid" in msg:
+            raise HTTPException(404, f"pack '{pack_name}' not found")
+        raise HTTPException(502, f"Telegram: {e}")
+    owned = await _owned_by_us(tg_app.bot, tg_set.name)
+    return {
+        "name":         tg_set.name,
+        "title":        tg_set.title,
+        "sticker_type": getattr(tg_set, "sticker_type", "regular"),
+        "stickers":     [_serialise_sticker(s) for s in (tg_set.stickers or [])],
+        "owned_by_us":  owned,
+        "url":          f"https://t.me/addstickers/{tg_set.name}",
+    }
+
+
+@router.post("/api/sticker_pack/clone_sticker")
+async def clone_sticker(body: CloneStickerBody, request: Request) -> dict:
+    """Copy a sticker we don't own into a pack we do own.
+
+    Source can come from any TG pack the bot can see (effectively all
+    public packs). We pull the bytes via get_file → download_as_bytearray
+    → re-upload via the existing pack-create/append code path. The result
+    is a brand-new sticker the user has full control over.
+
+    target_kind must match the source's format:
+      source video → 'video' or 'custom_emoji' (custom_emoji video flag)
+      source static → 'static' or 'custom_emoji' (custom_emoji static flag)
+    """
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    first_name = (payload.get("user") or {}).get("first_name")
+    target_kind = _kind_param(body.target_kind)
+    tg_app = _require_bot()
+    # Look up the source file so we can sniff its format + size.
+    try:
+        src_file = await tg_app.bot.get_file(body.source_file_id)
+        data = bytes(await src_file.download_as_bytearray())
+    except TelegramError as e:
+        raise HTTPException(404, f"source sticker not fetchable: {e}")
+    if not data:
+        raise HTTPException(404, "source sticker is empty")
+    # Detect source format. Same magic-byte sniff as the pack-proxy.
+    if data[:4] == b"\x1aE\xdf\xa3":
+        src_format = "video";  ext = ".webm"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        src_format = "static"; ext = ".webp"
+    elif data[:8] == b"\x89PNG\r\n\x1a\n":
+        src_format = "static"; ext = ".png"
+    else:
+        raise HTTPException(415, "unsupported source format (not webm/webp/png)")
+    # Pick the target sticker_format from kind + source. Custom emoji
+    # packs can hold either video or static stickers; the format flag
+    # on the InputSticker controls which.
+    if target_kind == "custom_emoji":
+        target_sticker_format = src_format
+    else:
+        if (target_kind == "video" and src_format != "video"
+                or target_kind == "static" and src_format != "static"):
+            raise HTTPException(400,
+                f"target_kind={target_kind} is incompatible with source "
+                f"format={src_format}")
+        target_sticker_format = src_format
+    # Write to a scratch file under DRAFTS_DIR — re-uses the per-user
+    # tree the rest of the code already mounts.
+    import uuid as _uuid
+    scratch_dir = DRAFTS_DIR / str(user_id)
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    scratch = scratch_dir / f"_clone_{_uuid.uuid4().hex}{ext}"
+    try:
+        scratch.write_bytes(data)
+        pack = await _st.resolve_pack(tg_app.bot, user_id, first_name, kind=target_kind)
+        try:
+            file_id, set_url = await _st.upload_and_add(
+                tg_app.bot, user_id, scratch,
+                emoji=(body.emoji or "🎬"),
+                pack_name=pack["pack_name"],
+                pack_title=pack["pack_title"],
+                sticker_format=target_sticker_format,
+                sticker_type=("custom_emoji" if target_kind == "custom_emoji" else "regular"),
+            )
+        except TelegramError as e:
+            msg = str(e)
+            if "PEER_ID_INVALID" in msg or "user not found" in msg.lower():
+                raise HTTPException(400, "Send /start to the bot first, then try again.")
+            raise HTTPException(502, f"Telegram: {msg}")
+        if not pack.get("exists_in_db"):
+            await _db.sticker_pack_create(
+                user_id, pack["pack_name"], pack["pack_title"], set_url,
+                kind=target_kind,
+            )
+        await _db.sticker_record(
+            user_id=user_id, pack_name=pack["pack_name"],
+            source_draft_id=None, emoji=(body.emoji or "🎬"),
+            telegram_file_id=file_id, webm_path=str(scratch),
+        )
+        return {
+            "ok":             True,
+            "file_id":        file_id,
+            "set_url":        set_url,
+            "target_kind":    target_kind,
+            "target_format":  target_sticker_format,
+        }
+    finally:
+        try: scratch.unlink(missing_ok=True)
+        except Exception: pass
 
 
 # ── Smart trim (ffmpeg scene-detect → "best" 3s window) ────────────────────

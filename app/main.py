@@ -169,6 +169,15 @@ async def _init_bot_with_retry(state: dict) -> None:
             tg_app = await build()
             await tg_app.initialize()
             await tg_app.start()
+            # Idempotent bot presence — commands, menu button, descriptions
+            # (English + Russian). Run on every boot so a token rotation or
+            # fresh deploy refreshes the bot's user-facing metadata without
+            # operator intervention. Non-fatal on failure.
+            try:
+                from .bot import wire_bot_presence
+                await wire_bot_presence(tg_app)
+            except Exception as e:
+                logger.warning("bot presence wiring failed: %s", e)
             polling_task = asyncio.create_task(
                 tg_app.updater.start_polling(drop_pending_updates=True)
             )

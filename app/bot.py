@@ -1536,3 +1536,113 @@ async def build() -> Application:
     _app.add_handler(CallbackQueryHandler(handle_default_video_size_callback, pattern=r"^vq:"))
     _app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return _app
+
+
+# ── Bot-presence wiring: commands, menu button, descriptions ───────────────
+# Idempotent — TG upserts. Called from main.py after `start()` on every boot
+# so a fresh container picks up the right presentation without anyone
+# touching BotFather. Failures here are non-fatal: bot keeps working even
+# if a meta field doesn't take.
+
+_BOT_DESC = {
+    None: (
+        "🎬 SMDL — Social Media Downloader.\n\n"
+        "Send any video URL and I'll fetch it.\n"
+        "Send a video or GIF and I'll turn it into a Telegram sticker — "
+        "instantly added to your personal sticker pack.\n\n"
+        "Open the Mini App for the full dashboard: downloads, IPTV, "
+        "sticker pack management (video / static / custom emoji), search "
+        "across all of it."
+    ),
+    "ru": (
+        "🎬 SMDL — загрузчик из соцсетей.\n\n"
+        "Отправьте ссылку на любое видео — я скачаю его.\n"
+        "Отправьте видео или GIF — я превращу его в Telegram-стикер и "
+        "сразу добавлю в ваш персональный стикерпак.\n\n"
+        "Откройте Mini App для полной панели: загрузки, IPTV, управление "
+        "стикерпаками (видео / статика / эмодзи), поиск по всему сразу."
+    ),
+}
+_BOT_SHORT_DESC = {
+    None: "Video downloader + Telegram sticker maker. Tap Open to start.",
+    "ru": "Загрузчик видео + создатель стикеров Telegram. Нажмите Open.",
+}
+_BOT_COMMANDS = {
+    None: [
+        ("start",         "Welcome + dashboard button"),
+        ("stickers",      "Open the sticker maker Mini App"),
+        ("pack",          "Show your sticker pack link"),
+        ("dashboard",     "Open the SMDL Mini App"),
+        ("watchlist",     "Auto-record streamers (twitch / youtube / kick)"),
+        ("watch",         "Add a streamer to the watchlist"),
+        ("unwatch",       "Remove a streamer from the watchlist"),
+        ("live_status",   "Status of any in-progress live recording"),
+        ("storage_stats", "Disk usage on the box"),
+        ("language",      "Switch reply language"),
+        ("delete_data",   "Wipe all your data on this bot"),
+    ],
+    "ru": [
+        ("start",         "Приветствие + кнопка панели"),
+        ("stickers",      "Открыть Mini App для стикеров"),
+        ("pack",          "Показать ссылку на ваш стикерпак"),
+        ("dashboard",     "Открыть SMDL Mini App"),
+        ("watchlist",     "Авто-запись стримеров (twitch / youtube / kick)"),
+        ("watch",         "Добавить стримера в список наблюдения"),
+        ("unwatch",       "Убрать стримера из списка наблюдения"),
+        ("live_status",   "Статус текущей записи стрима"),
+        ("storage_stats", "Использование диска на сервере"),
+        ("language",      "Сменить язык ответов"),
+        ("delete_data",   "Удалить все мои данные у бота"),
+    ],
+}
+
+
+async def wire_bot_presence(app: Application) -> None:
+    """One-shot at boot: push commands, menu button, descriptions to TG.
+    Each call is independent — a single failure doesn't block the rest."""
+    from telegram import BotCommand, MenuButtonWebApp, WebAppInfo
+
+    # Commands per language. The None entry is the default (matches users
+    # whose TG client language isn't ru); language_code="ru" attaches the
+    # localised list. Add more languages by extending _BOT_COMMANDS.
+    for lang, cmds in _BOT_COMMANDS.items():
+        try:
+            kwargs = {"commands": [BotCommand(c, d) for c, d in cmds]}
+            if lang:
+                kwargs["language_code"] = lang
+            await app.bot.set_my_commands(**kwargs)
+        except Exception as e:
+            logger.warning("set_my_commands lang=%s failed: %s", lang, e)
+
+    webapp_url = (os.environ.get("WEBAPP_URL") or "").strip()
+    if webapp_url:
+        try:
+            await app.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="📱 Open SMDL",
+                    web_app=WebAppInfo(url=webapp_url),
+                ),
+            )
+        except Exception as e:
+            logger.warning("set_chat_menu_button failed: %s", e)
+
+    for lang, desc in _BOT_DESC.items():
+        try:
+            kwargs = {"description": desc}
+            if lang:
+                kwargs["language_code"] = lang
+            await app.bot.set_my_description(**kwargs)
+        except Exception as e:
+            logger.warning("set_my_description lang=%s failed: %s", lang, e)
+
+    for lang, sdesc in _BOT_SHORT_DESC.items():
+        try:
+            kwargs = {"short_description": sdesc}
+            if lang:
+                kwargs["language_code"] = lang
+            await app.bot.set_my_short_description(**kwargs)
+        except Exception as e:
+            logger.warning("set_my_short_description lang=%s failed: %s", lang, e)
+
+    logger.info("bot presence wired (commands + menu + descriptions, langs=%s)",
+                list(_BOT_COMMANDS.keys()))

@@ -66,6 +66,11 @@ def output_path(user_id: int, draft_id: int) -> Path:
 
 class MakeStickerBody(BaseModel):
     emoji: str
+    # Which pack this lands in. Each kind is a separate TG sticker pack:
+    #   video        — webm 512×512 ≤3s   (default)
+    #   static       — webp 512×512 still
+    #   custom_emoji — 100×100 webm or webp, lands in the user's emoji pack
+    pack_kind: str = "video"
     # Crop is in source-pixel coordinates; the frontend computes them from
     # the video's intrinsic width/height + the overlay position.
     crop_x: int | None = None
@@ -131,13 +136,25 @@ _MIME_EXT = {
 # ── JSON routes ─────────────────────────────────────────────────────────────
 
 
+def _kind_param(raw: str | None) -> str:
+    """Validate + normalise the `kind` query/body parameter."""
+    k = (raw or "video").strip().lower()
+    return k if k in ("video", "static", "custom_emoji") else "video"
+
+
 @router.get("/api/sticker_drafts")
-async def list_drafts(request: Request):
+async def list_drafts(request: Request, kind: str | None = "video"):
+    """List drafts + the pack info for the requested kind.
+
+    `kind` defaults to 'video' for backward compat. The drafts table isn't
+    kind-scoped — a draft is just a source clip; the user picks the
+    destination pack on `/make`. So the kind param only affects which
+    pack row is returned in `pack`.
+    """
     payload = await _mini._verify(request)
     _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
     drafts = await _db.sticker_draft_list(user_id)
-    # Strip server-only fields
     out = [
         {
             "id":          d["id"],
@@ -152,11 +169,24 @@ async def list_drafts(request: Request):
         }
         for d in drafts
     ]
-    pack = await _db.sticker_pack_get(user_id)
+    k = _kind_param(kind)
+    pack = await _db.sticker_pack_get(user_id, k)
     return {
-        "drafts": out,
-        "pack":   pack,
+        "drafts":     out,
+        "pack":       pack,
+        "pack_kind":  k,
     }
+
+
+@router.get("/api/sticker_packs")
+async def list_packs(request: Request) -> dict:
+    """Every pack the user owns (across kinds). Drives the kind-switcher
+    in the Mini App so we don't show packs they haven't created yet."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    rows = await _db.sticker_packs_list(user_id)
+    return {"packs": rows}
 
 
 @router.get("/api/sticker_drafts/{draft_id}/preview")
@@ -197,14 +227,43 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
                 int(body.crop_w), int(body.crop_h))
 
     await _db.sticker_draft_set_status(draft_id, "processing")
-    dst = output_path(user_id, draft_id)
+    # Different kinds produce different output containers. Keep them on
+    # different on-disk filenames so a user re-making the same draft as
+    # video + static + emoji doesn't smash one over the other.
+    pack_kind = (body.pack_kind or "video").lower()
+    if pack_kind not in ("video", "static", "custom_emoji"):
+        pack_kind = "video"
+    out_ext = {"video": "webm", "static": "webp", "custom_emoji": "webm"}[pack_kind]
+    if pack_kind == "custom_emoji":
+        # Custom emoji can be either video or static; we treat single-frame
+        # image inputs as static, everything else as video. The source mime
+        # is the cheapest signal — it was recorded at upload time.
+        d_mime = (d.get("mime_type") or "").lower()
+        if d_mime.startswith("image/") and not d_mime.startswith("image/gif"):
+            out_ext = "webp"
+    dst = OUTPUT_DIR / str(user_id) / f"{draft_id}.{out_ext}"
 
-    ok, err = await _sp.make_video_sticker(
-        src, dst,
-        start=float(body.trim_start or 0.0),
-        end=float(body.trim_end or 3.0),
-        crop=crop,
-    )
+    if pack_kind == "video":
+        ok, err = await _sp.make_video_sticker(
+            src, dst,
+            start=float(body.trim_start or 0.0),
+            end=float(body.trim_end or 3.0),
+            crop=crop,
+        )
+        sticker_format = "video"
+    elif pack_kind == "static":
+        ok, err = await _sp.make_static_sticker(
+            src, dst, crop=crop, seek_s=float(body.trim_start or 0.0),
+        )
+        sticker_format = "static"
+    else:  # custom_emoji
+        is_video = (out_ext == "webm")
+        ok, err = await _sp.make_custom_emoji_sticker(
+            src, dst, is_video=is_video, crop=crop,
+            start=float(body.trim_start or 0.0),
+            end=float(body.trim_end or 3.0),
+        )
+        sticker_format = "video" if is_video else "static"
     if not ok:
         await _db.sticker_draft_set_status(draft_id, "failed", err)
         raise HTTPException(status_code=422,
@@ -217,13 +276,15 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
         await _db.sticker_draft_set_status(draft_id, "failed", "bot not running")
         raise HTTPException(status_code=503, detail="bot not running")
 
-    pack = await _st.resolve_pack(tg_app.bot, user_id, first_name)
+    pack = await _st.resolve_pack(tg_app.bot, user_id, first_name, kind=pack_kind)
     try:
         file_id, set_url = await _st.upload_and_add(
             tg_app.bot, user_id, dst,
             emoji=(body.emoji or "🎬"),
             pack_name=pack["pack_name"],
             pack_title=pack["pack_title"],
+            sticker_format=sticker_format,
+            sticker_type=("custom_emoji" if pack_kind == "custom_emoji" else "regular"),
         )
     except TelegramError as e:
         msg = str(e)
@@ -242,6 +303,7 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
     if not pack.get("exists_in_db"):
         await _db.sticker_pack_create(
             user_id, pack["pack_name"], pack["pack_title"], set_url,
+            kind=pack_kind,
         )
     await _db.sticker_record(
         user_id=user_id,
@@ -419,7 +481,8 @@ async def upload_draft(request: Request,
 
 
 @router.post("/api/sticker_pack/rename")
-async def rename_pack(body: RenamePackBody, request: Request) -> dict:
+async def rename_pack(body: RenamePackBody, request: Request,
+                      kind: str | None = "video") -> dict:
     """Rename the caller's sticker pack on Telegram AND in the local DB.
 
     Telegram caps `set_sticker_set_title` at 64 chars; reject longer input
@@ -427,6 +490,7 @@ async def rename_pack(body: RenamePackBody, request: Request) -> dict:
     payload = await _mini._verify(request)
     _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
+    k = _kind_param(kind)
 
     new_title = (body.title or "").strip()
     if not new_title:
@@ -434,14 +498,11 @@ async def rename_pack(body: RenamePackBody, request: Request) -> dict:
     if len(new_title) > 64:
         raise HTTPException(400, "title is over 64 chars (Telegram limit)")
 
-    pack = await _db.sticker_pack_get(user_id)
+    pack = await _db.sticker_pack_get(user_id, k)
     if not pack:
         raise HTTPException(404, "no sticker pack to rename (make one sticker first)")
 
-    from .bot import get_application
-    tg_app = get_application()
-    if tg_app is None:
-        raise HTTPException(503, "bot not running")
+    tg_app = _require_bot()
 
     try:
         await tg_app.bot.set_sticker_set_title(
@@ -452,13 +513,12 @@ async def rename_pack(body: RenamePackBody, request: Request) -> dict:
         logger.warning("set_sticker_set_title failed u=%s: %s", user_id, msg)
         raise HTTPException(502, f"Telegram: {msg}")
 
-    # Mirror into the DB so subsequent /api/sticker_drafts responses
-    # reflect the new title without depending on a Telegram round-trip.
     await _db.sticker_pack_create(
         user_id=user_id,
         pack_name=pack["pack_name"],
         pack_title=new_title,
         telegram_url=pack.get("telegram_url") or f"https://t.me/addstickers/{pack['pack_name']}",
+        kind=k,
     )
     return {"ok": True, "title": new_title}
 
@@ -529,12 +589,12 @@ def _serialise_sticker(s) -> dict:
     }
 
 
-async def _resolve_pack_or_404(user_id: int):
-    """Look up the caller's pack in the local DB and refuse cleanly if
+async def _resolve_pack_or_404(user_id: int, kind: str = "video"):
+    """Look up the caller's pack of a given kind and refuse cleanly if
     they don't have one yet. Returns the local row."""
-    pack = await _db.sticker_pack_get(user_id)
+    pack = await _db.sticker_pack_get(user_id, kind)
     if not pack:
-        raise HTTPException(404, "no sticker pack yet (make one sticker first)")
+        raise HTTPException(404, f"no {kind} sticker pack yet (make one sticker first)")
     return pack
 
 
@@ -549,15 +609,16 @@ def _require_bot():
 
 
 @router.get("/api/sticker_pack/contents")
-async def pack_contents(request: Request) -> dict:
-    """Return the live contents of the caller's sticker pack — Telegram is
-    the SoT for which stickers actually exist in the set; the local
-    `stickers` table is best-effort audit only.
+async def pack_contents(request: Request, kind: str | None = "video") -> dict:
+    """Return the live contents of the caller's sticker pack for a given
+    kind. Telegram is the SoT for which stickers actually exist in the
+    set; the local `stickers` table is best-effort audit only.
     """
     payload = await _mini._verify(request)
     _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
-    pack = await _resolve_pack_or_404(user_id)
+    k = _kind_param(kind)
+    pack = await _resolve_pack_or_404(user_id, k)
     tg_app = _require_bot()
     try:
         tg_set = await tg_app.bot.get_sticker_set(name=pack["pack_name"])
@@ -630,11 +691,12 @@ async def pack_sticker_file(file_id: str, request: Request):
 
 
 @router.post("/api/sticker_pack/sticker/delete")
-async def pack_sticker_delete(body: StickerByIdBody, request: Request) -> dict:
+async def pack_sticker_delete(body: StickerByIdBody, request: Request,
+                              kind: str | None = "video") -> dict:
     payload = await _mini._verify(request)
     _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
-    await _resolve_pack_or_404(user_id)
+    await _resolve_pack_or_404(user_id, _kind_param(kind))
     tg_app = _require_bot()
     try:
         await tg_app.bot.delete_sticker_from_set(sticker=body.file_id)
@@ -644,11 +706,12 @@ async def pack_sticker_delete(body: StickerByIdBody, request: Request) -> dict:
 
 
 @router.post("/api/sticker_pack/sticker/position")
-async def pack_sticker_position(body: StickerPositionBody, request: Request) -> dict:
+async def pack_sticker_position(body: StickerPositionBody, request: Request,
+                                kind: str | None = "video") -> dict:
     payload = await _mini._verify(request)
     _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
-    await _resolve_pack_or_404(user_id)
+    await _resolve_pack_or_404(user_id, _kind_param(kind))
     tg_app = _require_bot()
     try:
         await tg_app.bot.set_sticker_position_in_set(
@@ -660,7 +723,8 @@ async def pack_sticker_position(body: StickerPositionBody, request: Request) -> 
 
 
 @router.post("/api/sticker_pack/sticker/emojis")
-async def pack_sticker_emojis(body: StickerEmojisBody, request: Request) -> dict:
+async def pack_sticker_emojis(body: StickerEmojisBody, request: Request,
+                              kind: str | None = "video") -> dict:
     payload = await _mini._verify(request)
     _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
@@ -681,7 +745,8 @@ async def pack_sticker_emojis(body: StickerEmojisBody, request: Request) -> dict
 
 
 @router.post("/api/sticker_pack/sticker/keywords")
-async def pack_sticker_keywords(body: StickerKeywordsBody, request: Request) -> dict:
+async def pack_sticker_keywords(body: StickerKeywordsBody, request: Request,
+                                kind: str | None = "video") -> dict:
     payload = await _mini._verify(request)
     _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
@@ -703,13 +768,14 @@ async def pack_sticker_keywords(body: StickerKeywordsBody, request: Request) -> 
 
 
 @router.post("/api/sticker_pack/sticker/set_cover")
-async def pack_sticker_set_cover(body: StickerByIdBody, request: Request) -> dict:
+async def pack_sticker_set_cover(body: StickerByIdBody, request: Request,
+                                  kind: str | None = "video") -> dict:
     """Use this sticker's file_id as the pack thumbnail. Telegram requires
     the thumbnail format to match the pack's sticker type."""
     payload = await _mini._verify(request)
     _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
-    pack = await _resolve_pack_or_404(user_id)
+    pack = await _resolve_pack_or_404(user_id, _kind_param(kind))
     tg_app = _require_bot()
     # Look up current pack so we can derive the right `format` arg.
     try:
@@ -738,30 +804,36 @@ async def pack_sticker_set_cover(body: StickerByIdBody, request: Request) -> dic
 
 
 @router.post("/api/sticker_pack/delete")
-async def pack_delete(body: DeletePackBody, request: Request) -> dict:
-    """Nuke the entire pack on Telegram + drop the local rows. Irreversible —
-    the caller MUST send `{confirm: true}`."""
+async def pack_delete(body: DeletePackBody, request: Request,
+                      kind: str | None = "video") -> dict:
+    """Nuke the entire pack of a given kind on Telegram + drop the local
+    row. Other kinds are unaffected. Irreversible — caller MUST send
+    `{confirm: true}`."""
     payload = await _mini._verify(request)
     _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
     if not body.confirm:
         raise HTTPException(400, "destructive — pass {\"confirm\": true}")
-    pack = await _resolve_pack_or_404(user_id)
+    k = _kind_param(kind)
+    pack = await _resolve_pack_or_404(user_id, k)
     tg_app = _require_bot()
     try:
         await tg_app.bot.delete_sticker_set(name=pack["pack_name"])
     except TelegramError as e:
-        # If the pack is already gone on TG, that's effectively success —
-        # let the local cleanup proceed.
         msg = str(e).lower()
         if "not found" not in msg and "stickerset_invalid" not in msg:
             raise HTTPException(502, f"Telegram: {e}")
-    # Clear local rows so the next /make starts a fresh pack with the same
-    # canonical name.
+    # Clear local rows for THIS kind only — other packs the user owns stay.
     import aiosqlite
     async with aiosqlite.connect(_db.DB_PATH) as dbh:
-        await dbh.execute("DELETE FROM stickers WHERE user_id = ?", (user_id,))
-        await dbh.execute("DELETE FROM sticker_packs WHERE user_id = ?", (user_id,))
+        await dbh.execute(
+            "DELETE FROM stickers WHERE user_id = ? AND pack_name = ?",
+            (user_id, pack["pack_name"]),
+        )
+        await dbh.execute(
+            "DELETE FROM sticker_packs WHERE user_id = ? AND pack_kind = ?",
+            (user_id, k),
+        )
         await dbh.commit()
     return {"ok": True}
 
@@ -1101,6 +1173,16 @@ function updateTrimLabels() {
 tStart.addEventListener('input', updateTrimLabels);
 tEnd.addEventListener('input', updateTrimLabels);
 
+// Pack-kind comes in as a `?kind=video|static|custom_emoji` query param
+// when the editor is opened from the unified Mini App's drafts list.
+// Defaults to 'video' for direct hits to /stickers/<id>/edit.
+const _editorPackKind = (() => {
+  try {
+    const k = new URLSearchParams(location.search).get('kind') || '';
+    return ['video','static','custom_emoji'].includes(k) ? k : 'video';
+  } catch (e) { return 'video'; }
+})();
+
 makeBtn.addEventListener('click', async () => {
   makeBtn.disabled = true;
   progressEl.textContent = 'Encoding sticker… (5–20s)';
@@ -1108,6 +1190,7 @@ makeBtn.addEventListener('click', async () => {
     emoji:      chosenEmoji,
     trim_start: +tStart.value,
     trim_end:   +tEnd.value,
+    pack_kind:  _editorPackKind,
   };
   try {
     const r = await api(`/api/sticker_drafts/${DRAFT_ID}/make`, {

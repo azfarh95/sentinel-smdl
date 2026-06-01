@@ -3947,6 +3947,11 @@ button.warn { background: #ff9500; color: #fff; }
 
   <div class=page id=page-stickers>
     <h1>Sticker Maker</h1>
+    <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+      <button class=sec data-kind=video onclick="stickersSwitchKind('video')" style="font-size:12px">🎬 Video</button>
+      <button class=sec data-kind=static onclick="stickersSwitchKind('static')" style="font-size:12px">🖼 Static</button>
+      <button class=sec data-kind=custom_emoji onclick="stickersSwitchKind('custom_emoji')" style="font-size:12px">😀 Emoji</button>
+    </div>
     <div class=card id=stickers-pack-card>
       <div class=empty><span class=spin></span> Loading…</div>
     </div>
@@ -4652,14 +4657,45 @@ let _stickersPackUrl = '';   // remembered between renders so click-to-copy + re
 let _stickersPackName = '';
 let _stickersPackTitle = '';
 let _stickersUploadWired = false;
+// Active pack kind across all sticker-tab calls. Switching this re-fetches
+// the pack + contents but doesn't touch the drafts list (drafts are
+// pack-kind-agnostic; the destination is chosen at /make time).
+let _stickersKind = 'video';
+
+function stickersSwitchKind(k) {
+  if (!['video','static','custom_emoji'].includes(k)) return;
+  _stickersKind = k;
+  // Active-state the segmented buttons.
+  document.querySelectorAll('#page-stickers button[data-kind]').forEach(b => {
+    b.style.background = b.dataset.kind === k ? 'var(--button)' : '';
+    b.style.color      = b.dataset.kind === k ? 'var(--button-text)' : '';
+  });
+  // Hint on the upload card so dropping a still picks the right destination
+  // even before the file is probed.
+  const dz = document.getElementById('stickers-dropzone');
+  if (dz) {
+    const hint = dz.querySelector('.meta');
+    if (hint) hint.textContent = (k === 'static')
+      ? 'Image (PNG/JPG/GIF) → static sticker · 512×512 · ≤ 512 KB'
+      : (k === 'custom_emoji')
+        ? 'Video/image → custom emoji · 100×100 · ≤ 64 KB'
+        : 'Videos / GIFs, ≤ 50 MB each. Drop multiple at once.';
+  }
+  loadStickers();
+}
 
 async function loadStickers() {
   const packEl = document.getElementById('stickers-pack-card');
   const draftsEl = document.getElementById('stickers-drafts');
-  if (!_stickersUploadWired) { _wireStickersUpload(); _stickersUploadWired = true; }
+  if (!_stickersUploadWired) {
+    _wireStickersUpload();
+    // First render: highlight the default-active kind button.
+    stickersSwitchKind(_stickersKind);
+    _stickersUploadWired = true;
+  }
   let data;
   try {
-    data = await api('/api/sticker_drafts');
+    data = await api('/api/sticker_drafts?kind=' + encodeURIComponent(_stickersKind));
   } catch (e) {
     packEl.innerHTML = '<div class=empty style="color:#e88">Load failed: ' + esc(String(e)) + '</div>';
     return;
@@ -4727,7 +4763,7 @@ async function loadStickers() {
       '<div style="color:var(--muted);font-size:11px;margin-top:2px">' + esc(_fmtStickerExpires(d.expires_at)) + '</div>' +
       err +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' +
-      '<button onclick="location.href=\\'/stickers/' + d.id + '/edit\\'">Make sticker</button>' +
+      '<button onclick="location.href=\\'/stickers/' + d.id + '/edit?kind=' + _stickersKind + '\\'">Make sticker</button>' +
       '<button class=sec onclick="stickersDeleteDraft(' + d.id + ')">Delete</button>' +
       '</div></div>';
     draftsEl.appendChild(div);
@@ -4772,7 +4808,7 @@ async function stickersRenamePack() {
   if (!title) { showErr('Title cannot be empty'); return; }
   if (title === _stickersPackTitle) return;
   try {
-    await api('/api/sticker_pack/rename', { method: 'POST', body: JSON.stringify({ title }) });
+    await api('/api/sticker_pack/rename?kind=' + encodeURIComponent(_stickersKind), { method: 'POST', body: JSON.stringify({ title }) });
     showOk('Renamed to ' + title);
     loadStickers();
   } catch (e) { showErr('Rename failed: ' + e); }
@@ -4812,7 +4848,7 @@ async function stickersLoadPackContents() {
   }
   grid.innerHTML = '<div class=empty><span class=spin></span> Loading pack contents…</div>';
   try {
-    const data = await api('/api/sticker_pack/contents');
+    const data = await api('/api/sticker_pack/contents?kind=' + encodeURIComponent(_stickersKind));
     _stickersPackContents = data;
     const stickers = data.stickers || [];
     countEl.textContent = stickers.length ? '· ' + stickers.length + ' / 120' : '';
@@ -4877,7 +4913,7 @@ async function stickersEditEmoji(btn) {
   const emojis = raw.trim().split(/\\s+/).filter(Boolean);
   if (!emojis.length) { showErr('At least one emoji'); return; }
   try {
-    await api('/api/sticker_pack/sticker/emojis', { method: 'POST',
+    await api('/api/sticker_pack/sticker/emojis?kind=' + encodeURIComponent(_stickersKind), { method: 'POST',
       body: JSON.stringify({ file_id, emojis }) });
     showOk('Emojis updated');
     stickersLoadPackContents();
@@ -4891,7 +4927,7 @@ async function stickersEditKeywords(btn) {
   if (raw == null) return;
   const keywords = raw.split(',').map(s => s.trim()).filter(Boolean);
   try {
-    await api('/api/sticker_pack/sticker/keywords', { method: 'POST',
+    await api('/api/sticker_pack/sticker/keywords?kind=' + encodeURIComponent(_stickersKind), { method: 'POST',
       body: JSON.stringify({ file_id, keywords }) });
     showOk('Keywords updated');
   } catch (e) { showErr('Update failed: ' + e); }
@@ -4901,7 +4937,7 @@ async function stickersSetCover(btn) {
   const file_id = _packCardFileId(btn);
   if (!file_id) return;
   try {
-    await api('/api/sticker_pack/sticker/set_cover', { method: 'POST',
+    await api('/api/sticker_pack/sticker/set_cover?kind=' + encodeURIComponent(_stickersKind), { method: 'POST',
       body: JSON.stringify({ file_id }) });
     showOk('Pack cover updated');
   } catch (e) { showErr('Set cover failed: ' + e); }
@@ -4912,7 +4948,7 @@ async function stickersRemoveFromPack(btn) {
   if (!file_id) return;
   if (!confirm('Remove this sticker from your pack?\\nThe pack stays; only this entry goes.')) return;
   try {
-    await api('/api/sticker_pack/sticker/delete', { method: 'POST',
+    await api('/api/sticker_pack/sticker/delete?kind=' + encodeURIComponent(_stickersKind), { method: 'POST',
       body: JSON.stringify({ file_id }) });
     showOk('Removed from pack');
     stickersLoadPackContents();
@@ -4926,7 +4962,7 @@ async function stickersDeletePack() {
   const c = prompt('Type "delete" (lowercase) to confirm:');
   if ((c || '').trim().toLowerCase() !== 'delete') { showErr('Cancelled'); return; }
   try {
-    await api('/api/sticker_pack/delete', { method: 'POST',
+    await api('/api/sticker_pack/delete?kind=' + encodeURIComponent(_stickersKind), { method: 'POST',
       body: JSON.stringify({ confirm: true }) });
     showOk('Pack deleted');
     loadStickers();
@@ -5075,7 +5111,7 @@ async function _stickersAutoMake(draftId) {
   try {
     const r = await api('/api/sticker_drafts/' + draftId + '/make', {
       method: 'POST',
-      body: JSON.stringify({ emoji, trim_start: 0, trim_end: 3 }),
+      body: JSON.stringify({ emoji, trim_start: 0, trim_end: 3, pack_kind: _stickersKind }),
     });
     showOk('Added to your pack');
     return r;

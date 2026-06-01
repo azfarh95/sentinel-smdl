@@ -192,6 +192,34 @@ async def init_db():
                 created_at   TEXT NOT NULL
             )
         """)
+        # 2026-06-01: a user can now own up to three packs simultaneously
+        # — video, static, and custom_emoji — to mirror Telegram's split of
+        # sticker formats into separate packs (TG's rule: every sticker in
+        # a set must share the same format). The old schema PK on user_id
+        # has to widen to (user_id, pack_kind). SQLite needs a table
+        # rebuild for that; we detect the old shape and migrate in place.
+        async with db.execute("PRAGMA table_info(sticker_packs)") as cur:
+            _sp_cols = {row[1] async for row in cur}
+        if "pack_kind" not in _sp_cols:
+            await db.execute("""
+                CREATE TABLE sticker_packs_v2 (
+                    user_id      INTEGER NOT NULL,
+                    pack_kind    TEXT    NOT NULL DEFAULT 'video',
+                    pack_name    TEXT    NOT NULL UNIQUE,
+                    pack_title   TEXT    NOT NULL,
+                    telegram_url TEXT,
+                    created_at   TEXT    NOT NULL,
+                    PRIMARY KEY (user_id, pack_kind)
+                )
+            """)
+            await db.execute("""
+                INSERT INTO sticker_packs_v2
+                    (user_id, pack_kind, pack_name, pack_title, telegram_url, created_at)
+                SELECT user_id, 'video', pack_name, pack_title, telegram_url, created_at
+                FROM sticker_packs
+            """)
+            await db.execute("DROP TABLE sticker_packs")
+            await db.execute("ALTER TABLE sticker_packs_v2 RENAME TO sticker_packs")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS stickers (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1237,30 +1265,57 @@ async def sticker_drafts_purge(draft_ids: list[int]) -> None:
 # ── Sticker packs ────────────────────────────────────────────────────────────
 
 
-async def sticker_pack_get(user_id: int) -> dict | None:
+_VALID_PACK_KINDS = ("video", "static", "custom_emoji")
+
+
+def _normalise_pack_kind(kind: str | None) -> str:
+    k = (kind or "video").strip().lower()
+    return k if k in _VALID_PACK_KINDS else "video"
+
+
+async def sticker_pack_get(user_id: int, kind: str = "video") -> dict | None:
+    """Look up the user's pack of a given kind. Defaults to 'video' so
+    pre-migration callers keep working unchanged."""
+    k = _normalise_pack_kind(kind)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM sticker_packs WHERE user_id = ?",
-            (int(user_id),),
+            "SELECT * FROM sticker_packs WHERE user_id = ? AND pack_kind = ?",
+            (int(user_id), k),
         ) as cur:
             row = await cur.fetchone()
         return dict(row) if row else None
 
 
+async def sticker_packs_list(user_id: int) -> list[dict]:
+    """Every pack the user owns (across kinds), newest first."""
+    out: list[dict] = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM sticker_packs WHERE user_id = ? ORDER BY created_at DESC",
+            (int(user_id),),
+        ) as cur:
+            async for row in cur:
+                out.append(dict(row))
+    return out
+
+
 async def sticker_pack_create(user_id: int, pack_name: str,
-                               pack_title: str, telegram_url: str) -> None:
+                               pack_title: str, telegram_url: str,
+                               kind: str = "video") -> None:
+    k = _normalise_pack_kind(kind)
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO sticker_packs
-                (user_id, pack_name, pack_title, telegram_url, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
+                (user_id, pack_kind, pack_name, pack_title, telegram_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, pack_kind) DO UPDATE SET
                 pack_name    = excluded.pack_name,
                 pack_title   = excluded.pack_title,
                 telegram_url = excluded.telegram_url
-        """, (int(user_id), pack_name, pack_title, telegram_url, now))
+        """, (int(user_id), k, pack_name, pack_title, telegram_url, now))
         await db.commit()
 
 

@@ -44,23 +44,37 @@ def _slug(s: str) -> str:
     return s[:32] or "user"
 
 
-async def resolve_pack(bot: Bot, user_id: int, first_name: str | None) -> dict:
-    """Return the user's pack info, creating the canonical name if missing.
-    Does NOT call Telegram yet — that happens on first sticker. Returns
-    {pack_name, pack_title, telegram_url, exists_in_db}."""
-    existing = await _db.sticker_pack_get(user_id)
+# Per-kind naming + title suffix so the three packs are obviously distinct
+# both as URLs and in Telegram's UI.
+_KIND_SUFFIX = {
+    "video":        ("pack",  "SMDL Stickers"),
+    "static":       ("img",   "SMDL Stickers (Images)"),
+    "custom_emoji": ("emoji", "SMDL Emoji"),
+}
+
+
+async def resolve_pack(bot: Bot, user_id: int, first_name: str | None,
+                       kind: str = "video") -> dict:
+    """Return the user's pack info for a given KIND, creating the canonical
+    name if missing. Does NOT call Telegram yet — that happens on first
+    sticker. Returns {pack_name, pack_title, telegram_url, pack_kind,
+    exists_in_db}."""
+    k = kind if kind in _KIND_SUFFIX else "video"
+    existing = await _db.sticker_pack_get(user_id, k)
     if existing:
-        return {**existing, "exists_in_db": True}
+        return {**existing, "pack_kind": k, "exists_in_db": True}
 
     bot_username = await get_bot_username(bot)
     slug = _slug(first_name or f"u{user_id}")
-    pack_name  = f"{slug}_pack_by_{bot_username}"
-    pack_title = f"{(first_name or 'My').strip()}'s SMDL Stickers"
+    suffix, title_suffix = _KIND_SUFFIX[k]
+    pack_name  = f"{slug}_{suffix}_by_{bot_username}"
+    pack_title = f"{(first_name or 'My').strip()}'s {title_suffix}"
     telegram_url = f"https://t.me/addstickers/{pack_name}"
     return {
         "pack_name":    pack_name,
         "pack_title":   pack_title,
         "telegram_url": telegram_url,
+        "pack_kind":    k,
         "exists_in_db": False,
     }
 
@@ -80,33 +94,42 @@ async def _set_exists(bot: Bot, pack_name: str) -> bool:
 async def upload_and_add(
     bot: Bot,
     user_id: int,
-    webm_path: Path,
+    file_path: Path,
     emoji: str,
     pack_name: str,
     pack_title: str,
+    *,
+    sticker_format: str = "video",
+    sticker_type: str = "regular",
 ) -> tuple[str, str]:
-    """Upload a webm, create-or-append to the user's sticker set.
+    """Upload a sticker file, create-or-append to the user's sticker set.
+
+    sticker_format: 'video' (webm), 'static' (webp/png), or 'animated' (tgs).
+    sticker_type:   'regular' or 'custom_emoji'. Custom-emoji packs are a
+                    separate pack-type on Telegram and can never be mixed
+                    with regular sticker packs.
 
     Returns (telegram_file_id, set_url).
     Raises TelegramError on hard failure.
     """
-    # 1. Upload the raw file. upload_sticker_file gives back a File with
-    #    a reusable file_id that the create/add calls accept by reference.
-    with open(webm_path, "rb") as f:
+    # 1. Upload the raw file. upload_sticker_file returns a File with a
+    #    reusable file_id that the create/add calls accept by reference.
+    with open(file_path, "rb") as f:
         uploaded = await bot.upload_sticker_file(
             user_id=user_id,
-            sticker=InputFile(f, filename=webm_path.name),
-            sticker_format="video",
+            sticker=InputFile(f, filename=file_path.name),
+            sticker_format=sticker_format,
         )
     file_id = uploaded.file_id
 
     sticker_obj = InputSticker(
         sticker=file_id,
-        format="video",
+        format=sticker_format,
         emoji_list=[emoji or "🎬"],
     )
 
-    # 2. Add or create.
+    # 2. Add or create. Custom-emoji packs need `sticker_type` flag at
+    #    creation; can't be retro-fitted on an existing regular pack.
     if await _set_exists(bot, pack_name):
         await bot.add_sticker_to_set(
             user_id=user_id,
@@ -114,12 +137,15 @@ async def upload_and_add(
             sticker=sticker_obj,
         )
     else:
-        await bot.create_new_sticker_set(
+        kwargs = dict(
             user_id=user_id,
             name=pack_name,
             title=pack_title,
             stickers=[sticker_obj],
         )
+        if sticker_type == "custom_emoji":
+            kwargs["sticker_type"] = "custom_emoji"
+        await bot.create_new_sticker_set(**kwargs)
 
     set_url = f"https://t.me/addstickers/{pack_name}"
     return file_id, set_url

@@ -28,6 +28,13 @@ STICKER_MAX_BYTES   = 256 * 1024
 STICKER_MAX_DUR_S   = 3.0
 STICKER_FRAME_PX    = 512
 STICKER_MAX_FPS     = 30
+# Static stickers — single-frame WEBP, same 512×512 box, 512 KB ceiling.
+STATIC_MAX_BYTES    = 512 * 1024
+# Custom-emoji stickers — TG requires exactly 100×100. Otherwise the same
+# format constraints apply as regular video/static, just at smaller scale.
+EMOJI_FRAME_PX      = 100
+EMOJI_MAX_BYTES_VIDEO  = 64 * 1024
+EMOJI_MAX_BYTES_STATIC = 64 * 1024
 
 # Try these bitrates in order. VP9 + transparent padding is heavy; if a 3-second
 # busy clip can't fit at 80k, we surface the failure to the user (they should
@@ -198,4 +205,149 @@ async def make_video_sticker(
         f"Output >256KB even at lowest bitrate "
         f"(last size: {last_size} bytes). "
         "Try a shorter clip or a simpler scene."
+    )
+
+
+def _build_static_filter(crop: tuple[int, int, int, int] | None, size_px: int) -> str:
+    """Same shape as _build_filter but without the fps cap (static frames
+    don't have one) and targeting a configurable square size so we can
+    share this between regular static (512×512) and custom-emoji (100×100)."""
+    parts: list[str] = []
+    if crop:
+        cx, cy, cw, ch = crop
+        cw = max(8, int(cw)); ch = max(8, int(ch))
+        cx = max(0, int(cx)); cy = max(0, int(cy))
+        parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
+    parts.append(
+        f"scale={size_px}:{size_px}:force_original_aspect_ratio=increase"
+    )
+    parts.append(f"crop={size_px}:{size_px}")
+    return ",".join(parts)
+
+
+async def make_static_sticker(
+    src: Path,
+    dst: Path,
+    *,
+    crop: tuple[int, int, int, int] | None = None,
+    size_px: int = STICKER_FRAME_PX,
+    max_bytes: int = STATIC_MAX_BYTES,
+    seek_s: float = 0.0,
+) -> tuple[bool, str | None]:
+    """Encode a single frame from `src` into a Telegram static sticker WEBP.
+
+    Static stickers can be sourced from images (PNG/JPG/GIF first frame) or
+    pulled out of a video at `seek_s`. WEBP quality is dropped on a ladder
+    until the result fits under `max_bytes` (the Telegram 512 KB ceiling for
+    regular static, 64 KB for custom emoji)."""
+    if not src.exists():
+        return False, f"source not found: {src}"
+    if not shutil.which("ffmpeg"):
+        return False, "ffmpeg not installed in container"
+    vf = _build_static_filter(crop, size_px)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    last_size = 0
+    last_err = ""
+    for quality in (90, 75, 60, 45, 30):
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{seek_s:.3f}",
+            "-i", str(src),
+            "-frames:v", "1",
+            "-vf", vf,
+            "-c:v", "libwebp",
+            "-quality", str(quality),
+            "-pix_fmt", "yuv420p",
+            "-an",
+            str(dst),
+        ]
+        loop = asyncio.get_running_loop()
+        try:
+            rc, stderr = await loop.run_in_executor(None, lambda: _run(cmd, 30))
+        except Exception as e:
+            return False, f"ffmpeg crashed: {e!r}"
+        if rc != 0:
+            last_err = stderr.decode("utf-8", errors="replace")[-400:]
+            logger.warning("ffmpeg(static) rc=%s q=%s on %s: %s",
+                           rc, quality, src.name, last_err[:200])
+            return False, f"ffmpeg failed: {last_err[-200:]}"
+        try:
+            last_size = dst.stat().st_size
+        except FileNotFoundError:
+            return False, "ffmpeg ran but produced no output"
+        if last_size <= max_bytes:
+            logger.info("static sticker ok: %s q=%s → %d bytes",
+                        src.name, quality, last_size)
+            return True, None
+        logger.info("static too big at q=%s: %d > %d", quality, last_size, max_bytes)
+    return False, (
+        f"Output > {max_bytes} bytes even at quality 30 "
+        f"(last size: {last_size}). Pick a simpler frame."
+    )
+
+
+async def make_custom_emoji_sticker(
+    src: Path,
+    dst: Path,
+    *,
+    is_video: bool,
+    crop: tuple[int, int, int, int] | None = None,
+    start: float = 0.0,
+    end: float | None = None,
+) -> tuple[bool, str | None]:
+    """100×100 variant for custom-emoji packs. Routes to either the video or
+    static encoder with the smaller frame box + smaller byte ceiling."""
+    if is_video:
+        # Reuse the video path but target 100×100. The existing
+        # make_video_sticker hard-codes STICKER_FRAME_PX; we inline a
+        # smaller variant rather than expose another knob.
+        if not src.exists():
+            return False, f"source not found: {src}"
+        if not shutil.which("ffmpeg"):
+            return False, "ffmpeg not installed in container"
+        duration = STICKER_MAX_DUR_S
+        if end is not None and end > start:
+            duration = min(end - start, STICKER_MAX_DUR_S)
+        if duration <= 0:
+            return False, "trim window has zero duration"
+        # Crop+scale chain manually because the helper above bakes in
+        # STICKER_FRAME_PX. Same shape, smaller target.
+        vf_parts: list[str] = []
+        if crop:
+            cx, cy, cw, ch = crop
+            vf_parts.append(f"crop={max(8,int(cw))}:{max(8,int(ch))}:{max(0,int(cx))}:{max(0,int(cy))}")
+        vf_parts.append(f"scale={EMOJI_FRAME_PX}:{EMOJI_FRAME_PX}:force_original_aspect_ratio=increase")
+        vf_parts.append(f"crop={EMOJI_FRAME_PX}:{EMOJI_FRAME_PX}")
+        vf_parts.append(f"fps={STICKER_MAX_FPS}")
+        vf = ",".join(vf_parts)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        last_size = 0; last_err = ""
+        for bitrate in ("80k", "60k", "40k", "30k"):
+            cmd = [
+                "ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(src),
+                "-t", f"{duration:.3f}", "-vf", vf,
+                "-c:v", "libvpx-vp9", "-b:v", bitrate, "-crf", "32",
+                "-an", "-pix_fmt", "yuv420p",
+                "-deadline", "good", "-cpu-used", "2", "-row-mt", "1",
+                str(dst),
+            ]
+            loop = asyncio.get_running_loop()
+            try:
+                rc, stderr = await loop.run_in_executor(None, lambda: _run(cmd, 60))
+            except Exception as e:
+                return False, f"ffmpeg crashed: {e!r}"
+            if rc != 0:
+                last_err = stderr.decode("utf-8", errors="replace")[-400:]
+                return False, f"ffmpeg failed: {last_err[-200:]}"
+            try: last_size = dst.stat().st_size
+            except FileNotFoundError: return False, "ffmpeg ran but produced no output"
+            if last_size <= EMOJI_MAX_BYTES_VIDEO:
+                return True, None
+        return False, (f"Custom-emoji video > {EMOJI_MAX_BYTES_VIDEO} bytes "
+                       f"even at lowest bitrate (last: {last_size}).")
+    # Static path: single-frame, 100×100 WEBP, 64 KB ceiling.
+    return await make_static_sticker(
+        src, dst, crop=crop,
+        size_px=EMOJI_FRAME_PX, max_bytes=EMOJI_MAX_BYTES_STATIC,
+        seek_s=start,
     )

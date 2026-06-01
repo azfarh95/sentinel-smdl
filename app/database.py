@@ -351,6 +351,26 @@ async def init_db():
                 UNIQUE(provider, subject)
             )
         """)
+        # ── Twitch identities (separate from generic oauth_identities) ─────
+        # Twitch returns richer per-user metadata than generic OIDC and we
+        # want fast lookup-by-login (the channel name from a t.tv URL). The
+        # streamer-consent table joins against twitch_user_id.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS twitch_identities (
+                twitch_user_id    TEXT PRIMARY KEY,
+                twitch_login      TEXT NOT NULL,
+                twitch_display    TEXT,
+                broadcaster_type  TEXT,
+                email             TEXT,
+                profile_image_url TEXT,
+                first_seen        TEXT NOT NULL,
+                last_seen         TEXT NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_twitch_identities_login
+            ON twitch_identities(twitch_login)
+        """)
         await db.commit()
 
 

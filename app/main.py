@@ -11,6 +11,7 @@ from . import edition
 from . import file_serve
 from . import interceptor  # noqa: F401 — triggers plugin auto-load at startup
 from . import auth_google
+from . import auth_twitch
 from . import iptv
 from . import iptv_routes
 from . import license_routes
@@ -226,6 +227,7 @@ app.include_router(iptv_routes.router)
 app.include_router(license_routes.router)
 app.include_router(premium_routes.router)
 app.include_router(auth_google.router)
+app.include_router(auth_twitch.router)
 app.include_router(pwa_routes.router)
 
 

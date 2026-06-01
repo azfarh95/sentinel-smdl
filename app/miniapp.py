@@ -5072,8 +5072,18 @@ async function stickersDoLookup() {
     const ownership = data.owned_by_us
       ? '✓ This bot owns this pack — switch to that kind to edit it fully.'
       : '🔒 Read-only — pack owned by another bot. Clone individual stickers into yours to edit.';
+    // Sniff what the bulk-clone destinations would be from the sticker_type
+    // and the first sticker's format. Hide the bulk button entirely on
+    // packs of all-animated stickers (nothing to clone).
+    const cloneAble = stickers.some(s => !s.is_animated);
+    const bulkBtns = cloneAble
+      ? ' · <button class=sec onclick="stickersCloneWholePack(\\'video\\')" style="font-size:11px;padding:3px 8px">📥 Clone all → Video</button>'
+        + ' <button class=sec onclick="stickersCloneWholePack(\\'static\\')" style="font-size:11px;padding:3px 8px">📥 → Static</button>'
+        + ' <button class=sec onclick="stickersCloneWholePack(\\'custom_emoji\\')" style="font-size:11px;padding:3px 8px">📥 → 😀 Emoji</button>'
+      : '';
     status.innerHTML = esc(ownership) + ' · ' + stickers.length + ' sticker' + (stickers.length === 1 ? '' : 's') +
-      ' · <a href="#" id=stickers-lookup-tg style="color:var(--accent)">' + esc(data.url) + '</a>';
+      ' · <a href="#" id=stickers-lookup-tg style="color:var(--accent)">' + esc(data.url) + '</a>' +
+      bulkBtns;
     const link = document.getElementById('stickers-lookup-tg');
     if (link) link.addEventListener('click', ev => {
       ev.preventDefault();
@@ -5135,6 +5145,48 @@ function _renderLookupSticker(s, idx, packData) {
   actions.innerHTML = buttons || '<span class=meta style="font-size:11px;color:var(--muted)">animated — clone not supported</span>';
   card.appendChild(actions);
   return card;
+}
+
+async function stickersCloneWholePack(targetKind) {
+  if (!_stickersLookupData) { showErr('Look up a pack first'); return; }
+  const src = _stickersLookupData;
+  const compatibleCount = (src.stickers || []).filter(s => {
+    if (s.is_animated) return false;
+    if (targetKind === 'custom_emoji') return true;
+    const srcFmt = s.is_video ? 'video' : 'static';
+    return srcFmt === targetKind;
+  }).length;
+  if (!compatibleCount) {
+    showErr('No compatible stickers for target ' + targetKind);
+    return;
+  }
+  const msg = 'Clone ~' + compatibleCount + ' sticker(s) from "' + src.title + '" into your ' + targetKind + ' pack?\\nEach source sticker keeps its emoji. Incompatible ones are skipped.';
+  if (!confirm(msg)) return;
+  // The request can take a long time for a big pack (1–2s per sticker
+  // at TG's rate). Pop a banner so the user knows we're working.
+  const status = document.getElementById('stickers-lookup-status');
+  const prev = status.innerHTML;
+  status.innerHTML = '<span class=spin></span> Cloning ' + compatibleCount + ' sticker(s)… this can take a minute.';
+  try {
+    const r = await api('/api/sticker_pack/clone_pack', {
+      method: 'POST',
+      body: JSON.stringify({ source: src.name, target_kind: targetKind, limit: 50 }),
+    });
+    let summary = '✓ Added ' + r.added + ' · skipped ' + r.skipped;
+    if (r.truncated) summary += ' · capped at ' + r.processed + ' of ' + r.source_total + ' (re-run to continue)';
+    if (r.errors && r.errors.length) summary += ' · ' + r.errors.length + ' error(s)';
+    showOk(summary);
+    if (r.errors && r.errors.length) {
+      // Log to console so the user can inspect; toasting all of them
+      // would be noisy.
+      console.warn('clone_pack errors:', r.errors);
+    }
+    if (_stickersKind === targetKind) loadStickers();
+  } catch (e) {
+    showErr('Bulk clone failed: ' + e);
+  } finally {
+    status.innerHTML = prev;
+  }
 }
 
 async function stickersCloneTo(btn, targetKind) {

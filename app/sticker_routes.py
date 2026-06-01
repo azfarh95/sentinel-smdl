@@ -122,6 +122,19 @@ class CloneStickerBody(BaseModel):
     emoji: str = "🎬"
 
 
+class ClonePackBody(BaseModel):
+    # URL or name of the source pack. Same shapes accepted as the lookup
+    # endpoint (t.me/addstickers/<name>, tg://addstickers?set=<name>, or
+    # bare <name>).
+    source: str
+    # video / static / custom_emoji
+    target_kind: str = "video"
+    # Hard cap on stickers cloned per call. Telegram's per-set ceiling is
+    # 120; we default lower to keep the request inside reasonable time
+    # budgets (CF tunnel + proxy timeouts). Caller can retry for more.
+    limit: int = 50
+
+
 class FromDownloadBody(BaseModel):
     # Absolute path or a path under DOWNLOADS_DIR — the upload-from-download
     # flow trusts paths that come from the user's own download history (they
@@ -577,45 +590,35 @@ async def lookup_sticker_set(request: Request, name: str | None = "") -> dict:
     }
 
 
-@router.post("/api/sticker_pack/clone_sticker")
-async def clone_sticker(body: CloneStickerBody, request: Request) -> dict:
-    """Copy a sticker we don't own into a pack we do own.
+def _sniff_sticker_format(data: bytes) -> tuple[str, str] | None:
+    """Magic-byte sniff for the formats Telegram supports as stickers.
+    Returns (sticker_format, file_extension) or None on no match."""
+    if data[:4] == b"\x1aE\xdf\xa3":                   # EBML / WebM
+        return "video", ".webm"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":  # RIFF WEBP
+        return "static", ".webp"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":               # PNG
+        return "static", ".png"
+    return None
 
-    Source can come from any TG pack the bot can see (effectively all
-    public packs). We pull the bytes via get_file → download_as_bytearray
-    → re-upload via the existing pack-create/append code path. The result
-    is a brand-new sticker the user has full control over.
 
-    target_kind must match the source's format:
-      source video → 'video' or 'custom_emoji' (custom_emoji video flag)
-      source static → 'static' or 'custom_emoji' (custom_emoji static flag)
-    """
-    payload = await _mini._verify(request)
-    _mini.require_scope(payload, "smdl.stickers")
-    user_id = int(payload["user"]["id"])
-    first_name = (payload.get("user") or {}).get("first_name")
-    target_kind = _kind_param(body.target_kind)
-    tg_app = _require_bot()
-    # Look up the source file so we can sniff its format + size.
+async def _clone_one_sticker(tg_app, user_id: int, first_name: str | None,
+                              source_file_id: str, target_kind: str,
+                              emoji: str) -> dict:
+    """Fetch one sticker by file_id, re-upload into the caller's pack
+    of `target_kind`. Returns a result dict; raises HTTPException on
+    fatal errors so the single-clone endpoint can propagate unchanged."""
     try:
-        src_file = await tg_app.bot.get_file(body.source_file_id)
+        src_file = await tg_app.bot.get_file(source_file_id)
         data = bytes(await src_file.download_as_bytearray())
     except TelegramError as e:
         raise HTTPException(404, f"source sticker not fetchable: {e}")
     if not data:
         raise HTTPException(404, "source sticker is empty")
-    # Detect source format. Same magic-byte sniff as the pack-proxy.
-    if data[:4] == b"\x1aE\xdf\xa3":
-        src_format = "video";  ext = ".webm"
-    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        src_format = "static"; ext = ".webp"
-    elif data[:8] == b"\x89PNG\r\n\x1a\n":
-        src_format = "static"; ext = ".png"
-    else:
+    sniff = _sniff_sticker_format(data)
+    if sniff is None:
         raise HTTPException(415, "unsupported source format (not webm/webp/png)")
-    # Pick the target sticker_format from kind + source. Custom emoji
-    # packs can hold either video or static stickers; the format flag
-    # on the InputSticker controls which.
+    src_format, ext = sniff
     if target_kind == "custom_emoji":
         target_sticker_format = src_format
     else:
@@ -625,8 +628,6 @@ async def clone_sticker(body: CloneStickerBody, request: Request) -> dict:
                 f"target_kind={target_kind} is incompatible with source "
                 f"format={src_format}")
         target_sticker_format = src_format
-    # Write to a scratch file under DRAFTS_DIR — re-uses the per-user
-    # tree the rest of the code already mounts.
     import uuid as _uuid
     scratch_dir = DRAFTS_DIR / str(user_id)
     scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -637,7 +638,7 @@ async def clone_sticker(body: CloneStickerBody, request: Request) -> dict:
         try:
             file_id, set_url = await _st.upload_and_add(
                 tg_app.bot, user_id, scratch,
-                emoji=(body.emoji or "🎬"),
+                emoji=(emoji or "🎬"),
                 pack_name=pack["pack_name"],
                 pack_title=pack["pack_title"],
                 sticker_format=target_sticker_format,
@@ -655,19 +656,122 @@ async def clone_sticker(body: CloneStickerBody, request: Request) -> dict:
             )
         await _db.sticker_record(
             user_id=user_id, pack_name=pack["pack_name"],
-            source_draft_id=None, emoji=(body.emoji or "🎬"),
+            source_draft_id=None, emoji=(emoji or "🎬"),
             telegram_file_id=file_id, webm_path=str(scratch),
         )
         return {
-            "ok":             True,
             "file_id":        file_id,
             "set_url":        set_url,
-            "target_kind":    target_kind,
             "target_format":  target_sticker_format,
         }
     finally:
         try: scratch.unlink(missing_ok=True)
         except Exception: pass
+
+
+@router.post("/api/sticker_pack/clone_sticker")
+async def clone_sticker(body: CloneStickerBody, request: Request) -> dict:
+    """Copy a sticker we don't own into a pack we do own."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    first_name = (payload.get("user") or {}).get("first_name")
+    target_kind = _kind_param(body.target_kind)
+    tg_app = _require_bot()
+    r = await _clone_one_sticker(tg_app, user_id, first_name,
+                                  body.source_file_id, target_kind, body.emoji)
+    return {"ok": True, "target_kind": target_kind, **r}
+
+
+@router.post("/api/sticker_pack/clone_pack")
+async def clone_pack(body: ClonePackBody, request: Request) -> dict:
+    """Clone every (compatible) sticker from `body.source` into the caller's
+    pack of `body.target_kind`. Preserves each source sticker's emoji.
+
+    What this does:
+      - Looks up the source pack (`get_sticker_set`).
+      - For each sticker, attempts a single clone via _clone_one_sticker.
+      - Skips anything incompatible (animated, wrong format for the
+        target kind) and counts it.
+      - Caps at `body.limit` to keep the request inside reasonable time
+        budgets — caller can re-issue with more.
+    Returns: {added, skipped, errors[], target_kind, target_url}.
+
+    What this does NOT do:
+      - Create a SEPARATE per-source pack — clones land in the caller's
+        single pack-of-kind (so capacity is shared with their other
+        stickers). The TG ceiling of 120 per pack still applies; if it
+        bites mid-batch, the remaining clones surface in `errors[]` and
+        the caller can free space + retry.
+    """
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    first_name = (payload.get("user") or {}).get("first_name")
+    target_kind = _kind_param(body.target_kind)
+    tg_app = _require_bot()
+
+    pack_name = _parse_pack_name(body.source)
+    if not pack_name:
+        raise HTTPException(400, "source is required")
+    try:
+        src_set = await tg_app.bot.get_sticker_set(name=pack_name)
+    except TelegramError as e:
+        msg = str(e).lower()
+        if "not found" in msg or "stickerset_invalid" in msg:
+            raise HTTPException(404, f"source pack '{pack_name}' not found")
+        raise HTTPException(502, f"Telegram: {e}")
+
+    limit = max(1, min(int(body.limit or 50), 120))
+    stickers = list(src_set.stickers or [])[:limit]
+    added = 0
+    skipped = 0
+    errors: list[dict] = []
+    target_url: str | None = None
+    for idx, s in enumerate(stickers):
+        if getattr(s, "is_animated", False):
+            skipped += 1
+            errors.append({"index": idx, "reason": "animated stickers can't be cloned"})
+            continue
+        # Compatibility precheck without re-downloading bytes.
+        src_format = "video" if getattr(s, "is_video", False) else "static"
+        if target_kind != "custom_emoji":
+            if (target_kind == "video" and src_format != "video"
+                    or target_kind == "static" and src_format != "static"):
+                skipped += 1
+                errors.append({"index": idx,
+                               "reason": f"{src_format} sticker can't clone into {target_kind} pack"})
+                continue
+        try:
+            r = await _clone_one_sticker(
+                tg_app, user_id, first_name,
+                s.file_id, target_kind,
+                emoji=(getattr(s, "emoji", None) or "🎬"),
+            )
+            added += 1
+            target_url = r["set_url"]
+        except HTTPException as e:
+            errors.append({"index": idx, "reason": str(e.detail)})
+            # STICKERS_TOO_MUCH from TG means the target pack hit 120.
+            # No point hammering further calls — bail and surface.
+            if "TOO_MUCH" in str(e.detail).upper() or "STICKERS_TOO_MUCH" in str(e.detail).upper():
+                errors.append({"index": idx,
+                               "reason": "target pack is full (120 sticker limit) — remove some and retry"})
+                break
+        except Exception as e:
+            errors.append({"index": idx, "reason": f"{type(e).__name__}: {e}"})
+    truncated = len(src_set.stickers or []) > len(stickers)
+    return {
+        "ok":          True,
+        "added":       added,
+        "skipped":     skipped,
+        "errors":      errors,
+        "target_kind": target_kind,
+        "target_url":  target_url,
+        "source_total":  len(src_set.stickers or []),
+        "processed":     len(stickers),
+        "truncated":     truncated,
+    }
 
 
 # ── Smart trim (ffmpeg scene-detect → "best" 3s window) ────────────────────

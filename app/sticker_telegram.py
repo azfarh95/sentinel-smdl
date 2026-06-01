@@ -109,21 +109,27 @@ async def upload_and_add(
                     separate pack-type on Telegram and can never be mixed
                     with regular sticker packs.
 
-    Returns (telegram_file_id, set_url).
+    Returns (telegram_file_id, set_url). The returned file_id is the
+    PACK-BOUND sticker id (i.e. the one inside the just-created/extended
+    set), NOT the upload file_id — that distinction matters for
+    `send_sticker`, which renders the pack-bound id as a real sticker but
+    treats the raw-upload id as a .webm/.webp attachment.
     Raises TelegramError on hard failure.
     """
-    # 1. Upload the raw file. upload_sticker_file returns a File with a
-    #    reusable file_id that the create/add calls accept by reference.
+    # 1. Upload the raw file. The file_id returned here represents the
+    #    RAW UPLOAD — usable as a reference in add/create calls, but NOT
+    #    a sticker-set member yet. send_sticker(file_id=<upload_id>) ends
+    #    up rendering as a .webm document attachment in chats.
     with open(file_path, "rb") as f:
         uploaded = await bot.upload_sticker_file(
             user_id=user_id,
             sticker=InputFile(f, filename=file_path.name),
             sticker_format=sticker_format,
         )
-    file_id = uploaded.file_id
+    upload_file_id = uploaded.file_id
 
     sticker_obj = InputSticker(
-        sticker=file_id,
+        sticker=upload_file_id,
         format=sticker_format,
         emoji_list=[emoji or "🎬"],
     )
@@ -147,5 +153,18 @@ async def upload_and_add(
             kwargs["sticker_type"] = "custom_emoji"
         await bot.create_new_sticker_set(**kwargs)
 
+    # 3. Resolve the pack-bound file_id. add/create don't return it — we
+    #    have to re-read the set and grab the last sticker (TG always
+    #    appends new stickers at the end). If anything goes wrong here,
+    #    fall back to the upload file_id — the sticker IS in the pack
+    #    even if the preview render is degraded.
+    pack_file_id = upload_file_id
+    try:
+        tg_set = await bot.get_sticker_set(name=pack_name)
+        if tg_set and getattr(tg_set, "stickers", None):
+            pack_file_id = tg_set.stickers[-1].file_id
+    except Exception as e:
+        logger.warning("post-add set re-read failed for %s: %s", pack_name, e)
+
     set_url = f"https://t.me/addstickers/{pack_name}"
-    return file_id, set_url
+    return pack_file_id, set_url

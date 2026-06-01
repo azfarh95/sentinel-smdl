@@ -3976,13 +3976,14 @@ button.warn { background: #ff9500; color: #fff; }
       <div class=empty><span class=spin></span> Loading…</div>
     </div>
     <div class=card style="margin-top:10px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
         <span style="font-weight:600">Add to your pack</span>
         <span style="flex:1"></span>
-        <label class=meta style="font-size:11px;display:flex;align-items:center;gap:4px;cursor:pointer">
-          <input type=checkbox id=stickers-automake checked> Auto-make if ready
-        </label>
+        <span class=pill data-mode=instant onclick="stickersSetMode('instant')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">⚡ Instant</span>
+        <span class=pill data-mode=manual onclick="stickersSetMode('manual')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">✏️ Manual</span>
+        <input type=text id=stickers-default-emoji maxlength=8 value="🎬" title="Default emoji used in Instant mode" style="width:54px;padding:4px 6px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:18px;text-align:center">
       </div>
+      <div class=meta id=stickers-mode-hint style="font-size:11px;margin-bottom:8px;color:var(--muted)"></div>
       <input type=file id=stickers-file accept="video/*,image/gif" multiple style="display:none">
       <input type=file id=stickers-camera accept="video/*" capture="environment" style="display:none">
       <div id=stickers-dropzone style="border:2px dashed var(--separator);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s">
@@ -4749,6 +4750,8 @@ async function loadStickers() {
       b.style.background = active ? 'var(--button)' : '';
       b.style.color      = active ? 'var(--button-text)' : '';
     });
+    // Reflect mode persisted across sessions.
+    stickersSetMode(_stickersMode);
   }
   let data;
   try {
@@ -5237,6 +5240,47 @@ async function stickersDeletePack() {
 
 let _stickersUploadQueue = [];   // pending File objects
 let _stickersUploadActive = false;
+// Mode: 'instant' = upload → /make → DM, skipping the editor entirely.
+//       'manual'  = drafts queue (current behavior), user clicks edit.
+// Persists across sessions in localStorage. Default = instant for the
+// casual single-tap flow that's most users' actual intent.
+let _stickersMode = 'instant';
+try {
+  const saved = localStorage.getItem('smdl_stickers_mode');
+  if (saved === 'instant' || saved === 'manual') _stickersMode = saved;
+  const savedEmoji = localStorage.getItem('smdl_stickers_default_emoji');
+  if (savedEmoji) document.addEventListener('DOMContentLoaded', () => {
+    const el = document.getElementById('stickers-default-emoji');
+    if (el) el.value = savedEmoji;
+  });
+} catch (e) {}
+
+function stickersSetMode(m) {
+  if (m !== 'instant' && m !== 'manual') return;
+  _stickersMode = m;
+  try { localStorage.setItem('smdl_stickers_mode', m); } catch (e) {}
+  document.querySelectorAll('#page-stickers .pill[data-mode]').forEach(el => {
+    const on = el.dataset.mode === m;
+    el.style.background = on ? '#284' : '#222';
+    el.style.borderColor = on ? '#284' : '#333';
+    el.style.color = on ? '#dfd' : '#bbb';
+  });
+  // Default-emoji input is only meaningful in instant mode; in manual the
+  // editor's per-sticker emoji picker takes over.
+  const emojiInput = document.getElementById('stickers-default-emoji');
+  if (emojiInput) emojiInput.style.display = m === 'instant' ? '' : 'none';
+  const hint = document.getElementById('stickers-mode-hint');
+  if (hint) hint.textContent = m === 'instant'
+    ? '⚡ Upload → convert with sane defaults (centre crop, first 3s) → add to your ' + _stickersKind + ' pack → bot DMs you the sticker. Zero-tap after the drop.'
+    : '✏️ Upload creates a draft. Tap "Make sticker" on a draft to open the editor (scrubber, crop, emoji picker).';
+}
+
+// Persist default emoji on change.
+document.addEventListener('input', e => {
+  if (e.target && e.target.id === 'stickers-default-emoji') {
+    try { localStorage.setItem('smdl_stickers_default_emoji', e.target.value || '🎬'); } catch (err) {}
+  }
+});
 
 function _stickersQueuePillUpdate() {
   const pill = document.getElementById('stickers-queue-pill');
@@ -5327,57 +5371,6 @@ function _wireStickersUpload() {
   });
 }
 
-// Probe a file client-side to decide if it can skip the editor. We default
-// to "ready" when the metadata says 512x512 AND duration ≤ 3.1s (small
-// fudge for rounding) AND the user hasn't disabled the auto-make checkbox.
-async function _stickersProbeFile(file) {
-  return await new Promise(resolve => {
-    if (!file.type || !file.type.startsWith('video/')) {
-      resolve({ width: null, height: null, duration: null });
-      return;
-    }
-    const v = document.createElement('video');
-    v.preload = 'metadata';
-    v.muted = true;
-    v.playsInline = true;
-    const url = URL.createObjectURL(file);
-    v.src = url;
-    const cleanup = () => { try { URL.revokeObjectURL(url); } catch (e) {} };
-    v.addEventListener('loadedmetadata', () => {
-      const out = { width: v.videoWidth, height: v.videoHeight, duration: v.duration };
-      cleanup(); resolve(out);
-    }, { once: true });
-    v.addEventListener('error', () => { cleanup(); resolve({ width: null, height: null, duration: null }); }, { once: true });
-    setTimeout(() => { cleanup(); resolve({ width: null, height: null, duration: null }); }, 3000);
-  });
-}
-
-function _stickersAutoMakeEligible(serverMeta, clientMeta) {
-  const w = serverMeta.width || clientMeta.width;
-  const h = serverMeta.height || clientMeta.height;
-  const d = serverMeta.duration_s || clientMeta.duration;
-  if (!w || !h || !d) return false;
-  return w === 512 && h === 512 && d <= 3.1;
-}
-
-async function _stickersAutoMake(draftId) {
-  // The "skip the editor" promise: prompt for emoji, POST the make call
-  // with default trim (0..3s) and no crop, refresh.
-  const emoji = (prompt('Pick an emoji for this sticker:', '🎬') || '').trim();
-  if (!emoji) { showErr('Cancelled'); return; }
-  try {
-    const r = await api('/api/sticker_drafts/' + draftId + '/make', {
-      method: 'POST',
-      body: JSON.stringify({ emoji, trim_start: 0, trim_end: 3, pack_kind: _stickersKind }),
-    });
-    showOk('Added to your pack');
-    return r;
-  } catch (e) {
-    showErr('Auto-make failed: ' + e);
-    throw e;
-  }
-}
-
 async function stickersUploadFile(file) {
   const progEl = document.getElementById('stickers-upload-progress');
   const barEl = document.getElementById('stickers-upload-bar');
@@ -5387,9 +5380,6 @@ async function stickersUploadFile(file) {
     showErr('File too large (max 50 MB)');
     return;
   }
-  // Probe BEFORE we upload so we can decide auto-make path on the server
-  // response without re-reading the file.
-  const clientMeta = await _stickersProbeFile(file);
   progEl.style.display = 'block';
   barEl.style.width = '0';
   statEl.textContent = 'Uploading ' + file.name + ' (' + Math.round(file.size / 1024) + ' KB)…';
@@ -5428,16 +5418,42 @@ async function stickersUploadFile(file) {
     xhr.send(fd);
   });
   barEl.style.width = '100%';
-  // Auto-make path: skip the editor entirely when shape says so.
-  const autoOn = document.getElementById('stickers-automake');
-  if (autoOn && autoOn.checked && _stickersAutoMakeEligible(result, clientMeta)) {
-    statEl.textContent = 'Already 512×512 ≤ 3s — auto-making…';
-    try { await _stickersAutoMake(result.id); }
-    catch (e) { /* already toasted */ }
+  if (_stickersMode === 'instant') {
+    // Skip the editor entirely. Convert with sane defaults, push to the
+    // active-kind pack, then drop the draft so the queue doesn't bloat.
+    statEl.textContent = '⚡ Converting & sending…';
+    try {
+      await _stickersInstantMake(result.id);
+      // Clean the draft so a 20-file bulk drop doesn't litter the
+      // Drafts list with 20 expended source files.
+      try { await api('/api/sticker_drafts/' + result.id + '/delete', { method: 'POST', body: '{}' }); }
+      catch (e) { /* draft cleanup is best-effort */ }
+      statEl.textContent = '✓ Added to your ' + _stickersKind + ' pack';
+    } catch (e) {
+      statEl.textContent = '❌ ' + e;
+      statEl.style.color = '#e88';
+    }
   } else {
     statEl.textContent = 'Uploaded — refreshing drafts…';
   }
   setTimeout(() => { progEl.style.display = 'none'; }, 400);
+}
+
+async function _stickersInstantMake(draftId) {
+  // Pull the default emoji from the input; fall back to 🎬 if blank.
+  // No prompt — Instant mode is supposed to be zero-tap after the drop.
+  const emojiEl = document.getElementById('stickers-default-emoji');
+  let emoji = (emojiEl && emojiEl.value || '').trim();
+  if (!emoji) emoji = '🎬';
+  return await api('/api/sticker_drafts/' + draftId + '/make', {
+    method: 'POST',
+    body: JSON.stringify({
+      emoji,
+      trim_start: 0,
+      trim_end:   3,
+      pack_kind:  _stickersKind,
+    }),
+  });
 }
 
 async function redeliverDownload(id, btn) {

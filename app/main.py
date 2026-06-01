@@ -20,6 +20,7 @@ from . import premium_routes
 from . import profile_monitor
 from . import pwa_routes
 from . import sticker_routes
+from . import streamer_consent
 from . import stream_monitor
 from .bot import build
 from .downloader import start_cleanup_loop
@@ -228,6 +229,7 @@ app.include_router(license_routes.router)
 app.include_router(premium_routes.router)
 app.include_router(auth_google.router)
 app.include_router(auth_twitch.router)
+app.include_router(streamer_consent.router)
 app.include_router(pwa_routes.router)
 
 

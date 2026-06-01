@@ -371,6 +371,34 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS ix_twitch_identities_login
             ON twitch_identities(twitch_login)
         """)
+        # ── Streamer recording consent ─────────────────────────────────────
+        # The license the recorder operates under. Each row is an authentic
+        # Twitch user (joined via twitch_user_id) who has affirmatively
+        # consented to community recording of their broadcasts. Lookup-by-
+        # login is the hot path — checked on every record-start against a
+        # Twitch URL — so it's indexed alongside the PK.
+        #
+        # allow_all_users=1 → anyone signed into the Mini App may record
+        # allow_all_users=0 → only user_ids listed in allowed_users_json
+        # revoked_at NOT NULL → consent has been pulled; new records refused
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS streamer_consents (
+                twitch_user_id      TEXT PRIMARY KEY,
+                twitch_login        TEXT NOT NULL,
+                allow_recording     INTEGER NOT NULL DEFAULT 0,
+                max_duration_min    INTEGER NOT NULL DEFAULT 240,
+                allow_all_users     INTEGER NOT NULL DEFAULT 1,
+                allowed_users_json  TEXT,
+                notes               TEXT,
+                consented_at        TEXT NOT NULL,
+                revoked_at          TEXT,
+                updated_at          TEXT NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_streamer_consents_login
+            ON streamer_consents(twitch_login)
+        """)
         await db.commit()
 
 

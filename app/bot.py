@@ -1346,10 +1346,93 @@ async def build() -> Application:
             await msg.reply_text(f"⚠ Storage error: {e}")
             return
 
+        # Instant make — mirrors the Mini App's default mode. Encode with
+        # sane defaults (centre-crop-to-fill, first 3s, 🎬 emoji), push to
+        # the user's video pack, send the sticker back as confirmation,
+        # and drop the draft. Falls back to the editor button only if
+        # encoding or upload genuinely fails.
+        from . import sticker_telegram as _st
+        from .sticker_routes import OUTPUT_DIR as _OUT
+        instant_ok = False
+        instant_err: str | None = None
+        try:
+            dst = _OUT / str(user.id) / f"{draft_id}.webm"
+            ok, err = await _sp.make_video_sticker(
+                _Path(tmp_path), dst,
+                start=0.0, end=3.0, crop=None,
+            )
+            if not ok:
+                instant_err = err or "encode failed"
+            else:
+                pack = await _st.resolve_pack(
+                    ctx.bot, user.id, user.first_name, kind="video",
+                )
+                try:
+                    file_id, set_url = await _st.upload_and_add(
+                        ctx.bot, user.id, dst,
+                        emoji="🎬",
+                        pack_name=pack["pack_name"],
+                        pack_title=pack["pack_title"],
+                        sticker_format="video",
+                        sticker_type="regular",
+                    )
+                except Exception as e:
+                    instant_err = str(e)
+                else:
+                    if not pack.get("exists_in_db"):
+                        await _stickers_db.sticker_pack_create(
+                            user.id, pack["pack_name"], pack["pack_title"],
+                            set_url, kind="video",
+                        )
+                    await _stickers_db.sticker_record(
+                        user_id=user.id, pack_name=pack["pack_name"],
+                        source_draft_id=draft_id, emoji="🎬",
+                        telegram_file_id=file_id, webm_path=str(dst),
+                    )
+                    # Send the sticker back as confirmation + the pack link.
+                    try:
+                        await ctx.bot.send_sticker(chat_id=user.id, sticker=file_id)
+                    except Exception as _e:
+                        logger.debug("instant confirm sticker send failed: %s", _e)
+                    await msg.reply_text(
+                        f"✨ Added to your pack:\n{set_url}\n\n"
+                        "Tip: open the Mini App to re-crop, change emoji, "
+                        "or trim a different window.",
+                        reply_markup=_sticker_keyboard(),
+                        disable_web_page_preview=True,
+                    )
+                    instant_ok = True
+                    # Drop the draft + scratch — instant runs leave nothing behind.
+                    try:
+                        path_str = await _stickers_db.sticker_draft_delete(draft_id, user.id)
+                        if path_str:
+                            _Path(path_str).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning("bot instant-make crashed for u=%s d=%s: %s",
+                           user.id, draft_id, e)
+            instant_err = f"{type(e).__name__}: {e}"
+
+        if instant_ok:
+            return  # all done
+
+        # Fallback path: instant make couldn't finish (encode bailed, TG
+        # error, etc.). Keep the draft and offer the editor as before so
+        # the user can salvage it manually.
         kb = _sticker_keyboard()
-        body = (
-            f"🎬 Got it ({dur:.1f}s)" if dur else "🎬 Got it"
-        ) + " — open the MiniApp to crop, trim, pick an emoji, and add it to your pack.\n\nDrafts auto-delete after 6 hours."
+        prefix = f"🎬 Got it ({dur:.1f}s)" if dur else "🎬 Got it"
+        if instant_err:
+            body = (
+                f"{prefix} — auto-make couldn't finish ({instant_err[:120]}). "
+                "Open the MiniApp to crop / trim / re-emoji manually.\n\n"
+                "Drafts auto-delete after 6 hours."
+            )
+        else:
+            body = (
+                f"{prefix} — open the MiniApp to crop, trim, pick an emoji, "
+                "and add it to your pack.\n\nDrafts auto-delete after 6 hours."
+            )
         await msg.reply_text(body, reply_markup=kb)
 
     async def handle_stickers_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):

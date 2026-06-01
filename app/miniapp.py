@@ -4621,6 +4621,15 @@ async function loadDownloads() {
       const redeliver = d.id != null
         ? `<button class=redeliver onclick="redeliverDownload(${d.id}, this)">Re-deliver</button>`
         : '';
+      // Sticker shortcut — only on rows where the first file looks
+      // sticker-eligible (video / GIF / still image). Extension sniff is
+      // cheap and avoids surfacing a button for audio-only downloads.
+      const firstFile = (d.files || [])[0] || '';
+      const ext = firstFile.toLowerCase().match(/\\.([a-z0-9]+)$/);
+      const stickerable = ext && ['mp4','mov','webm','mkv','gif','jpg','jpeg','png','webp'].includes(ext[1]);
+      const stickerBtn = stickerable
+        ? `<button class=redeliver style="background:#444" onclick="stickersFromDownloadPath('${encodeURIComponent(firstFile)}', this)" title="Make sticker from this">🎬</button>`
+        : '';
       return `
         <div class=dl-row>
           <a onclick="openExternal('${u}')">
@@ -4628,10 +4637,27 @@ async function loadDownloads() {
             <div class=desc>${esc(desc || url)}</div>
             <div class=when>${timeago(d.downloaded_at || d.created_at)}</div>
           </a>
+          ${stickerBtn}
           ${redeliver}
         </div>`;
     }).join('');
   } catch(e) { showErr('Load failed: '+e); }
+}
+
+async function stickersFromDownloadPath(encPath, btn) {
+  const file_path = decodeURIComponent(encPath);
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const r = await api('/api/sticker_drafts/from_download', {
+      method: 'POST',
+      body: JSON.stringify({ file_path }),
+    });
+    showOk('Draft created — opening editor');
+    location.href = '/stickers/' + r.id + '/edit?kind=video';
+  } catch (e) {
+    showErr('Make sticker failed: ' + e);
+    if (btn) { btn.disabled = false; btn.textContent = '🎬'; }
+  }
 }
 
 // ── Stickers tab ──────────────────────────────────────────────────────────

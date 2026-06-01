@@ -110,6 +110,15 @@ class DeletePackBody(BaseModel):
     confirm: bool = False
 
 
+class FromDownloadBody(BaseModel):
+    # Absolute path or a path under DOWNLOADS_DIR — the upload-from-download
+    # flow trusts paths that come from the user's own download history (they
+    # listed and saw the path). We resolve and re-check that they live under
+    # DOWNLOADS_DIR before opening anything, so a manipulated payload can't
+    # exfiltrate arbitrary files.
+    file_path: str
+
+
 # Web-upload limits. Mirrors what Telegram itself accepts at the bot path
 # (50 MB inline upload ceiling) and a small mime allowlist so we don't end
 # up storing arbitrary files in DRAFTS_DIR.
@@ -474,6 +483,100 @@ async def upload_draft(request: Request,
         "width":       meta.get("width"),
         "height":      meta.get("height"),
         "bytes":       written,
+    }
+
+
+# ── Make a draft from an existing SMDL download ────────────────────────────
+
+
+_DL_MIME_EXT_HINT = {
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+    ".mkv": "video/x-matroska", ".gif": "image/gif",
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".webp": "image/webp",
+}
+
+
+def _is_under_downloads(p: Path) -> bool:
+    """True if `p` resolves to somewhere underneath DOWNLOADS_DIR (resolved).
+    Used to defeat ../ tricks in the from_download payload."""
+    try:
+        root = Path(DOWNLOADS_DIR).resolve()
+        return root in p.resolve().parents or p.resolve() == root
+    except Exception:
+        return False
+
+
+@router.post("/api/sticker_drafts/from_download")
+async def draft_from_download(body: FromDownloadBody, request: Request) -> dict:
+    """Hardlink (or copy as fallback) a file the user already downloaded into
+    DRAFTS_DIR and create a draft row. Skips the upload round-trip — a 200 MB
+    movie from Theater can become a sticker without re-uploading bytes.
+    """
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+
+    raw = (body.file_path or "").strip()
+    if not raw:
+        raise HTTPException(400, "file_path is required")
+    # Accept absolute or relative-to-DOWNLOADS_DIR.
+    p = Path(raw)
+    if not p.is_absolute():
+        p = Path(DOWNLOADS_DIR) / raw
+    if not _is_under_downloads(p):
+        raise HTTPException(403, "path is outside the downloads root")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404, f"source not found: {p}")
+
+    # Mime hint from extension; the real content negotiation happens later
+    # in the encoder.
+    ext = p.suffix.lower() or ".bin"
+    mime = _DL_MIME_EXT_HINT.get(ext, "application/octet-stream")
+    if not (mime.startswith("video/") or mime in ("image/gif", "image/jpeg",
+                                                   "image/png", "image/webp")):
+        raise HTTPException(415, f"unsupported source: {ext}")
+
+    meta = await _sp.probe(p)
+
+    draft_id = await _db.sticker_draft_insert(
+        user_id=user_id,
+        telegram_file_id="from_download",  # sentinel — see upload_draft
+        file_path="",
+        mime_type=mime,
+        duration_s=meta.get("duration_s"),
+        width=meta.get("width"),
+        height=meta.get("height"),
+    )
+    final_path = draft_path(user_id, draft_id, ext.lstrip("."))
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    # Hardlink for speed (same filesystem, no bytes copied); fall back to a
+    # streaming copy on EXDEV or anything else weird.
+    try:
+        os.link(p, final_path)
+    except OSError:
+        try:
+            import shutil as _sh
+            _sh.copy2(p, final_path)
+        except Exception as e:
+            logger.warning("from_download copy failed u=%s d=%s: %s", user_id, draft_id, e)
+            raise HTTPException(500, "draft persist failed")
+    import aiosqlite
+    async with aiosqlite.connect(_db.DB_PATH) as dbh:
+        await dbh.execute(
+            "UPDATE sticker_drafts SET file_path = ? WHERE id = ?",
+            (str(final_path), draft_id),
+        )
+        await dbh.commit()
+
+    logger.info("from_download OK u=%s d=%s src=%s", user_id, draft_id, p.name)
+    return {
+        "id":         draft_id,
+        "mime_type":  mime,
+        "duration_s": meta.get("duration_s"),
+        "width":      meta.get("width"),
+        "height":     meta.get("height"),
+        "source":     p.name,
     }
 
 

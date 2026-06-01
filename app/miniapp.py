@@ -4715,9 +4715,20 @@ async function loadStickers() {
   const draftsEl = document.getElementById('stickers-drafts');
   if (!_stickersUploadWired) {
     _wireStickersUpload();
-    // First render: highlight the default-active kind button.
-    stickersSwitchKind(_stickersKind);
+    // Highlight the default-active kind button. We CAN'T call
+    // stickersSwitchKind() here because it calls loadStickers() back,
+    // and at this point in the bootstrap _stickersUploadWired is still
+    // false — the recursive loadStickers re-enters this block, calls
+    // stickersSwitchKind again, and so on, causing the "In your pack"
+    // grid to wipe-and-reload-spam itself (visible as flicker). Set
+    // the wired flag FIRST, then just do the synchronous button-paint
+    // that stickersSwitchKind would have done.
     _stickersUploadWired = true;
+    document.querySelectorAll('#page-stickers button[data-kind]').forEach(b => {
+      const active = b.dataset.kind === _stickersKind;
+      b.style.background = active ? 'var(--button)' : '';
+      b.style.color      = active ? 'var(--button-text)' : '';
+    });
   }
   let data;
   try {
@@ -4863,6 +4874,8 @@ async function stickersDeleteAll() {
 // only, so we never read from it in the UI.
 
 let _stickersPackContents = null;   // last loaded {name, title, sticker_type, stickers[]}
+let _stickersContentsBusy = false;  // dedupe overlapping fetches
+let _stickersContentsKindShown = null;  // pack kind currently painted
 
 async function stickersLoadPackContents() {
   const grid = document.getElementById('stickers-pack-grid');
@@ -4870,23 +4883,43 @@ async function stickersLoadPackContents() {
   if (!_stickersPackName) {
     grid.innerHTML = '<div class=empty>No pack yet — make your first sticker to start one.</div>';
     countEl.textContent = '';
+    _stickersContentsKindShown = null;
     return;
   }
-  grid.innerHTML = '<div class=empty><span class=spin></span> Loading pack contents…</div>';
+  if (_stickersContentsBusy) return;   // an earlier call is still in flight
+  _stickersContentsBusy = true;
+  // Only show the "Loading…" placeholder when the grid is currently
+  // showing the EMPTY or DIFFERENT-KIND state — refreshing the same kind
+  // shouldn't flash. Switching kinds genuinely changes what's shown, so
+  // a brief spinner there is correct.
+  const switchingKind = _stickersContentsKindShown !== _stickersKind;
+  if (switchingKind || !document.getElementById('stickers-pack-grid-inner')) {
+    grid.innerHTML = '<div class=empty><span class=spin></span> Loading pack contents…</div>';
+  }
   try {
     const data = await api('/api/sticker_pack/contents?kind=' + encodeURIComponent(_stickersKind));
     _stickersPackContents = data;
+    _stickersContentsKindShown = _stickersKind;
     const stickers = data.stickers || [];
     countEl.textContent = stickers.length ? '· ' + stickers.length + ' / 120' : '';
     if (!stickers.length) {
       grid.innerHTML = '<div class=empty>Pack is empty.</div>';
       return;
     }
-    grid.innerHTML = '<div id=stickers-pack-grid-inner style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px"></div>';
-    const inner = document.getElementById('stickers-pack-grid-inner');
+    // Render into a detached node, then swap with the inner grid in one
+    // assignment — avoids the visible reflow of clearing then appending
+    // children one-by-one which is what was causing the flicker.
+    const inner = document.createElement('div');
+    inner.id = 'stickers-pack-grid-inner';
+    inner.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px';
     stickers.forEach((s, idx) => inner.appendChild(_renderPackSticker(s, idx, data.sticker_type)));
+    grid.innerHTML = '';
+    grid.appendChild(inner);
   } catch (e) {
     grid.innerHTML = '<div class=empty style="color:#e88">Pack load failed: ' + esc(String(e)) + '</div>';
+    _stickersContentsKindShown = null;
+  } finally {
+    _stickersContentsBusy = false;
   }
 }
 

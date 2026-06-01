@@ -3951,12 +3951,25 @@ button.warn { background: #ff9500; color: #fff; }
       <div class=empty><span class=spin></span> Loading…</div>
     </div>
     <div class=card style="margin-top:10px">
-      <div style="font-weight:600;margin-bottom:6px">Add to your pack</div>
-      <input type=file id=stickers-file accept="video/*,image/gif" style="display:none">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-weight:600">Add to your pack</span>
+        <span style="flex:1"></span>
+        <label class=meta style="font-size:11px;display:flex;align-items:center;gap:4px;cursor:pointer">
+          <input type=checkbox id=stickers-automake checked> Auto-make if ready
+        </label>
+      </div>
+      <input type=file id=stickers-file accept="video/*,image/gif" multiple style="display:none">
+      <input type=file id=stickers-camera accept="video/*" capture="environment" style="display:none">
       <div id=stickers-dropzone style="border:2px dashed var(--separator);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s">
         <div style="font-size:30px;line-height:1;margin-bottom:6px">📎</div>
-        <div style="font-weight:600">Tap to pick · or drag &amp; drop</div>
-        <div class=meta style="margin-top:4px;font-size:12px;color:var(--muted)">A video or GIF, ≤ 50 MB. Or send one to <b>@Sentinel_Media_bot</b>.</div>
+        <div style="font-weight:600">Tap to pick · drag &amp; drop · or paste</div>
+        <div class=meta style="margin-top:4px;font-size:12px;color:var(--muted)">Videos / GIFs, ≤ 50 MB each. Drop multiple at once.</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+        <button class=sec onclick="document.getElementById('stickers-camera').click()" style="font-size:12px">📷 Record</button>
+        <button class=sec onclick="document.getElementById('stickers-file').click()" style="font-size:12px">📁 Pick files</button>
+        <span style="flex:1"></span>
+        <span id=stickers-queue-pill class=meta style="font-size:11px;color:var(--muted)"></span>
       </div>
       <div id=stickers-upload-progress style="display:none;margin-top:10px">
         <div style="background:#222;border-radius:6px;height:6px;overflow:hidden">
@@ -4920,19 +4933,71 @@ async function stickersDeletePack() {
   } catch (e) { showErr('Delete pack failed: ' + e); }
 }
 
-// ── Upload wiring (file picker + drag-and-drop) ────────────────────────────
-// Bound once per session via `_stickersUploadWired`. The drop zone forwards
-// to the hidden <input type=file>; the change handler streams the file via
-// FormData to POST /api/sticker_drafts, then refreshes the list.
+// ── Upload wiring (file picker + drag-and-drop + paste + bulk + auto-make) ─
+// Bound once per session via `_stickersUploadWired`. Sources of upload:
+//   1. Dropzone click → hidden <input type=file multiple>
+//   2. 📷 Record button → camera-capture input (mobile)
+//   3. Drag-and-drop (multi-file)
+//   4. Paste from clipboard (Stickers tab focus only)
+// All four funnel into _stickersEnqueue() which serialises uploads so we
+// never run two XHRs in parallel.
+
+let _stickersUploadQueue = [];   // pending File objects
+let _stickersUploadActive = false;
+
+function _stickersQueuePillUpdate() {
+  const pill = document.getElementById('stickers-queue-pill');
+  if (!pill) return;
+  const q = _stickersUploadQueue.length;
+  pill.textContent = (q || _stickersUploadActive) ? (q + ' queued') : '';
+}
+
+function _stickersEnqueue(files) {
+  let added = 0;
+  for (const f of (files || [])) {
+    if (!f) continue;
+    if (f.size > 50 * 1024 * 1024) { showErr('Skipped ' + (f.name || 'file') + ': over 50 MB'); continue; }
+    _stickersUploadQueue.push(f); added++;
+  }
+  if (!added) return;
+  _stickersQueuePillUpdate();
+  if (!_stickersUploadActive) _stickersDrainQueue();
+}
+
+async function _stickersDrainQueue() {
+  if (_stickersUploadActive) return;
+  _stickersUploadActive = true;
+  while (_stickersUploadQueue.length) {
+    const f = _stickersUploadQueue.shift();
+    _stickersQueuePillUpdate();
+    try {
+      await stickersUploadFile(f);
+    } catch (e) {
+      // stickersUploadFile already toasts the user — keep draining.
+    }
+  }
+  _stickersUploadActive = false;
+  _stickersQueuePillUpdate();
+  // One refresh at the end of the batch is cheaper than per-file.
+  loadStickers();
+}
 
 function _wireStickersUpload() {
   const dz = document.getElementById('stickers-dropzone');
   const fi = document.getElementById('stickers-file');
+  const cam = document.getElementById('stickers-camera');
   if (!dz || !fi) return;
   dz.addEventListener('click', () => fi.click());
   fi.addEventListener('change', () => {
-    if (fi.files && fi.files[0]) {
-      const f = fi.files[0]; fi.value = ''; stickersUploadFile(f);
+    if (fi.files && fi.files.length) {
+      const arr = Array.from(fi.files); fi.value = '';
+      _stickersEnqueue(arr);
+    }
+  });
+  if (cam) cam.addEventListener('change', () => {
+    if (cam.files && cam.files.length) {
+      const arr = Array.from(cam.files); cam.value = '';
+      _stickersEnqueue(arr);
     }
   });
   // Drag-and-drop. preventDefault on dragover is what allows drop to fire.
@@ -4947,55 +5012,139 @@ function _wireStickersUpload() {
   }));
   dz.addEventListener('drop', e => {
     const dt = e.dataTransfer;
-    if (dt && dt.files && dt.files[0]) stickersUploadFile(dt.files[0]);
+    if (dt && dt.files && dt.files.length) _stickersEnqueue(Array.from(dt.files));
   });
+  // Paste handler — bound to document, but only consumes the event when the
+  // Stickers tab is the active page. Keeps clipboard paste available on
+  // other tabs (e.g. text fields) without conflict.
+  document.addEventListener('paste', e => {
+    if (current !== 'stickers') return;
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    const files = [];
+    for (const it of items) {
+      if (it.kind === 'file') {
+        const f = it.getAsFile();
+        if (f && (f.type.startsWith('video/') || f.type === 'image/gif')) files.push(f);
+      }
+    }
+    if (files.length) {
+      e.preventDefault();
+      _stickersEnqueue(files);
+    }
+  });
+}
+
+// Probe a file client-side to decide if it can skip the editor. We default
+// to "ready" when the metadata says 512x512 AND duration ≤ 3.1s (small
+// fudge for rounding) AND the user hasn't disabled the auto-make checkbox.
+async function _stickersProbeFile(file) {
+  return await new Promise(resolve => {
+    if (!file.type || !file.type.startsWith('video/')) {
+      resolve({ width: null, height: null, duration: null });
+      return;
+    }
+    const v = document.createElement('video');
+    v.preload = 'metadata';
+    v.muted = true;
+    v.playsInline = true;
+    const url = URL.createObjectURL(file);
+    v.src = url;
+    const cleanup = () => { try { URL.revokeObjectURL(url); } catch (e) {} };
+    v.addEventListener('loadedmetadata', () => {
+      const out = { width: v.videoWidth, height: v.videoHeight, duration: v.duration };
+      cleanup(); resolve(out);
+    }, { once: true });
+    v.addEventListener('error', () => { cleanup(); resolve({ width: null, height: null, duration: null }); }, { once: true });
+    setTimeout(() => { cleanup(); resolve({ width: null, height: null, duration: null }); }, 3000);
+  });
+}
+
+function _stickersAutoMakeEligible(serverMeta, clientMeta) {
+  const w = serverMeta.width || clientMeta.width;
+  const h = serverMeta.height || clientMeta.height;
+  const d = serverMeta.duration_s || clientMeta.duration;
+  if (!w || !h || !d) return false;
+  return w === 512 && h === 512 && d <= 3.1;
+}
+
+async function _stickersAutoMake(draftId) {
+  // The "skip the editor" promise: prompt for emoji, POST the make call
+  // with default trim (0..3s) and no crop, refresh.
+  const emoji = (prompt('Pick an emoji for this sticker:', '🎬') || '').trim();
+  if (!emoji) { showErr('Cancelled'); return; }
+  try {
+    const r = await api('/api/sticker_drafts/' + draftId + '/make', {
+      method: 'POST',
+      body: JSON.stringify({ emoji, trim_start: 0, trim_end: 3 }),
+    });
+    showOk('Added to your pack');
+    return r;
+  } catch (e) {
+    showErr('Auto-make failed: ' + e);
+    throw e;
+  }
 }
 
 async function stickersUploadFile(file) {
   const progEl = document.getElementById('stickers-upload-progress');
   const barEl = document.getElementById('stickers-upload-bar');
   const statEl = document.getElementById('stickers-upload-status');
+  statEl.style.color = '';
   if (file.size > 50 * 1024 * 1024) {
     showErr('File too large (max 50 MB)');
     return;
   }
+  // Probe BEFORE we upload so we can decide auto-make path on the server
+  // response without re-reading the file.
+  const clientMeta = await _stickersProbeFile(file);
   progEl.style.display = 'block';
   barEl.style.width = '0';
   statEl.textContent = 'Uploading ' + file.name + ' (' + Math.round(file.size / 1024) + ' KB)…';
   const fd = new FormData();
   fd.append('file', file, file.name);
-  // Use XHR so we get an upload-progress event. fetch() can't report
-  // upload progress in 2026 browsers without ReadableStream tricks the
-  // TG WebView doesn't reliably support.
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', '/api/sticker_drafts');
-  xhr.setRequestHeader('X-Init-Data', initData);
-  xhr.upload.addEventListener('progress', ev => {
-    if (ev.lengthComputable) {
-      const pct = Math.round((ev.loaded / ev.total) * 100);
-      barEl.style.width = pct + '%';
-      statEl.textContent = 'Uploading ' + pct + '% (' + Math.round(ev.loaded / 1024) + ' / ' + Math.round(ev.total / 1024) + ' KB)';
-    }
-  });
-  xhr.onload = () => {
-    if (xhr.status >= 200 && xhr.status < 300) {
-      barEl.style.width = '100%';
-      statEl.textContent = 'Upload complete — refreshing drafts…';
-      setTimeout(() => { progEl.style.display = 'none'; loadStickers(); }, 400);
-    } else {
-      let detail = xhr.responseText;
-      try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) {}
-      statEl.textContent = 'Failed: ' + detail;
+  const result = await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/sticker_drafts');
+    xhr.setRequestHeader('X-Init-Data', initData);
+    xhr.upload.addEventListener('progress', ev => {
+      if (ev.lengthComputable) {
+        const pct = Math.round((ev.loaded / ev.total) * 100);
+        barEl.style.width = pct + '%';
+        statEl.textContent = 'Uploading ' + pct + '% (' + Math.round(ev.loaded / 1024) + ' / ' + Math.round(ev.total / 1024) + ' KB)';
+      }
+    });
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch (e) { resolve({}); }
+      } else {
+        let detail = xhr.responseText;
+        try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) {}
+        statEl.textContent = 'Failed: ' + detail;
+        statEl.style.color = '#e88';
+        showErr('Upload failed: ' + detail);
+        reject(new Error(detail));
+      }
+    };
+    xhr.onerror = () => {
+      statEl.textContent = 'Network error during upload';
       statEl.style.color = '#e88';
-      showErr('Upload failed: ' + detail);
-    }
-  };
-  xhr.onerror = () => {
-    statEl.textContent = 'Network error during upload';
-    statEl.style.color = '#e88';
-    showErr('Upload network error');
-  };
-  xhr.send(fd);
+      showErr('Upload network error');
+      reject(new Error('network'));
+    };
+    xhr.send(fd);
+  });
+  barEl.style.width = '100%';
+  // Auto-make path: skip the editor entirely when shape says so.
+  const autoOn = document.getElementById('stickers-automake');
+  if (autoOn && autoOn.checked && _stickersAutoMakeEligible(result, clientMeta)) {
+    statEl.textContent = 'Already 512×512 ≤ 3s — auto-making…';
+    try { await _stickersAutoMake(result.id); }
+    catch (e) { /* already toasted */ }
+  } else {
+    statEl.textContent = 'Uploaded — refreshing drafts…';
+  }
+  setTimeout(() => { progEl.style.display = 'none'; }, 400);
 }
 
 async function redeliverDownload(id, btn) {

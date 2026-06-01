@@ -3965,12 +3965,26 @@ button.warn { background: #ff9500; color: #fff; }
         <div id=stickers-upload-status class=meta style="margin-top:4px;font-size:12px"></div>
       </div>
     </div>
+    <h2 style="margin:18px 4px 8px;font-size:15px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:8px">
+      <span>In your pack</span>
+      <span id=stickers-pack-count class=meta style="font-size:11px;color:var(--muted)"></span>
+      <span style="flex:1"></span>
+      <button class=sec id=stickers-refresh-btn onclick=stickersLoadPackContents() style="font-size:11px">↻ Refresh</button>
+    </h2>
+    <div id=stickers-pack-grid>
+      <div class=empty>Loading…</div>
+    </div>
     <h2 style="margin:18px 4px 8px;font-size:15px;color:var(--muted);font-weight:600">Drafts</h2>
     <div id=stickers-drafts>
       <div class=empty>Drop a video above, or send one to <b>@Sentinel_Media_bot</b>, to start a draft.</div>
     </div>
-    <div style="margin-top:18px;text-align:center">
-      <button class=sec onclick=stickersDeleteAll() style="color:#e88">🗑 Delete all my sticker data</button>
+    <div style="margin-top:24px;padding:12px;border:1px solid #4a2222;border-radius:10px;background:rgba(120,30,30,0.08)">
+      <div style="font-weight:600;color:#e88;margin-bottom:6px">Danger zone</div>
+      <div class=meta style="font-size:12px;margin-bottom:10px;color:var(--muted)">These actions can't be undone.</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class=sec onclick=stickersDeleteAll() style="color:#e88">🗑 Delete all my drafts</button>
+        <button class=sec onclick=stickersDeletePack() style="color:#e88">💥 Delete entire pack</button>
+      </div>
     </div>
   </div>
 
@@ -4641,6 +4655,10 @@ async function loadStickers() {
     _stickersPackUrl = data.pack.telegram_url || '';
     _stickersPackName = data.pack.pack_name || '';
     _stickersPackTitle = data.pack.pack_title || '';
+    // Fire-and-forget: load the pack contents alongside the drafts list so
+    // both surfaces are live by the time the page paints. The function
+    // is idempotent — duplicate triggers (e.g. from refresh button) are fine.
+    stickersLoadPackContents();
     // Card layout: title row with copy hint, URL row, action row.
     // The whole card is click-to-copy via stickersCopyPackLink(); the Open
     // button bypasses with stopPropagation so users can still jump to TG.
@@ -4666,6 +4684,11 @@ async function loadStickers() {
     packEl.style.cursor = '';
     packEl.onclick = null;
     packEl.innerHTML = '<div class=empty>No sticker pack yet — finalise your first draft to start one.</div>';
+    // Empty-pack state for the contents section.
+    const grid = document.getElementById('stickers-pack-grid');
+    const countEl = document.getElementById('stickers-pack-count');
+    if (grid) grid.innerHTML = '<div class=empty>No pack yet — make your first sticker to start one.</div>';
+    if (countEl) countEl.textContent = '';
   }
   const drafts = data.drafts || [];
   if (!drafts.length) {
@@ -4757,6 +4780,144 @@ async function stickersDeleteAll() {
     showOk('Deleted ' + (r.deleted || 0) + ' drafts.');
     loadStickers();
   } catch (e) { showErr('Wipe failed: ' + e); }
+}
+
+// ── Pack contents (Batch 1) ───────────────────────────────────────────────
+// Lives in /api/sticker_pack/contents — Telegram is the SoT for what's
+// actually in the pack. The local `stickers` table is best-effort audit
+// only, so we never read from it in the UI.
+
+let _stickersPackContents = null;   // last loaded {name, title, sticker_type, stickers[]}
+
+async function stickersLoadPackContents() {
+  const grid = document.getElementById('stickers-pack-grid');
+  const countEl = document.getElementById('stickers-pack-count');
+  if (!_stickersPackName) {
+    grid.innerHTML = '<div class=empty>No pack yet — make your first sticker to start one.</div>';
+    countEl.textContent = '';
+    return;
+  }
+  grid.innerHTML = '<div class=empty><span class=spin></span> Loading pack contents…</div>';
+  try {
+    const data = await api('/api/sticker_pack/contents');
+    _stickersPackContents = data;
+    const stickers = data.stickers || [];
+    countEl.textContent = stickers.length ? '· ' + stickers.length + ' / 120' : '';
+    if (!stickers.length) {
+      grid.innerHTML = '<div class=empty>Pack is empty.</div>';
+      return;
+    }
+    grid.innerHTML = '<div id=stickers-pack-grid-inner style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px"></div>';
+    const inner = document.getElementById('stickers-pack-grid-inner');
+    stickers.forEach((s, idx) => inner.appendChild(_renderPackSticker(s, idx, data.sticker_type)));
+  } catch (e) {
+    grid.innerHTML = '<div class=empty style="color:#e88">Pack load failed: ' + esc(String(e)) + '</div>';
+  }
+}
+
+function _renderPackSticker(s, idx, packType) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.style.cssText = 'padding:8px;display:flex;flex-direction:column;gap:6px;position:relative';
+  card.dataset.fileId = s.file_id;
+  const tagEl = s.is_video ? 'video' : 'img';
+  const media = document.createElement(tagEl);
+  media.style.cssText = 'width:100%;aspect-ratio:1;object-fit:contain;background:#000;border-radius:6px';
+  if (s.is_video) { media.setAttribute('muted',''); media.setAttribute('playsinline',''); media.setAttribute('loop',''); media.setAttribute('autoplay',''); }
+  // Stream the sticker bytes via our own proxy so the WebView can play them
+  // (Telegram file_path URLs leak the bot token, not embeddable).
+  fetch('/api/sticker_pack/sticker_file/' + encodeURIComponent(s.file_id), {
+    headers: { 'X-Init-Data': initData },
+  }).then(r => r.ok ? r.blob() : null)
+    .then(b => { if (b) media.src = URL.createObjectURL(b); })
+    .catch(() => {});
+  card.appendChild(media);
+  const meta = document.createElement('div');
+  meta.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:13px';
+  meta.innerHTML = '<span style="font-size:18px">' + esc(s.emoji || '🎬') + '</span>' +
+    '<span class=meta style="font-size:11px;color:var(--muted)">#' + (idx + 1) + '</span>';
+  card.appendChild(meta);
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px';
+  actions.innerHTML =
+    '<button class=sec style="font-size:11px;padding:4px 6px" title="Change emoji" onclick="stickersEditEmoji(this)">✎</button>' +
+    '<button class=sec style="font-size:11px;padding:4px 6px" title="Keywords" onclick="stickersEditKeywords(this)">🔑</button>' +
+    '<button class=sec style="font-size:11px;padding:4px 6px" title="Set as cover" onclick="stickersSetCover(this)">⭐</button>' +
+    '<button class=sec style="font-size:11px;padding:4px 6px;color:#e88" title="Remove from pack" onclick="stickersRemoveFromPack(this)">🗑</button>';
+  card.appendChild(actions);
+  return card;
+}
+
+function _packCardFileId(btn) {
+  const card = btn.closest('[data-file-id]');
+  return card ? card.dataset.fileId : null;
+}
+
+async function stickersEditEmoji(btn) {
+  const file_id = _packCardFileId(btn);
+  if (!file_id) return;
+  const raw = prompt('New emojis (space-separated, up to 20):', '🎬');
+  if (raw == null) return;
+  // Split on whitespace and chunk into individual emoji code-points-ish.
+  // Telegram counts each emoji separately even if compound; the parsing
+  // mirrors what's reasonable to type by hand.
+  const emojis = raw.trim().split(/\\s+/).filter(Boolean);
+  if (!emojis.length) { showErr('At least one emoji'); return; }
+  try {
+    await api('/api/sticker_pack/sticker/emojis', { method: 'POST',
+      body: JSON.stringify({ file_id, emojis }) });
+    showOk('Emojis updated');
+    stickersLoadPackContents();
+  } catch (e) { showErr('Update failed: ' + e); }
+}
+
+async function stickersEditKeywords(btn) {
+  const file_id = _packCardFileId(btn);
+  if (!file_id) return;
+  const raw = prompt('Search keywords (comma-separated, ≤ 20 entries, ≤ 64 chars total):', '');
+  if (raw == null) return;
+  const keywords = raw.split(',').map(s => s.trim()).filter(Boolean);
+  try {
+    await api('/api/sticker_pack/sticker/keywords', { method: 'POST',
+      body: JSON.stringify({ file_id, keywords }) });
+    showOk('Keywords updated');
+  } catch (e) { showErr('Update failed: ' + e); }
+}
+
+async function stickersSetCover(btn) {
+  const file_id = _packCardFileId(btn);
+  if (!file_id) return;
+  try {
+    await api('/api/sticker_pack/sticker/set_cover', { method: 'POST',
+      body: JSON.stringify({ file_id }) });
+    showOk('Pack cover updated');
+  } catch (e) { showErr('Set cover failed: ' + e); }
+}
+
+async function stickersRemoveFromPack(btn) {
+  const file_id = _packCardFileId(btn);
+  if (!file_id) return;
+  if (!confirm('Remove this sticker from your pack?\\nThe pack stays; only this entry goes.')) return;
+  try {
+    await api('/api/sticker_pack/sticker/delete', { method: 'POST',
+      body: JSON.stringify({ file_id }) });
+    showOk('Removed from pack');
+    stickersLoadPackContents();
+  } catch (e) { showErr('Remove failed: ' + e); }
+}
+
+async function stickersDeletePack() {
+  if (!_stickersPackName) { showErr('No pack to delete'); return; }
+  if (!confirm('Delete the ENTIRE sticker pack "' + (_stickersPackTitle || _stickersPackName) + '"?\\nThis is irreversible — every sticker in the pack will be gone.')) return;
+  // Double-tap confirmation: type "delete" to proceed.
+  const c = prompt('Type "delete" (lowercase) to confirm:');
+  if ((c || '').trim().toLowerCase() !== 'delete') { showErr('Cancelled'); return; }
+  try {
+    await api('/api/sticker_pack/delete', { method: 'POST',
+      body: JSON.stringify({ confirm: true }) });
+    showOk('Pack deleted');
+    loadStickers();
+  } catch (e) { showErr('Delete pack failed: ' + e); }
 }
 
 // ── Upload wiring (file picker + drag-and-drop) ────────────────────────────

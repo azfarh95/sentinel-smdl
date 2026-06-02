@@ -1281,6 +1281,94 @@ async def build() -> Application:
             InlineKeyboardButton("🎬 Open sticker editor", web_app=WebAppInfo(url=url))
         ]])
 
+    def _shape_keyboard(draft_id: int) -> InlineKeyboardMarkup:
+        """Cut-out + shape re-make buttons for a photo sticker. Each posts a
+        callback that re-makes the static sticker transparent in that shape."""
+        cb = lambda s: f"stkshape:{draft_id}:{s}"
+        rows = [
+            [InlineKeyboardButton("✂️ Cut out", callback_data=cb("cutout")),
+             InlineKeyboardButton("◯ Circle", callback_data=cb("circle")),
+             InlineKeyboardButton("△ Triangle", callback_data=cb("triangle"))],
+            [InlineKeyboardButton("⭐ Star", callback_data=cb("star")),
+             InlineKeyboardButton("♥ Heart", callback_data=cb("heart")),
+             InlineKeyboardButton("◆ Diamond", callback_data=cb("diamond"))],
+        ]
+        su = _stickers_url()
+        if su:
+            rows.append([InlineKeyboardButton("🎬 Editor (crop / custom)",
+                                              web_app=WebAppInfo(url=su))])
+        return InlineKeyboardMarkup(rows)
+
+    async def handle_shape_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Re-make a photo draft as a transparent cut-out / shaped static
+        sticker and add it to the user's image pack."""
+        from pathlib import Path as _P
+        from . import database as _sdb, sticker_processor as _sp
+        from . import sticker_telegram as _st
+        from .sticker_routes import OUTPUT_DIR as _OUT
+
+        q = update.callback_query
+        data = (q.data or "") if q else ""
+        try:
+            _, draft_id_s, shape = data.split(":", 2)
+            draft_id = int(draft_id_s)
+        except Exception:
+            if q: await q.answer()
+            return
+        user = update.effective_user
+        if not user or not await _auth.is_authorized(user.id):
+            await q.answer("Not authorized.", show_alert=True); return
+        await q.answer("Working on it…")
+
+        draft = await _sdb.sticker_draft_get(draft_id, user.id)
+        if not draft:
+            await q.answer("That draft expired — resend the photo.", show_alert=True); return
+        src = _P(draft["file_path"])
+        if not src.exists():
+            await q.answer("Source is gone — resend the photo.", show_alert=True); return
+
+        udir = _OUT / str(user.id); udir.mkdir(parents=True, exist_ok=True)
+        dst = udir / f"{draft_id}_{shape}.webp"
+        try:
+            if shape == "cutout":
+                cut = udir / f"{draft_id}_cut.png"
+                ok, err = await _sp.bg_remove(src, cut)
+                if ok:
+                    ok, err = await _sp.make_static_sticker(cut, dst, keep_alpha=True)
+            else:
+                mask = _sp.build_shape_mask(shape, udir / f"{draft_id}_{shape}_m.png")
+                if mask is None:
+                    await q.answer("Unknown shape."); return
+                ok, err = await _sp.make_static_sticker(src, dst, mask=mask)
+        except Exception as e:
+            logger.warning("shape make crashed (u=%s d=%s s=%s): %s", user.id, draft_id, shape, e)
+            await q.answer(f"Failed: {str(e)[:150]}", show_alert=True); return
+        if not ok:
+            await q.answer(f"Couldn't make it: {(err or '')[:150]}", show_alert=True); return
+
+        pack = await _st.resolve_pack(ctx.bot, user.id, user.first_name, kind="static")
+        try:
+            file_id, set_url = await _st.upload_and_add(
+                ctx.bot, user.id, dst, emoji="🖼️",
+                pack_name=pack["pack_name"], pack_title=pack["pack_title"],
+                sticker_format="static",
+            )
+        except Exception as e:
+            await q.answer(f"Telegram rejected it: {str(e)[:140]}", show_alert=True); return
+        if not pack.get("exists_in_db"):
+            await _sdb.sticker_pack_create(user.id, pack["pack_name"],
+                                           pack["pack_title"], set_url, kind="static")
+        await _sdb.sticker_record(user_id=user.id, pack_name=pack["pack_name"],
+                                  source_draft_id=draft_id, emoji="🖼️",
+                                  telegram_file_id=file_id, webm_path=str(dst))
+        try:
+            await ctx.bot.send_sticker(chat_id=user.id, sticker=file_id)
+        except Exception:
+            pass
+        label = {"cutout": "Cut-out", "circle": "Circle", "triangle": "Triangle",
+                 "star": "Star", "heart": "Heart", "diamond": "Diamond"}.get(shape, shape)
+        await q.answer(f"{label} sticker added ✨")
+
     async def handle_sticker_source(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Catch any sticker-able media — video / GIF / animation / round
         video-note (circle) → a VIDEO sticker (.webm); photo / image document
@@ -1459,22 +1547,31 @@ async def build() -> Application:
                         await ctx.bot.send_sticker(chat_id=user.id, sticker=file_id)
                     except Exception as _e:
                         logger.debug("instant confirm sticker send failed: %s", _e)
-                    retip = ("re-crop or change emoji" if kind == "static"
-                             else "re-crop, change emoji, or trim a different window")
-                    await msg.reply_text(
-                        f"✨ Added to your pack:\n{set_url}\n\n"
-                        f"Tip: open the Mini App to {retip}.",
-                        reply_markup=_sticker_keyboard(),
-                        disable_web_page_preview=True,
-                    )
+                    if kind == "static":
+                        await msg.reply_text(
+                            f"✨ Added to your pack:\n{set_url}\n\n"
+                            "Want a different look? Tap a cut-out or shape:",
+                            reply_markup=_shape_keyboard(draft_id),
+                            disable_web_page_preview=True,
+                        )
+                    else:
+                        await msg.reply_text(
+                            f"✨ Added to your pack:\n{set_url}\n\n"
+                            "Tip: open the Mini App to re-crop, change emoji, or "
+                            "trim a different window.",
+                            reply_markup=_sticker_keyboard(),
+                            disable_web_page_preview=True,
+                        )
                     instant_ok = True
-                    # Drop the draft + scratch — instant runs leave nothing behind.
-                    try:
-                        path_str = await _stickers_db.sticker_draft_delete(draft_id, user.id)
-                        if path_str:
-                            _Path(path_str).unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                    # Video: drop the draft. Static: KEEP it (6h TTL) so the
+                    # cut-out / shape buttons can re-make from the same source.
+                    if kind != "static":
+                        try:
+                            path_str = await _stickers_db.sticker_draft_delete(draft_id, user.id)
+                            if path_str:
+                                _Path(path_str).unlink(missing_ok=True)
+                        except Exception:
+                            pass
         except Exception as e:
             logger.warning("bot instant-make crashed for u=%s d=%s: %s",
                            user.id, draft_id, e)
@@ -1577,6 +1674,7 @@ async def build() -> Application:
 
     _app.add_handler(CommandHandler("start", handle_start))
     _app.add_handler(CommandHandler("help", handle_help))
+    _app.add_handler(CallbackQueryHandler(handle_shape_callback, pattern=r"^stkshape:"))
     _app.add_handler(CommandHandler("regenerate_token", handle_regenerate_token))
     _app.add_handler(CommandHandler("dashboard", handle_dashboard))
     _app.add_handler(CommandHandler("app", handle_dashboard))   # alias

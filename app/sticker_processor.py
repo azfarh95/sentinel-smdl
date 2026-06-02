@@ -224,6 +224,104 @@ async def make_video_sticker(
     )
 
 
+# Built-in shape presets. Each is a function (size) -> list of polygon points,
+# or the sentinel "ellipse". Custom shapes come in as caller-supplied points.
+def _preset_points(shape: str, s: int) -> list[tuple[float, float]] | str | None:
+    if shape in ("circle", "ellipse"):
+        return "ellipse"
+    if shape == "triangle":          # apex top, base along the bottom
+        return [(s / 2, 0), (0, s), (s, s)]
+    if shape == "diamond":
+        return [(s / 2, 0), (s, s / 2), (s / 2, s), (0, s / 2)]
+    if shape == "heart":
+        # coarse heart polygon (good enough at 512², antialiased on downscale)
+        pts = [(0.50, 0.95), (0.06, 0.52), (0.06, 0.30), (0.22, 0.16),
+               (0.40, 0.18), (0.50, 0.30), (0.60, 0.18), (0.78, 0.16),
+               (0.94, 0.30), (0.94, 0.52)]
+        return [(x * s, y * s) for x, y in pts]
+    if shape == "star":
+        import math
+        cx = cy = s / 2
+        out_r, in_r = s * 0.5, s * 0.21
+        pts = []
+        for i in range(10):
+            r = out_r if i % 2 == 0 else in_r
+            ang = -math.pi / 2 + i * math.pi / 5
+            pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+        return pts
+    return None
+
+
+def build_shape_mask(shape: str, out_path: Path, *, size_px: int = STICKER_FRAME_PX,
+                     points: list[tuple[float, float]] | None = None) -> Path | None:
+    """Render an alpha mask (white = keep, black = transparent) for a shape.
+
+    shape: 'circle' / 'triangle' / 'diamond' / 'heart' / 'star', or 'custom'
+    (then `points` is a normalised [(x,y),…] polygon in 0..1). Drawn at 4×
+    and downscaled for antialiasing. Returns the path, or None if no shape."""
+    try:
+        from PIL import Image, ImageDraw
+    except Exception as e:
+        logger.warning("PIL unavailable for shape mask: %s", e)
+        return None
+    ss = size_px * 4
+    img = Image.new("L", (ss, ss), 0)
+    d = ImageDraw.Draw(img)
+    if shape == "custom":
+        if not points or len(points) < 3:
+            return None
+        d.polygon([(x * ss, y * ss) for x, y in points], fill=255)
+    else:
+        spec = _preset_points(shape, ss)
+        if spec is None:
+            return None
+        if spec == "ellipse":
+            d.ellipse([0, 0, ss - 1, ss - 1], fill=255)
+        else:
+            d.polygon(spec, fill=255)
+    img = img.resize((size_px, size_px), Image.LANCZOS)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(str(out_path))
+    return out_path
+
+
+# Background removal (subject isolation) for one-tap cutout stickers. Uses
+# rembg (onnxruntime + the small u2netp model). CPU-bound → run in an executor.
+# The model is baked at $U2NET_HOME so first use doesn't pay a download.
+_rembg_session = None
+
+
+def _rembg_session_get():
+    global _rembg_session
+    if _rembg_session is None:
+        from rembg import new_session
+        _rembg_session = new_session("u2netp")
+    return _rembg_session
+
+
+def _bg_remove_sync(src: Path, dst: Path) -> None:
+    from rembg import remove
+    from PIL import Image
+    with Image.open(src) as im:
+        out = remove(im.convert("RGBA"), session=_rembg_session_get())
+    out.save(str(dst))
+
+
+async def bg_remove(src: Path, dst: Path) -> tuple[bool, str | None]:
+    """Strip the background → a transparent RGBA PNG at `dst`. Feed the result
+    to make_static_sticker(keep_alpha=True) for a webp cutout sticker."""
+    if not src.exists():
+        return False, f"source not found: {src}"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _bg_remove_sync, src, dst)
+    except Exception as e:
+        logger.warning("bg_remove failed on %s: %s", src.name, e)
+        return False, f"background removal failed: {e}"
+    return (dst.exists(), None if dst.exists() else "no output produced")
+
+
 def _build_static_filter(crop: tuple[int, int, int, int] | None, size_px: int) -> str:
     """Same shape as _build_filter but without the fps cap (static frames
     don't have one) and targeting a configurable square size so we can
@@ -249,13 +347,22 @@ async def make_static_sticker(
     size_px: int = STICKER_FRAME_PX,
     max_bytes: int = STATIC_MAX_BYTES,
     seek_s: float = 0.0,
+    mask: Path | None = None,
+    keep_alpha: bool = False,
 ) -> tuple[bool, str | None]:
     """Encode a single frame from `src` into a Telegram static sticker WEBP.
 
     Static stickers can be sourced from images (PNG/JPG/GIF first frame) or
     pulled out of a video at `seek_s`. WEBP quality is dropped on a ladder
     until the result fits under `max_bytes` (the Telegram 512 KB ceiling for
-    regular static, 64 KB for custom emoji)."""
+    regular static, 64 KB for custom emoji).
+
+    mask: optional size_px² grayscale alpha mask (white=keep, black=clear) —
+    used for shaped/cutout stickers. WEBP carries alpha, so the masked-out
+    area becomes genuinely transparent (see build_shape_mask).
+
+    keep_alpha: preserve the SOURCE's own alpha (e.g. a transparent PNG from
+    bg_remove or a cut-out source) — encodes yuva420p instead of flattening."""
     if not src.exists():
         return False, f"source not found: {src}"
     if not shutil.which("ffmpeg"):
@@ -265,18 +372,33 @@ async def make_static_sticker(
     last_size = 0
     last_err = ""
     for quality in (90, 75, 60, 45, 30):
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", f"{seek_s:.3f}",
-            "-i", str(src),
-            "-frames:v", "1",
-            "-vf", vf,
-            "-c:v", "libwebp",
-            "-quality", str(quality),
-            "-pix_fmt", "yuv420p",
-            "-an",
-            str(dst),
-        ]
+        if mask is not None:
+            # Scale/crop the frame, then merge the mask in as the alpha channel.
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{seek_s:.3f}", "-i", str(src),
+                "-i", str(mask),
+                "-frames:v", "1",
+                "-filter_complex", f"[0:v]{vf}[fg];[fg][1:v]alphamerge",
+                "-c:v", "libwebp",
+                "-quality", str(quality),
+                "-pix_fmt", "yuva420p",
+                "-an",
+                str(dst),
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{seek_s:.3f}",
+                "-i", str(src),
+                "-frames:v", "1",
+                "-vf", vf,
+                "-c:v", "libwebp",
+                "-quality", str(quality),
+                "-pix_fmt", "yuva420p" if keep_alpha else "yuv420p",
+                "-an",
+                str(dst),
+            ]
         loop = asyncio.get_running_loop()
         try:
             rc, stderr = await loop.run_in_executor(None, lambda: _run(cmd, 30))

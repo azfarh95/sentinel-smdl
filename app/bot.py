@@ -1050,6 +1050,17 @@ async def build() -> Application:
             InlineKeyboardButton("📱 Open dashboard", web_app=WebAppInfo(url=url))
         ]])
 
+    def _start_keyboard() -> InlineKeyboardMarkup | None:
+        """Welcome keyboard: dashboard + a jump straight to the sticker editor."""
+        rows = []
+        durl = os.environ.get("WEBAPP_URL", "").strip()
+        if durl:
+            rows.append([InlineKeyboardButton("📱 Open dashboard", web_app=WebAppInfo(url=durl))])
+        surl = _stickers_url()
+        if surl:
+            rows.append([InlineKeyboardButton("🎬 Make a sticker", web_app=WebAppInfo(url=surl))])
+        return InlineKeyboardMarkup(rows) if rows else None
+
     async def _schedule_code_expiry_edit(bot, chat_id: int, message_id: int, lang: str):
         """Wait one TTL window. If the user is still 'pending' (i.e. didn't
         get approved during that minute), edit the original message in place
@@ -1155,17 +1166,24 @@ async def build() -> Application:
             return
 
         # decision == "allow" — owner or already-approved user.
-        kb = _dashboard_keyboard()
+        kb = _start_keyboard()
+        intro = (
+            f"👋 Hi {name}!  Welcome to SMDL.\n\n"
+            "Three things I do best:\n"
+            "📥 Download — send a public link (YouTube, TikTok, Instagram, "
+            "Twitch, X…) and I'll grab it in top quality.\n"
+            "🎬 Stickers — send me a video or GIF and I'll turn it into a "
+            "Telegram sticker, added to your pack.\n"
+            "🔴 Auto-record — track Twitch / YouTube / Kick streamers and "
+            "capture their public live streams. Opt-in only — DMCA & privacy "
+            "respected.\n\n"
+            "📺 Official live TV + 🔍 library search live in the dashboard.\n\n"
+        )
         welcome = (
-            f"👋 Hi {name}!  Welcome to SM-DL.\n\n"
-            "Send me any video URL (Twitch, YouTube, Instagram, TikTok, …) "
-            "and I'll grab it for you.\n\n"
-            "Use the button below to open the dashboard, or type "
-            "/dashboard any time."
+            intro + "👉 Try it now: send a link, or open the dashboard below.  "
+            "Type /help any time."
         ) if kb else (
-            f"👋 Hi {name}!  Welcome to SM-DL.\n\n"
-            "Send me any video URL and I'll grab it for you.\n\n"
-            "(Dashboard isn't configured on this instance.)"
+            intro + "👉 Try it now: just send a link.  Type /help any time."
         )
         await update.message.reply_text(welcome, reply_markup=kb)
 
@@ -1217,6 +1235,28 @@ async def build() -> Application:
             "Tap below to open the SM-DL dashboard inside Telegram:",
             reply_markup=kb,
         )
+
+    async def handle_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Rich 'what can I do' overview + command list + the compliance line.
+        Plain text (no markdown) so command names render/link cleanly."""
+        await _record_user(update)
+        text = (
+            "🤖 SMDL — what I can do\n\n"
+            "📥 Download — send a public link (YouTube, TikTok, Instagram, "
+            "Twitch, X…) and I'll grab it in top quality.\n"
+            "🎬 Stickers — send a video or GIF and I'll turn it into a Telegram "
+            "sticker, added to your pack ( /pack for the link ).\n"
+            "🔴 Auto-record — /watch a Twitch / YouTube / Kick streamer and I'll "
+            "capture their public live streams. Opt-in only — DMCA & privacy "
+            "respected; /unwatch any time.\n"
+            "📺 Live TV — official broadcaster channels, in the dashboard.\n"
+            "🔍 Search — find anything you've saved, in the dashboard.\n\n"
+            "Commands: /dashboard /stickers /pack /watchlist /watch /unwatch "
+            "/live_status /storage_stats /language /delete_data\n\n"
+            "SMDL only handles publicly-available content, honours opt-outs & "
+            "DMCA, and never bypasses DRM or platform access controls."
+        )
+        await update.message.reply_text(text, reply_markup=_start_keyboard())
 
     # ── Sticker maker ──────────────────────────────────────────────────────
     def _stickers_url() -> str | None:
@@ -1509,6 +1549,7 @@ async def build() -> Application:
     ))
 
     _app.add_handler(CommandHandler("start", handle_start))
+    _app.add_handler(CommandHandler("help", handle_help))
     _app.add_handler(CommandHandler("regenerate_token", handle_regenerate_token))
     _app.add_handler(CommandHandler("dashboard", handle_dashboard))
     _app.add_handler(CommandHandler("app", handle_dashboard))   # alias
@@ -1546,30 +1587,36 @@ async def build() -> Application:
 
 _BOT_DESC = {
     None: (
-        "🎬 SMDL — Social Media Downloader.\n\n"
-        "Send any video URL and I'll fetch it.\n"
-        "Send a video or GIF and I'll turn it into a Telegram sticker — "
-        "instantly added to your personal sticker pack.\n\n"
-        "Open the Mini App for the full dashboard: downloads, IPTV, "
-        "sticker pack management (video / static / custom emoji), search "
-        "across all of it."
+        "📥 SMDL — your all-in-one media bot.\n\n"
+        "• Paste a public link (YouTube, TikTok, Instagram, Twitch, X…) → "
+        "I download it.\n"
+        "• Send a video or GIF → an instant Telegram sticker, added to your "
+        "pack.\n"
+        "• 🔴 Auto-record opted-in Twitch / YouTube / Kick streamers' public "
+        "live streams — DMCA & privacy respected.\n"
+        "• 📺 Official live TV channels + 🔍 search your library — in the "
+        "Mini App.\n\n"
+        "Tap \"Open SMDL\" or send a link to start."
     ),
     "ru": (
-        "🎬 SMDL — загрузчик из соцсетей.\n\n"
-        "Отправьте ссылку на любое видео — я скачаю его.\n"
-        "Отправьте видео или GIF — я превращу его в Telegram-стикер и "
-        "сразу добавлю в ваш персональный стикерпак.\n\n"
-        "Откройте Mini App для полной панели: загрузки, IPTV, управление "
-        "стикерпаками (видео / статика / эмодзи), поиск по всему сразу."
+        "📥 SMDL — ваш универсальный медиа-бот.\n\n"
+        "• Пришлите публичную ссылку (YouTube, TikTok, Instagram, Twitch, X…) "
+        "→ я скачаю.\n"
+        "• Видео или GIF → мгновенный Telegram-стикер в ваш пак.\n"
+        "• 🔴 Авто-запись публичных эфиров согласившихся стримеров Twitch / "
+        "YouTube / Kick — с учётом DMCA и приватности.\n"
+        "• 📺 Официальные ТВ-каналы + 🔍 поиск по библиотеке — в Mini App.\n\n"
+        "Нажмите «Open SMDL» или пришлите ссылку."
     ),
 }
 _BOT_SHORT_DESC = {
-    None: "Video downloader + Telegram sticker maker. Tap Open to start.",
-    "ru": "Загрузчик видео + создатель стикеров Telegram. Нажмите Open.",
+    None: "Download videos, make stickers, auto-record opted-in live streams. Tap Open.",
+    "ru": "Скачивайте видео, делайте стикеры, авто-запись согласившихся эфиров. Open.",
 }
 _BOT_COMMANDS = {
     None: [
         ("start",         "Welcome + dashboard button"),
+        ("help",          "What SMDL can do + all commands"),
         ("stickers",      "Open the sticker maker Mini App"),
         ("pack",          "Show your sticker pack link"),
         ("dashboard",     "Open the SMDL Mini App"),
@@ -1583,6 +1630,7 @@ _BOT_COMMANDS = {
     ],
     "ru": [
         ("start",         "Приветствие + кнопка панели"),
+        ("help",          "Что умеет SMDL + все команды"),
         ("stickers",      "Открыть Mini App для стикеров"),
         ("pack",          "Показать ссылку на ваш стикерпак"),
         ("dashboard",     "Открыть SMDL Mini App"),

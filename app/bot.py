@@ -1321,12 +1321,13 @@ async def build() -> Application:
         obj = None
         mime = "video/mp4"
         kind = "video"
+        is_circle = False
         if msg.video:
             obj = msg.video; mime = obj.mime_type or "video/mp4"
         elif msg.animation:
             obj = msg.animation; mime = obj.mime_type or "video/mp4"
         elif msg.video_note:                       # round video message (circle)
-            obj = msg.video_note; mime = "video/mp4"
+            obj = msg.video_note; mime = "video/mp4"; is_circle = True
         elif msg.document and (msg.document.mime_type or "").startswith("video/"):
             obj = msg.document; mime = msg.document.mime_type or "video/mp4"
         elif msg.document and (msg.document.mime_type or "") == "image/gif":
@@ -1423,6 +1424,7 @@ async def build() -> Application:
             else:
                 ok, err = await _sp.make_video_sticker(
                     _Path(tmp_path), dst, start=0.0, end=3.0, crop=None,
+                    circle=is_circle,   # round video-notes → transparent corners
                 )
             if not ok:
                 instant_err = err or "encode failed"

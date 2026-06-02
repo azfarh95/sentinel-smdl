@@ -94,7 +94,7 @@ async def probe(src: Path) -> dict:
     return out
 
 
-def _build_filter(crop: tuple[int, int, int, int] | None) -> str:
+def _build_filter(crop: tuple[int, int, int, int] | None, circle: bool = False) -> str:
     """Build the -vf filter chain. crop=(cx, cy, cw, ch) in source-pixel
     coordinates; None means center-crop-to-fill the whole frame into 512×512.
 
@@ -102,7 +102,15 @@ def _build_filter(crop: tuple[int, int, int, int] | None) -> str:
     matches what most TG sticker packs look like (content fills the square,
     no black bars). The trade-off is that the long-axis edges of the source
     get cropped. Users who care about preserving the full frame can trim
-    their clip in a real editor first."""
+    their clip in a real editor first.
+
+    circle=True ZOOMS IN on a round video-note to drop its (white/opaque)
+    corners. Telegram round video-notes are a circle inscribed in an opaque
+    square; we can't make WebM video transparent (libvpx strips alpha), so
+    instead we crop the largest centred square that fits INSIDE the inscribed
+    circle and scale it back up. The visible square then lies entirely within
+    the circle's content — the corners fall outside frame, so no white
+    survives. The trade-off is a ~1.45× zoom (the circle's outer rim is lost)."""
     parts: list[str] = []
     if crop:
         cx, cy, cw, ch = crop
@@ -116,6 +124,13 @@ def _build_filter(crop: tuple[int, int, int, int] | None) -> str:
         f"scale={STICKER_FRAME_PX}:{STICKER_FRAME_PX}:force_original_aspect_ratio=increase"
     )
     parts.append(f"crop={STICKER_FRAME_PX}:{STICKER_FRAME_PX}")
+    if circle:
+        # Inscribed square side = 512/√2 ≈ 362. Crop a touch tighter (a ~10px
+        # margin absorbs the anti-aliased rim + slightly-smaller circles) so the
+        # corners sit safely inside the content, then scale back to fill 512².
+        inner = round(STICKER_FRAME_PX / 2 ** 0.5) - 10   # 352
+        parts.append(f"crop={inner}:{inner}")
+        parts.append(f"scale={STICKER_FRAME_PX}:{STICKER_FRAME_PX}")
     # Cap fps
     parts.append(f"fps={STICKER_MAX_FPS}")
     return ",".join(parts)
@@ -128,6 +143,7 @@ async def make_video_sticker(
     start: float = 0.0,
     end: float | None = None,
     crop: tuple[int, int, int, int] | None = None,
+    circle: bool = False,
 ) -> tuple[bool, str | None]:
     """Encode `src` into a Telegram video sticker at `dst`.
 
@@ -137,6 +153,8 @@ async def make_video_sticker(
         start: trim start (seconds)
         end:   trim end (seconds); if None, encode min(STICKER_MAX_DUR_S, full)
         crop:  (cx, cy, cw, ch) in source-pixel coords; None = no crop
+        circle: zoom-crop a round video-note so its opaque corners fall outside
+                the frame (see _build_filter). Stays opaque yuv420p.
 
     Returns (ok, error_message). On success dst is a valid Telegram video
     sticker (≤256 KB, VP9, 512×512, ≤3s).
@@ -152,7 +170,7 @@ async def make_video_sticker(
     if duration <= 0:
         return False, "trim window has zero duration"
 
-    vf = _build_filter(crop)
+    vf = _build_filter(crop, circle=circle)
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     last_size = 0
@@ -168,8 +186,6 @@ async def make_video_sticker(
             "-b:v", bitrate,
             "-crf", "30",
             "-an",                 # no audio (Telegram strips it anyway)
-            # Center-crop-to-fill means no padding → no alpha channel needed.
-            # Standard yuv420p keeps the encoder happy and the file small.
             "-pix_fmt", "yuv420p",
             "-deadline", "good",
             "-cpu-used", "2",

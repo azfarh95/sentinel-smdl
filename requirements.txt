@@ -22,7 +22,7 @@ python-multipart>=0.0.18
 # Image thumbnail generation for the Files tab (#32). Video thumbs use the
 # system ffmpeg via subprocess; this is only for image decoding.
 Pillow>=10.4,<12
-# Background removal for cutout stickers — subject isolation via rembg
-# (onnxruntime + the small u2netp model). Imported lazily in sticker_processor,
-# so the rest of the app still runs if it's absent.
-rembg>=2.0.59
+# Background removal for cutout stickers — subject isolation via rembg.
+# The [cpu] extra pulls onnxruntime (base rembg doesn't). Imported lazily in
+# sticker_processor, so the rest of the app still runs if it's absent.
+rembg[cpu]>=2.0.59

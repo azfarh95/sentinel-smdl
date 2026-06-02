@@ -80,6 +80,39 @@ class MakeStickerBody(BaseModel):
     # Trim in seconds. Frontend clamps to [0, duration] before posting.
     trim_start: float = 0.0
     trim_end:   float = 3.0
+    # Shape & cutout — STATIC stickers only (webp carries alpha; webm here
+    # can't, see feedback_smdl_sticker_alpha). Ignored for video/custom_emoji.
+    #   shape:  None/'square' = full frame; circle|triangle|diamond|heart|star|custom
+    #   points: normalised [[x,y],…] polygon (0..1, output-square space) for 'custom'
+    #   cutout: rembg background removal → transparent subject
+    shape:  str | None = None
+    points: list | None = None
+    cutout: bool = False
+
+
+def _coerce_points(raw) -> list[tuple[float, float]] | None:
+    """Normalise the custom-shape polygon from the editor into clamped
+    (x, y) tuples in 0..1. Accepts [[x,y],…] or [{x,y},…]. Returns None
+    unless at least 3 valid vertices survive."""
+    if not isinstance(raw, list):
+        return None
+    pts: list[tuple[float, float]] = []
+    for p in raw:
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            x, y = p[0], p[1]
+        elif isinstance(p, dict):
+            x, y = p.get("x"), p.get("y")
+        else:
+            continue
+        try:
+            x = float(x); y = float(y)
+        except (TypeError, ValueError):
+            continue
+        pts.append((min(1.0, max(0.0, x)), min(1.0, max(0.0, y))))
+    return pts if len(pts) >= 3 else None
+
+
+_SHAPE_NONE = {"", "square", "none", "rect", "rectangle"}
 
 
 class RenamePackBody(BaseModel):
@@ -286,9 +319,61 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
         )
         sticker_format = "video"
     elif pack_kind == "static":
-        ok, err = await _sp.make_static_sticker(
-            src, dst, crop=crop, seek_s=float(body.trim_start or 0.0),
-        )
+        # Shape mask + background cutout are static-only (webp alpha). Build a
+        # mask and/or a transparent cutout source, then encode. Temp artefacts
+        # are cleaned up regardless of outcome.
+        shape = (body.shape or "").strip().lower()
+        want_shape = shape not in _SHAPE_NONE
+        want_cutout = bool(body.cutout)
+        static_src = src
+        static_seek = float(body.trim_start or 0.0)
+        mask_path: Path | None = None
+        tmp_files: list[Path] = []
+        try:
+            if want_cutout:
+                # rembg needs a still — pull the chosen frame to PNG first
+                # (handles both image and video sources), then segment it.
+                frame_png = dst.with_name(f"{draft_id}_frame.png")
+                fok, ferr = await _sp.extract_frame(src, frame_png, seek_s=static_seek)
+                if not fok:
+                    await _db.sticker_draft_set_status(draft_id, "failed", ferr)
+                    raise HTTPException(status_code=422, detail=ferr or "frame extract failed")
+                tmp_files.append(frame_png)
+                cut_png = dst.with_name(f"{draft_id}_cut.png")
+                cok, cerr = await _sp.bg_remove(frame_png, cut_png)
+                if not cok:
+                    await _db.sticker_draft_set_status(draft_id, "failed", cerr)
+                    raise HTTPException(status_code=422, detail=cerr or "background removal failed")
+                tmp_files.append(cut_png)
+                static_src = cut_png
+                static_seek = 0.0   # cut_png already holds the chosen frame
+            if want_shape:
+                pts = None
+                if shape == "custom":
+                    pts = _coerce_points(body.points)
+                    if not pts:
+                        await _db.sticker_draft_set_status(
+                            draft_id, "failed", "custom shape needs >=3 points")
+                        raise HTTPException(status_code=422,
+                                            detail="custom shape needs at least 3 points")
+                mask_png = dst.with_name(f"{draft_id}_mask.png")
+                mres = _sp.build_shape_mask(shape, mask_png, points=pts)
+                if mres is None:
+                    await _db.sticker_draft_set_status(
+                        draft_id, "failed", f"unsupported shape: {shape}")
+                    raise HTTPException(status_code=422, detail=f"unsupported shape: {shape}")
+                tmp_files.append(mask_png)
+                mask_path = mask_png
+            ok, err = await _sp.make_static_sticker(
+                static_src, dst, crop=crop, seek_s=static_seek,
+                mask=mask_path, keep_alpha=want_cutout,
+            )
+        finally:
+            for f in tmp_files:
+                try:
+                    f.unlink(missing_ok=True)
+                except Exception:
+                    pass
         sticker_format = "static"
     else:  # custom_emoji
         is_video = (out_ext == "webm")
@@ -1529,6 +1614,9 @@ _EDIT_HTML = r"""<!doctype html>
     .crop-handle.ne{right:-8px;top:-8px;cursor:ne-resize;}
     .crop-handle.sw{left:-8px;bottom:-8px;cursor:sw-resize;}
     .crop-handle.se{right:-8px;bottom:-8px;cursor:se-resize;}
+    .draw-canvas{position:absolute;inset:0;display:none;
+                 touch-action:none;cursor:crosshair;}
+    .draw-canvas.on{display:block;}
     .section{margin-top:14px;}
     .section label{display:block;font-size:12px;
                     color:var(--tg-theme-hint-color,#999);margin-bottom:4px;}
@@ -1589,6 +1677,7 @@ _EDIT_HTML = r"""<!doctype html>
         <div class="crop-handle se" data-h="se"></div>
       </div>
     </div>
+    <canvas class="draw-canvas" id="draw-canvas"></canvas>
   </div>
   <div class="meta" style="margin-top:6px">
     <span id="crop-mode-hint">Center fill: the middle of the video is cropped square into the sticker.</span>
@@ -1623,6 +1712,24 @@ _EDIT_HTML = r"""<!doctype html>
       <span class="pill on" id="aspect-lock-toggle">🔒 1 : 1</span>
       <span class="meta">Toggle "Pick region" to drag a box on the video.</span>
     </div>
+  </div>
+
+  <div class="section" id="shape-section">
+    <label>Shape &amp; cutout <span class="meta">(still stickers — transparent)</span></label>
+    <div class="row" id="shape-row">
+      <span class="pill on" data-shape="square">▢ Square</span>
+      <span class="pill" data-shape="circle">◯ Circle</span>
+      <span class="pill" data-shape="triangle">△ Triangle</span>
+      <span class="pill" data-shape="star">⭐ Star</span>
+      <span class="pill" data-shape="heart">♥ Heart</span>
+      <span class="pill" data-shape="diamond">◆ Diamond</span>
+      <span class="pill" data-shape="custom">✎ Custom</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <span class="pill" id="cutout-toggle">✂️ Remove background</span>
+      <span class="pill" id="draw-clear" style="display:none">↺ Redraw</span>
+    </div>
+    <div class="meta" id="shape-hint" style="margin-top:6px">Square = the full (cropped) frame.</div>
   </div>
 
   <div class="section">
@@ -1980,6 +2087,109 @@ const _editorPackKind = (() => {
   } catch (e) { return 'video'; }
 })();
 
+// ── Shape & cutout (static webp only — webm here can't carry alpha) ───────
+const shapeSection = document.getElementById('shape-section');
+const shapeRow     = document.getElementById('shape-row');
+const cutoutToggle = document.getElementById('cutout-toggle');
+const shapeHint    = document.getElementById('shape-hint');
+const drawCanvas   = document.getElementById('draw-canvas');
+const drawClearBtn = document.getElementById('draw-clear');
+
+let chosenShape = 'square';   // square|circle|triangle|star|heart|diamond|custom
+let cutout = false;
+let customPoints = [];        // normalised [[x,y],…] in output-square space
+
+// Shapes/cutout produce transparency, which only the static webp encoder
+// supports here — hide the whole section for video & custom-emoji packs.
+if (_editorPackKind !== 'static') shapeSection.style.display = 'none';
+
+const SHAPE_HINTS = {
+  square:   'Square = the full (cropped) frame.',
+  circle:   'Circle cut from the frame — transparent corners.',
+  triangle: 'Triangle cutout — transparent outside.',
+  star:     'Star cutout — transparent outside.',
+  heart:    'Heart cutout — transparent outside.',
+  diamond:  'Diamond cutout — transparent outside.',
+  custom:   'Draw a shape over the image (drag a loop), then Make.',
+};
+
+shapeRow.addEventListener('click', e => {
+  const pill = e.target.closest('[data-shape]');
+  if (!pill) return;
+  chosenShape = pill.dataset.shape;
+  shapeRow.querySelectorAll('[data-shape]').forEach(p => p.classList.toggle('on', p === pill));
+  shapeHint.textContent = SHAPE_HINTS[chosenShape] || '';
+  const drawing = chosenShape === 'custom';
+  drawCanvas.classList.toggle('on', drawing);
+  drawClearBtn.style.display = drawing ? '' : 'none';
+  if (drawing) { resizeDrawCanvas(); redrawCustom(); } else { customPoints = []; }
+});
+cutoutToggle.addEventListener('click', () => {
+  cutout = !cutout;
+  cutoutToggle.classList.toggle('on', cutout);
+});
+drawClearBtn.addEventListener('click', () => { customPoints = []; redrawCustom(); });
+
+// The custom polygon is captured in the *output square* — the region that
+// actually becomes the 512×512 sticker. That's the crop box when "Pick
+// region" is on, else the centred square of the video (center-fill cover).
+function outputSquareRect() {
+  const vr = vid.getBoundingClientRect();
+  if (cropMode && cropW && cropH) {
+    const wr = wrap.getBoundingClientRect();
+    const side = Math.min(cropW, cropH);
+    return { left: wr.left + cropX, top: wr.top + cropY, side };
+  }
+  const side = Math.min(vr.width, vr.height);
+  return { left: vr.left + (vr.width - side) / 2, top: vr.top + (vr.height - side) / 2, side };
+}
+function resizeDrawCanvas() {
+  const wr = wrap.getBoundingClientRect();
+  drawCanvas.width = wr.width; drawCanvas.height = wr.height;
+}
+function redrawCustom() {
+  const ctx = drawCanvas.getContext('2d');
+  ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+  if (!customPoints.length) return;
+  const sq = outputSquareRect();
+  const wr = wrap.getBoundingClientRect();
+  ctx.beginPath();
+  customPoints.forEach((p, i) => {
+    const x = sq.left + p[0] * sq.side - wr.left;
+    const y = sq.top  + p[1] * sq.side - wr.top;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(90,200,250,0.25)';
+  ctx.strokeStyle = '#5ac8fa'; ctx.lineWidth = 2;
+  ctx.fill(); ctx.stroke();
+}
+let _drawing = false;
+function _addCustomPoint(e) {
+  const sq = outputSquareRect();
+  if (!sq.side) return;
+  const nx = Math.max(0, Math.min(1, (e.clientX - sq.left) / sq.side));
+  const ny = Math.max(0, Math.min(1, (e.clientY - sq.top)  / sq.side));
+  const last = customPoints[customPoints.length - 1];
+  if (last && Math.hypot(nx - last[0], ny - last[1]) < 0.012) return;
+  customPoints.push([nx, ny]);
+}
+drawCanvas.addEventListener('pointerdown', e => {
+  if (chosenShape !== 'custom') return;
+  e.preventDefault();
+  _drawing = true; customPoints = [];
+  try { drawCanvas.setPointerCapture(e.pointerId); } catch (_) {}
+  _addCustomPoint(e); redrawCustom();
+});
+drawCanvas.addEventListener('pointermove', e => {
+  if (!_drawing) return;
+  _addCustomPoint(e); redrawCustom();
+});
+drawCanvas.addEventListener('pointerup', () => { _drawing = false; redrawCustom(); });
+window.addEventListener('resize', () => {
+  if (chosenShape === 'custom') { resizeDrawCanvas(); redrawCustom(); }
+});
+
 makeBtn.addEventListener('click', async () => {
   makeBtn.disabled = true;
   progressEl.textContent = 'Encoding sticker… (5–20s)';
@@ -1991,6 +2201,19 @@ makeBtn.addEventListener('click', async () => {
   };
   const crop = cropToSourcePixels();
   if (crop) Object.assign(body, { crop_x: crop.x, crop_y: crop.y, crop_w: crop.w, crop_h: crop.h });
+  // Shape & cutout are static-only. Square = no mask.
+  if (_editorPackKind === 'static') {
+    if (chosenShape && chosenShape !== 'square') body.shape = chosenShape;
+    if (chosenShape === 'custom') {
+      if (customPoints.length < 3) {
+        progressEl.textContent = '✏️ Draw a shape first — drag a loop over the image.';
+        makeBtn.disabled = false;
+        return;
+      }
+      body.points = customPoints;
+    }
+    if (cutout) body.cutout = true;
+  }
   try {
     const r = await api(`/api/sticker_drafts/${DRAFT_ID}/make`, {
       method: 'POST', body: JSON.stringify(body),

@@ -307,9 +307,39 @@ def _bg_remove_sync(src: Path, dst: Path) -> None:
     out.save(str(dst))
 
 
+async def extract_frame(src: Path, dst: Path, *, seek_s: float = 0.0) -> tuple[bool, str | None]:
+    """Decode one frame from `src` (image or video) at `seek_s` to a PNG.
+
+    rembg needs a still image, so the cutout path runs this first when the
+    source is a video/animation. For an image source seek_s is 0 and this is
+    effectively a re-encode to PNG (harmless)."""
+    if not src.exists():
+        return False, f"source not found: {src}"
+    if not shutil.which("ffmpeg"):
+        return False, "ffmpeg not installed in container"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{seek_s:.3f}", "-i", str(src),
+        "-frames:v", "1", "-c:v", "png",
+        str(dst),
+    ]
+    loop = asyncio.get_running_loop()
+    try:
+        rc, stderr = await loop.run_in_executor(None, lambda: _run(cmd, 30))
+    except Exception as e:
+        return False, f"ffmpeg crashed: {e!r}"
+    if rc != 0:
+        return False, "frame extract failed: " + stderr.decode("utf-8", errors="replace")[-200:]
+    return (dst.exists(), None if dst.exists() else "no frame produced")
+
+
 async def bg_remove(src: Path, dst: Path) -> tuple[bool, str | None]:
     """Strip the background → a transparent RGBA PNG at `dst`. Feed the result
-    to make_static_sticker(keep_alpha=True) for a webp cutout sticker."""
+    to make_static_sticker(keep_alpha=True) for a webp cutout sticker.
+
+    `src` must be a still image (PNG/JPG/…); for video sources run
+    extract_frame first."""
     if not src.exists():
         return False, f"source not found: {src}"
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -373,13 +403,29 @@ async def make_static_sticker(
     last_err = ""
     for quality in (90, 75, 60, 45, 30):
         if mask is not None:
-            # Scale/crop the frame, then merge the mask in as the alpha channel.
+            # Scale/crop the frame, then bring the mask in as alpha. Two modes:
+            #   keep_alpha=False → REPLACE alpha with the mask (a shape cut from
+            #                      an opaque source: circle/triangle/… of a photo).
+            #   keep_alpha=True  → INTERSECT the source's own alpha with the mask
+            #                      (a rembg cutout PNG further clipped to a shape).
+            #                      alphamerge alone would *overwrite* the cutout's
+            #                      alpha, so we multiply the two alpha planes first.
+            if keep_alpha:
+                fc = (
+                    f"[0:v]{vf},format=rgba,split[fgA][fgB];"
+                    f"[fgB]alphaextract,format=gray[sa];"
+                    f"[1:v]format=gray[mk];"
+                    f"[sa][mk]blend=all_mode=multiply,format=gray[ma];"
+                    f"[fgA][ma]alphamerge"
+                )
+            else:
+                fc = f"[0:v]{vf}[fg];[fg][1:v]alphamerge"
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", f"{seek_s:.3f}", "-i", str(src),
                 "-i", str(mask),
                 "-frames:v", "1",
-                "-filter_complex", f"[0:v]{vf}[fg];[fg][1:v]alphamerge",
+                "-filter_complex", fc,
                 "-c:v", "libwebp",
                 "-quality", str(quality),
                 "-pix_fmt", "yuva420p",

@@ -4007,7 +4007,7 @@ button.warn { background: #ff9500; color: #fff; }
         <span style="font-weight:600">Add to your pack</span>
         <span style="flex:1"></span>
         <span class=pill data-mode=instant onclick="stickersSetMode('instant')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">⚡ Instant</span>
-        <span class=pill data-mode=manual onclick="stickersSetMode('manual')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">✏️ Manual</span>
+        <span class=pill data-mode=manual onclick="stickersSetMode('manual')" title="Open the editor: scrubber · crop · shapes · background cutout" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">✂️ Edit / crop</span>
         <input type=text id=stickers-default-emoji maxlength=8 value="🎬" title="Default emoji used in Instant mode" style="width:54px;padding:4px 6px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:18px;text-align:center">
       </div>
       <div class=meta id=stickers-mode-hint style="font-size:11px;margin-bottom:8px;color:var(--muted)"></div>
@@ -5171,7 +5171,7 @@ async function loadStickers() {
       '<div style="color:var(--muted);font-size:11px;margin-top:2px">' + esc(_fmtStickerExpires(d.expires_at)) + '</div>' +
       err +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' +
-      '<button onclick="location.href=\\'/stickers/' + d.id + '/edit?kind=' + _stickersKind + '\\'">Make sticker</button>' +
+      '<button onclick="location.href=\\'/stickers/' + d.id + '/edit?kind=' + _stickersKind + '\\'" title="Scrubber · crop · shapes · cutout">✂️ Edit &amp; crop</button>' +
       '<button class=sec onclick="stickersDeleteDraft(' + d.id + ')">Delete</button>' +
       '</div></div>';
     draftsEl.appendChild(div);
@@ -5618,9 +5618,9 @@ function stickersSetMode(m) {
   const emojiInput = document.getElementById('stickers-default-emoji');
   if (emojiInput) emojiInput.style.display = m === 'instant' ? '' : 'none';
   const hint = document.getElementById('stickers-mode-hint');
-  if (hint) hint.textContent = m === 'instant'
-    ? '⚡ Upload → convert with sane defaults (centre crop, first 3s) → add to your ' + _stickersKind + ' pack → bot DMs you the sticker. Zero-tap after the drop.'
-    : '✏️ Upload creates a draft. Tap "Make sticker" on a draft to open the editor (scrubber, crop, emoji picker).';
+  if (hint) hint.innerHTML = m === 'instant'
+    ? '⚡ Upload → convert with sane defaults (centre crop, first 3s) → DM\\'d to you. A single drop also leaves a draft below — tap <b>✂️ Edit &amp; crop</b> to re-crop, pick a shape, or cut out the background.'
+    : '✂️ Upload creates a draft. Tap <b>✂️ Edit &amp; crop</b> on it for the editor: scrubber, crop region, shapes (circle / triangle / star / heart / diamond / custom), and background cutout (still stickers).';
 }
 
 // Persist default emoji on change.
@@ -5652,11 +5652,15 @@ function _stickersEnqueue(files) {
 async function _stickersDrainQueue() {
   if (_stickersUploadActive) return;
   _stickersUploadActive = true;
+  // A lone drop keeps its draft so the user has an "✂️ Edit & crop" card to
+  // re-crop / shape / cut out even in Instant mode. A bulk drop cleans up so
+  // 20 files don't litter the Drafts list.
+  const keepDrafts = _stickersUploadQueue.length === 1;
   while (_stickersUploadQueue.length) {
     const f = _stickersUploadQueue.shift();
     _stickersQueuePillUpdate();
     try {
-      await stickersUploadFile(f);
+      await stickersUploadFile(f, keepDrafts);
     } catch (e) {
       // stickersUploadFile already toasts the user — keep draining.
     }
@@ -5719,7 +5723,7 @@ function _wireStickersUpload() {
   });
 }
 
-async function stickersUploadFile(file) {
+async function stickersUploadFile(file, keepDraft) {
   const progEl = document.getElementById('stickers-upload-progress');
   const barEl = document.getElementById('stickers-upload-bar');
   const statEl = document.getElementById('stickers-upload-status');
@@ -5772,11 +5776,16 @@ async function stickersUploadFile(file) {
     statEl.textContent = '⚡ Converting & sending…';
     try {
       await _stickersInstantMake(result.id);
-      // Clean the draft so a 20-file bulk drop doesn't litter the
-      // Drafts list with 20 expended source files.
-      try { await api('/api/sticker_drafts/' + result.id + '/delete', { method: 'POST', body: '{}' }); }
-      catch (e) { /* draft cleanup is best-effort */ }
-      statEl.textContent = '✓ Added to your ' + _stickersKind + ' pack';
+      // A lone drop keeps its draft so the user can re-crop / shape / cut it
+      // out from the editor; a bulk drop cleans up so the Drafts list doesn't
+      // fill with 20 expended source files.
+      if (!keepDraft) {
+        try { await api('/api/sticker_drafts/' + result.id + '/delete', { method: 'POST', body: '{}' }); }
+        catch (e) { /* draft cleanup is best-effort */ }
+        statEl.textContent = '✓ Added to your ' + _stickersKind + ' pack';
+      } else {
+        statEl.innerHTML = '✓ Added to your ' + _stickersKind + ' pack — tap <b>✂️ Edit &amp; crop</b> below to refine.';
+      }
     } catch (e) {
       statEl.textContent = '❌ ' + e;
       statEl.style.color = '#e88';

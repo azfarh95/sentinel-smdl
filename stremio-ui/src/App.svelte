@@ -432,6 +432,73 @@
   $effect(() => {
     api.trakt.status().then(r => { traktConnected = !!r.connected; }).catch(() => {});
   });
+
+  // ── Hardened Trakt connect (device-code) ────────────────────────────────
+  // The WebView suspends our JS when you leave for trakt.tv, which paused the
+  // old setInterval poll (so the token never got exchanged). Keep the
+  // device-code in component state, and ALSO poll on visibility/focus so
+  // "authorize → come back" connects immediately, plus a manual "check now".
+  let traktConnecting = $state(false);
+  let traktDevice = $state<{ device_code: string; user_code: string;
+                             verification_url: string; interval: number } | null>(null);
+  let traktPollTimer: ReturnType<typeof setInterval> | null = null;
+
+  function traktStopPoll() {
+    if (traktPollTimer != null) { clearInterval(traktPollTimer); traktPollTimer = null; }
+  }
+  async function traktPollOnce(): Promise<void> {
+    if (!traktDevice) return;
+    try {
+      const pr = await api.trakt.connectPoll(traktDevice.device_code);
+      if (pr.status === "connected") {
+        traktConnected = true; traktConnecting = false; traktDevice = null; traktStopPoll();
+      } else if (pr.status === "error") {
+        lastError = pr.error ?? "trakt poll error";
+        traktConnecting = false; traktDevice = null; traktStopPoll();
+      }
+    } catch (_) { /* keep waiting */ }
+  }
+  async function traktStartConnect() {
+    lastError = null;
+    const r = await api.trakt.connectStart();
+    if (!r.ok) { lastError = r.error ?? "trakt connect failed"; return; }
+    traktDevice = { device_code: r.device_code, user_code: r.user_code,
+                    verification_url: r.verification_url, interval: r.interval || 5 };
+    traktConnecting = true;
+    traktStopPoll();
+    traktPollTimer = setInterval(traktPollOnce, traktDevice.interval * 1000);
+    try { window.open(r.verification_url, "_blank"); } catch (_) { /* WebView may block */ }
+  }
+  function traktCancelConnect() { traktConnecting = false; traktDevice = null; traktStopPoll(); }
+
+  // Resume the poll the instant the page is visible/focused again — WebView
+  // suspends background timers while you're over on trakt.tv.
+  $effect(() => {
+    const onWake = () => { if (traktDevice && document.visibilityState === "visible") traktPollOnce(); };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => { document.removeEventListener("visibilitychange", onWake);
+                   window.removeEventListener("focus", onWake); };
+  });
+
+  // ── Trakt watchlist (rendered in the Library tab) ───────────────────────
+  let watchlist = $state<MetaItem[]>([]);
+  let watchlistType = $state<"movies" | "shows">("movies");
+  let watchlistLoading = $state(false);
+  async function loadWatchlist() {
+    watchlistLoading = true;
+    try { const r = await api.trakt.watchlist(watchlistType); watchlist = r.ok ? r.items : []; }
+    catch (_) { watchlist = []; }
+    finally { watchlistLoading = false; }
+  }
+  function setWatchlistType(t: "movies" | "shows") {
+    if (watchlistType === t) return;
+    watchlistType = t; watchlist = []; loadWatchlist();
+  }
+  $effect(() => {
+    if (view === "library" && traktConnected && !watchlist.length && !watchlistLoading) loadWatchlist();
+  });
+
   async function scrobble(event: "start" | "pause" | "stop", vid: HTMLVideoElement) {
     if (!traktConnected || !activeJob || !selected) return;
     const pct = vid.duration > 0 ? (vid.currentTime / vid.duration) * 100 : 0;
@@ -1086,22 +1153,24 @@
                      onclick={async () => { await api.trakt.disconnect(); traktConnected = false; }}>
               Disconnect
             </Button>
+          {:else if traktConnecting && traktDevice}
+            <div class="space-y-2">
+              <p class="text-sm">Open
+                <a href={traktDevice.verification_url} target="_blank"
+                   class="text-primary underline">{traktDevice.verification_url}</a>
+                and enter this code:</p>
+              <div class="text-2xl font-mono font-bold tracking-widest text-center
+                          bg-muted rounded-md py-2 select-all">{traktDevice.user_code}</div>
+              <p class="text-xs text-muted-foreground flex items-center gap-1">
+                <Loader2 class="animate-spin size-3" /> Waiting for you to authorize — auto-detects when you return.
+              </p>
+              <div class="flex gap-2">
+                <Button size="sm" onclick={traktPollOnce}>I've authorized — check now</Button>
+                <Button variant="ghost" size="sm" onclick={traktCancelConnect}>Cancel</Button>
+              </div>
+            </div>
           {:else}
-            <Button size="sm" onclick={async () => {
-              const r = await api.trakt.connectStart();
-              if (!r.ok) { lastError = r.error ?? "trakt connect failed"; return; }
-              const win = window.open(r.verification_url, "_blank");
-              alert(`Open ${r.verification_url} and enter code: ${r.user_code}`);
-              const poll = setInterval(async () => {
-                try {
-                  const pr = await api.trakt.connectPoll(r.device_code);
-                  if (pr.status === "connected") { traktConnected = true; clearInterval(poll); }
-                  else if (pr.status === "error") { clearInterval(poll); lastError = pr.error ?? "trakt poll error"; }
-                } catch (_) { /* keep polling */ }
-              }, r.interval * 1000);
-            }}>
-              Connect Trakt
-            </Button>
+            <Button size="sm" onclick={traktStartConnect}>Connect Trakt</Button>
           {/if}
         </CardContent></Card>
         {/if}
@@ -1121,6 +1190,40 @@
 
     <!-- ── LIBRARY VIEW (cached files on G:\) ──────────────────────── -->
     {#if view === "library"}
+      {#if traktConnected}
+        <section class="mb-5">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold text-foreground">Trakt Watchlist</h2>
+            <div class="inline-flex rounded-md border border-border overflow-hidden text-xs">
+              <button class="px-2 py-1 {watchlistType === 'movies' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}"
+                      onclick={() => setWatchlistType('movies')}>Movies</button>
+              <button class="px-2 py-1 {watchlistType === 'shows' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}"
+                      onclick={() => setWatchlistType('shows')}>Shows</button>
+            </div>
+          </div>
+          {#if watchlistLoading}
+            <div class="text-xs text-muted-foreground"><Loader2 class="inline animate-spin size-3" /> Loading watchlist…</div>
+          {:else if watchlist.length}
+            <div class="flex gap-3 overflow-x-auto pb-2 -mx-4 px-4 snap-x">
+              {#each watchlist as m (m.id)}
+                <button onclick={() => openDetail(m)} class="group shrink-0 w-28 sm:w-32 text-left snap-start">
+                  <div class="aspect-[2/3] rounded-lg overflow-hidden bg-muted border border-border
+                              group-hover:border-primary group-hover:scale-105 transition-all duration-200">
+                    {#if m.poster}
+                      <img src={m.poster} alt={m.name} loading="lazy" class="w-full h-full object-cover" />
+                    {:else}
+                      <div class="w-full h-full flex items-center justify-center"><Film class="size-6 text-muted-foreground" /></div>
+                    {/if}
+                  </div>
+                  <div class="mt-1 text-[11px] truncate text-foreground">{m.name}</div>
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <p class="text-xs text-muted-foreground">Your {watchlistType} watchlist is empty — add titles on Trakt and they'll show here.</p>
+          {/if}
+        </section>
+      {/if}
       {#if cacheDisk}
         <div class="mb-2 text-xs text-muted-foreground flex justify-between">
           <span>

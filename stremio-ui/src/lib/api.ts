@@ -282,8 +282,7 @@ export const api = {
         "/api/miniapp/stremio/trakt/scrobble", params,
       ),
     watchlist: (type: "movies" | "shows" = "movies") =>
-      get<{ ok: boolean; error?: string;
-            items: Array<{ id: string; type: string; name: string; year: number | null }> }>(
+      get<{ ok: boolean; error?: string; items: MetaItem[] }>(
         `/api/miniapp/stremio/trakt/watchlist?type=${type}`,
       ),
   },

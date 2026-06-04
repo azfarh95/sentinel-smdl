@@ -1119,10 +1119,14 @@ async def stremio_trakt_scrobble(body: _TraktScrobbleBody, request: Request):
 
 @router.get("/api/miniapp/stremio/trakt/watchlist")
 async def stremio_trakt_watchlist(request: Request, type: str = "movies"):
-    """Render the user's Trakt watchlist inside Theater's Library tab."""
+    """The user's Trakt watchlist, ENRICHED with Cinemeta posters/meta so it
+    renders as a poster row in Theater's Library tab — tap a poster to drop
+    straight into the detail/grab flow. Per-item enrichment is best-effort:
+    a title Cinemeta doesn't know falls back to bare name/year."""
     p = await _verify(request)
     _require_owner(p)
     from . import trakt as _t
+    from . import stremio as _st
     tok = _t.load_token()
     if not tok:
         return {"ok": False, "error": "trakt not connected", "items": []}
@@ -1131,18 +1135,25 @@ async def stremio_trakt_watchlist(request: Request, type: str = "movies"):
         data = await asyncio.to_thread(_t.watchlist, tok, type_=type)
     except _t.TraktError as e:
         return {"ok": False, "error": str(e), "items": []}
-    # Map Trakt's shape to MetaItem-ish for the UI
-    items = []
-    for entry in (data or []):
+
+    async def _enrich(entry: dict) -> Optional[dict]:
         section = entry.get("movie") or entry.get("show") or {}
-        ids = section.get("ids") or {}
-        items.append({
-            "id": ids.get("imdb") or "",
-            "type": "movie" if "movie" in entry else "series",
-            "name": section.get("title") or "",
-            "year": section.get("year"),
-        })
-    return {"ok": True, "items": items}
+        imdb = (section.get("ids") or {}).get("imdb") or ""
+        if not imdb.startswith("tt"):
+            return None
+        type_ = "movie" if "movie" in entry else "series"
+        try:
+            m = await asyncio.to_thread(_st.get_meta, imdb, type_, None)
+        except Exception:
+            m = None
+        if m:
+            return _meta_to_dict(m)
+        return {"id": imdb, "type": type_, "name": section.get("title") or "",
+                "year": section.get("year"), "poster": None, "description": None,
+                "imdb_rating": None, "genres": []}
+
+    enriched = await asyncio.gather(*[_enrich(e) for e in (data or [])])
+    return {"ok": True, "items": [d for d in enriched if d]}
 
 
 # ── Stremio P4 — queue + cache routes ──────────────────────────────────────

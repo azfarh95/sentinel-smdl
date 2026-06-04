@@ -1854,6 +1854,16 @@ _EDIT_HTML = r"""<!doctype html>
       background:transparent;color:var(--dim);cursor:pointer;white-space:nowrap;
       transition:background .12s,color .12s;}
     .skin-switch button.on{background:var(--accent);color:var(--onacc);font-weight:600;}
+    /* Mode complexity — gate which sections appear:
+       Simple = essentials only · Standard = + editing · Pro = everything. */
+    body.skin-playful [data-tier="std"],
+    body.skin-playful [data-tier="pro"],
+    body.skin-native  [data-tier="pro"]{display:none !important;}
+    /* Simple also hides the advanced bits INSIDE the Shape section (cutout,
+       corner fill, padding, custom freehand) — it auto-uses a transparent cut. */
+    body.skin-playful .adv-only{display:none !important;}
+    .simple-only{display:none;}
+    body.skin-playful .simple-only{display:block;}
     .video-wrap{position:relative;display:inline-block;max-width:100%;
                 background:#000;border-radius:var(--radius);overflow:hidden;
                 touch-action:none;}
@@ -1982,16 +1992,19 @@ _EDIT_HTML = r"""<!doctype html>
       </div>
       <canvas class="draw-canvas" id="draw-canvas"></canvas>
     </div>
-    <div class="result-pane">
+    <div class="result-pane" data-tier="std">
       <canvas id="result-preview" width="256" height="256"></canvas>
       <div class="result-cap">Result preview ▶</div>
     </div>
   </div>
-  <div class="meta" style="margin-top:6px">
+  <div class="meta" style="margin-top:6px" data-tier="std">
     <span id="crop-mode-hint">Center fill: the middle of the video is cropped square into the sticker.</span>
   </div>
+  <div class="meta simple-only" style="margin-top:8px">
+    ✨ The first ~3s and a centre square become your sticker. Want trim, crop &amp; shapes? Switch to <b>⚡ Pro</b>.
+  </div>
 
-  <div class="section">
+  <div class="section" data-tier="std">
     <label>Trim window (≤ 3 seconds)</label>
     <div class="timeline" id="timeline">
       <div class="timeline-track">
@@ -2013,7 +2026,7 @@ _EDIT_HTML = r"""<!doctype html>
     </div>
   </div>
 
-  <div class="section">
+  <div class="section" data-tier="std">
     <label>Crop</label>
     <div class="row">
       <span class="pill" id="crop-mode-toggle">Center fill</span>
@@ -2023,7 +2036,7 @@ _EDIT_HTML = r"""<!doctype html>
   </div>
 
   <div class="section" id="shape-section">
-    <label id="shape-label">Shape &amp; cutout <span class="meta">(still stickers — transparent)</span></label>
+    <label id="shape-label">Shape <span class="meta">(tap one — Simple keeps a clean transparent cut)</span></label>
     <div class="row" id="shape-row">
       <span class="pill on" data-shape="square">▢ Square</span>
       <span class="pill" data-shape="circle">◯ Circle</span>
@@ -2031,24 +2044,24 @@ _EDIT_HTML = r"""<!doctype html>
       <span class="pill" data-shape="star">⭐ Star</span>
       <span class="pill" data-shape="heart">♥ Heart</span>
       <span class="pill" data-shape="diamond">◆ Diamond</span>
-      <span class="pill" data-shape="custom">✎ Custom</span>
+      <span class="pill adv-only" data-shape="custom">✎ Custom</span>
     </div>
-    <div class="row" style="margin-top:8px">
+    <div class="row adv-only" style="margin-top:8px">
       <span class="pill" id="cutout-toggle">✂️ Remove background</span>
       <span class="pill" id="draw-clear" style="display:none">↺ Redraw</span>
     </div>
-    <div class="row" id="fill-row" style="margin-top:8px;display:none">
+    <div class="row adv-only" id="fill-row" style="margin-top:8px;display:none">
       <span class="meta">Corners:</span>
       <span class="pill on" data-fill="blur">🌫 Blur</span>
       <span class="pill" data-fill="color">🎨 Colour</span>
       <span class="pill" data-fill="transparent">⬚ Transparent</span>
       <input type="color" id="fill-color" value="#ffffff" style="display:none">
     </div>
-    <div class="row" id="pad-row" style="margin-top:8px;display:none">
+    <div class="row adv-only" id="pad-row" style="margin-top:8px;display:none">
       <span class="pill" id="pad-toggle">⊡ Padding</span>
       <span class="meta">float the shape free of the frame edges</span>
     </div>
-    <div class="meta" id="shape-hint" style="margin-top:6px">Square = the full (cropped) frame.</div>
+    <div class="meta adv-only" id="shape-hint" style="margin-top:6px">Square = the full (cropped) frame.</div>
   </div>
 
   <div class="section">
@@ -2069,7 +2082,7 @@ _EDIT_HTML = r"""<!doctype html>
   <button id="make-btn">✨ Make sticker</button>
   <div id="progress"></div>
 
-  <div class="section" id="studio-section">
+  <div class="section" id="studio-section" data-tier="pro">
     <label>🎨 Studio <span class="meta">(compose captions over the frame — static sticker)</span></label>
     <div class="row">
       <button class="action" id="studio-open-btn">Open studio</button>
@@ -2146,10 +2159,14 @@ function applySkin(s) {
 }
 document.getElementById('skin-switch').addEventListener('click', e => {
   const b = e.target.closest('button[data-skin]');
-  if (b) applySkin(b.dataset.skin);
+  if (!b) return;
+  applySkin(b.dataset.skin);
+  // The effective corner fill can change with the mode (Simple → transparent),
+  // so refresh the on-video shape preview. (Defined later; exists by click time.)
+  try { _refreshShapePreview(); } catch (_) {}
 });
 applySkin((() => { try { return localStorage.getItem('smdl_sticker_skin'); }
-                   catch (e) { return null; } })() || 'native');
+                   catch (e) { return null; } })() || 'playful');
 
 async function api(path, opts = {}) {
   opts.headers = Object.assign({}, opts.headers || {}, {
@@ -2519,6 +2536,13 @@ let chosenFill = 'blur';      // VIDEO corner fill: 'blur' | 'color' | 'transpar
 let chosenPad = false;        // float the shape free of the frame edges
 let customPoints = [];        // normalised [[x,y],…] in output-square space
 
+// Simple mode (playful skin) hides the corner picker and auto-uses a clean
+// transparent cut for any shape; other modes use the chosen Corners fill.
+function effectiveFill() {
+  if (document.body.classList.contains('skin-playful')) return 'transparent';
+  return chosenFill;
+}
+
 const _isVideoKind = (_editorPackKind === 'video');
 // Show the per-shape extras (corner fill for video, padding for any shape)
 // only once a non-square shape is picked.
@@ -2700,7 +2724,7 @@ function redrawShapePreview() {
   ext.rect(0, 0, W, H);
   ext.addPath(shape);
   // static shapes are always transparent; video uses the Corners choice.
-  const fillMode = _isVideoKind ? chosenFill : 'transparent';
+  const fillMode = _isVideoKind ? effectiveFill() : 'transparent';
   ctx.save();
   ctx.clip(ext, 'evenodd');
   if (fillMode === 'color') {
@@ -2769,7 +2793,7 @@ function renderResult() {
   const sq = sourceSquare();
   if (!sq) return;
   const shaped = (chosenShape !== 'square');
-  const fillMode = shaped ? (_isVideoKind ? chosenFill : 'transparent') : 'opaque';
+  const fillMode = shaped ? (_isVideoKind ? effectiveFill() : 'transparent') : 'opaque';
   // 1) margin fill (only when shaped) — mirrors the Corners choice
   if (shaped) {
     if (fillMode === 'transparent') _drawChecker(resultCtx, R, R);
@@ -2822,7 +2846,7 @@ window.addEventListener('resize', () => {
 
 makeBtn.addEventListener('click', async () => {
   makeBtn.disabled = true;
-  const _transp = (_editorPackKind === 'video' && chosenShape !== 'square' && chosenFill === 'transparent');
+  const _transp = (_editorPackKind === 'video' && chosenShape !== 'square' && effectiveFill() === 'transparent');
   progressEl.textContent = _transp
     ? 'Encoding transparent sticker… (10–30s)'
     : 'Encoding sticker… (5–20s)';
@@ -2848,9 +2872,10 @@ makeBtn.addEventListener('click', async () => {
     // cutout (background removal) is transparent → static only.
     if (_editorPackKind === 'static' && cutout) body.cutout = true;
     // corner fill → video only, non-square shape. 'transparent' = real alpha;
-    // 'blur'/colour = opaque fill.
+    // 'blur'/colour = opaque fill. Simple mode forces transparent (effectiveFill).
     if (_editorPackKind === 'video' && chosenShape !== 'square') {
-      body.fill = (chosenFill === 'color') ? fillColor.value : chosenFill;
+      const ef = effectiveFill();
+      body.fill = (ef === 'color') ? fillColor.value : ef;
     }
     // breathing-margin toggle (static + video), non-square shapes only.
     if (chosenShape !== 'square' && chosenPad) body.padding = true;

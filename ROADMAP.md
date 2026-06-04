@@ -213,6 +213,25 @@ Take the sticker maker from "feature-complete editor" to "studio with depth":
   sort_order/soft-delete; `sticker_presets`; cross-pack search; reorder / re-edit /
   trash+restore.
 
+### v3.6 · Live TV depth — self-healing + actionable + personal + catch-up
+**Status**: planned · scope agreed 2026-06-05 (full plan, **B → A → C → D**)
+**Depends on**: v3.5 (shipped)
+**Spec**: [sentinel-docs/planning/smdl-livetv-v36.md](https://docs.az-sentinel.xyz/planning/smdl-livetv-v36/)
+
+Take Live TV from "big catalogue that mostly plays" to "TV that just works and
+knows me":
+- **B · Self-healing playback** *(foundational)* — reliability-ranked source pick +
+  auto-failover on mid-stream stall via the HLS relay (reuses `v_channels_with_status`
+  health + `report_failure`); auto-prune dead sources.
+- **A · Actionable EPG** — cross-channel "what's on" search, programme reminders
+  (Telegram push), record-this-program / record-every-episode (series-link) from
+  EPG (today's `iptv_scheduled` is time-window only).
+- **C · Personal TV** — favorites + custom lineups, continue/recently-watched rows,
+  For-You rows from `iptv_play_history` (the live analogue of Trakt continue-watch).
+- **D · Catch-up / time-shift** *(heaviest)* — pause/rewind/restart-program via
+  provider catch-up URLs + a rolling DVR segment-ring buffer for favorites (job
+  worker; shares the sticker v2.7-B pattern).
+
 ### v4.1 · Recording lifecycle controls (~1 day work)
 **Status**: planned
 **Depends on**: nothing

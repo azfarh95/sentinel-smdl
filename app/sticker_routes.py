@@ -255,14 +255,54 @@ async def list_drafts(request: Request, kind: str | None = "video"):
 
 
 @router.get("/api/sticker_packs")
-async def list_packs(request: Request) -> dict:
-    """Every pack the user owns (across kinds). Drives the kind-switcher
-    in the Mini App so we don't show packs they haven't created yet."""
+async def list_packs(request: Request, kind: str | None = None) -> dict:
+    """The user's packs (optionally one kind), active first. Drives the pack
+    picker in the Mini App."""
     payload = await _mini._verify(request)
     _mini.require_scope(payload, "smdl.stickers")
     user_id = int(payload["user"]["id"])
-    rows = await _db.sticker_packs_list(user_id)
+    rows = await _db.sticker_packs_list(user_id, kind=kind)
     return {"packs": rows}
+
+
+class CreatePackBody(BaseModel):
+    title: str
+    kind: str = "regular"
+
+
+@router.post("/api/sticker_pack/create")
+async def create_pack(body: CreatePackBody, request: Request) -> dict:
+    """Reserve a NEW named pack and make it active. The Telegram set is created
+    when the first sticker lands in it."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    first_name = (payload.get("user") or {}).get("first_name")
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Pack name required")
+    from .bot import get_application
+    tg_app = get_application()
+    if tg_app is None:
+        raise HTTPException(status_code=503, detail="bot not running")
+    pack = await _st.create_named_pack(tg_app.bot, user_id, first_name, title, kind=body.kind)
+    return {"ok": True, "pack": pack}
+
+
+class ActivatePackBody(BaseModel):
+    pack_name: str
+
+
+@router.post("/api/sticker_pack/activate")
+async def activate_pack(body: ActivatePackBody, request: Request) -> dict:
+    """Switch which pack new stickers land in (the editor inherits this)."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    ok = await _db.sticker_pack_set_active(user_id, (body.pack_name or "").strip())
+    if not ok:
+        raise HTTPException(status_code=404, detail="pack not found")
+    return {"ok": True}
 
 
 @router.get("/api/sticker_drafts/{draft_id}/preview")

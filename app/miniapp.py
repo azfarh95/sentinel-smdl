@@ -4164,6 +4164,8 @@ button.warn { background: #ff9500; color: #fff; }
     </div>
 
     <div class=stk-sec data-section=pack>
+      <div class=meta style="font-size:11px;color:var(--muted);margin:0 2px 6px">Your packs — tap to switch where new stickers land.</div>
+      <div id=stickers-pack-picker style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center"></div>
       <div class=card id=stickers-pack-card>
         <div class=empty><span class=spin></span> Loading…</div>
       </div>
@@ -5235,6 +5237,58 @@ function stkSection(sec) {
   try { localStorage.setItem('smdl_stk_section', sec); } catch (e) {}
 }
 
+// ── Pack picker (multiple named packs; the active one is where new stickers go) ──
+async function stickersLoadPacks() {
+  const el = document.getElementById('stickers-pack-picker');
+  if (!el) return;
+  let data;
+  try { data = await api('/api/sticker_packs?kind=regular'); }
+  catch (e) { el.innerHTML = ''; return; }
+  el.innerHTML = '';
+  (data.packs || []).forEach(p => {
+    const b = document.createElement('button');
+    b.className = 'sec';
+    b.style.cssText = 'font-size:12px';
+    b.textContent = (p.pack_title || 'Pack') + (p.is_active ? ' ✓' : '');
+    if (p.is_active) {
+      b.style.background = 'linear-gradient(180deg,var(--accent),var(--accent-2))';
+      b.style.color = 'var(--button-text)';
+      b.style.borderColor = 'transparent';
+    }
+    b.onclick = () => stickersActivatePack(p.pack_name);
+    el.appendChild(b);
+  });
+  const nb = document.createElement('button');
+  nb.className = 'sec'; nb.style.cssText = 'font-size:12px';
+  nb.textContent = '＋ New pack';
+  nb.onclick = stickersNewPack;
+  el.appendChild(nb);
+}
+
+async function stickersActivatePack(name) {
+  try {
+    await api('/api/sticker_pack/activate', { method: 'POST', body: JSON.stringify({ pack_name: name }) });
+    _stickersContentsKindShown = null;     // force the grid to reload for the new pack
+    await loadStickers();
+    await stickersLoadPackContents();
+    await stickersLoadPacks();
+  } catch (e) { showErr('Switch failed: ' + e); }
+}
+
+async function stickersNewPack() {
+  const title = prompt('Name your new pack:', '');
+  if (title == null) return;
+  if (!title.trim()) { showErr('Pack name required'); return; }
+  try {
+    await api('/api/sticker_pack/create', { method: 'POST', body: JSON.stringify({ title: title.trim(), kind: 'regular' }) });
+    showOk('Pack created — it\\'s now active');
+    _stickersContentsKindShown = null;
+    await loadStickers();
+    await stickersLoadPackContents();
+    await stickersLoadPacks();
+  } catch (e) { showErr('Create failed: ' + e); }
+}
+
 async function loadStickers() {
   const packEl = document.getElementById('stickers-pack-card');
   const draftsEl = document.getElementById('stickers-drafts');
@@ -5259,6 +5313,7 @@ async function loadStickers() {
     // Initialise the section nav (remembered per device; default Stickers).
     let _sec; try { _sec = localStorage.getItem('smdl_stk_section'); } catch (e) {}
     stkSection(_sec || 'stickers');
+    stickersLoadPacks();
   }
   let data;
   try {

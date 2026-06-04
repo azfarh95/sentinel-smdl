@@ -232,6 +232,34 @@ async def init_db():
             WHERE pack_kind='static' AND user_id NOT IN
                 (SELECT user_id FROM sticker_packs WHERE pack_kind='regular')
         """)
+        # 2026-06-05: multi-pack — a user can own multiple named 'regular' packs,
+        # one ACTIVE at a time (new stickers land in the active one). Widen the
+        # schema with an id PK + is_active flag; the old (user_id, pack_kind) PK
+        # is dropped. Each pre-existing pack becomes its kind's active pack.
+        async with db.execute("PRAGMA table_info(sticker_packs)") as cur:
+            _sp_cols2 = {row[1] async for row in cur}
+        if "is_active" not in _sp_cols2:
+            await db.execute("""
+                CREATE TABLE sticker_packs_v3 (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id      INTEGER NOT NULL,
+                    pack_kind    TEXT    NOT NULL DEFAULT 'regular',
+                    pack_name    TEXT    NOT NULL UNIQUE,
+                    pack_title   TEXT    NOT NULL,
+                    telegram_url TEXT,
+                    is_active    INTEGER NOT NULL DEFAULT 0,
+                    created_at   TEXT    NOT NULL
+                )
+            """)
+            await db.execute("""
+                INSERT INTO sticker_packs_v3
+                    (user_id, pack_kind, pack_name, pack_title, telegram_url, is_active, created_at)
+                SELECT user_id, pack_kind, pack_name, pack_title, telegram_url, 1, created_at
+                FROM sticker_packs
+            """)
+            await db.execute("DROP TABLE sticker_packs")
+            await db.execute("ALTER TABLE sticker_packs_v3 RENAME TO sticker_packs")
+            await db.execute("CREATE INDEX IF NOT EXISTS ix_sticker_packs_user ON sticker_packs(user_id, pack_kind)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS stickers (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1340,49 +1368,92 @@ def _normalise_pack_kind(kind: str | None) -> str:
     return "regular"
 
 
-async def sticker_pack_get(user_id: int, kind: str = "video") -> dict | None:
-    """Look up the user's pack of a given kind. Defaults to 'video' so
-    pre-migration callers keep working unchanged."""
+async def sticker_pack_get(user_id: int, kind: str = "regular") -> dict | None:
+    """The user's ACTIVE pack of a given kind (is_active=1), falling back to the
+    newest. Returns None if they have no pack of that kind yet."""
     k = _normalise_pack_kind(kind)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM sticker_packs WHERE user_id = ? AND pack_kind = ?",
+            "SELECT * FROM sticker_packs WHERE user_id = ? AND pack_kind = ? "
+            "ORDER BY is_active DESC, created_at DESC LIMIT 1",
             (int(user_id), k),
         ) as cur:
             row = await cur.fetchone()
         return dict(row) if row else None
 
 
-async def sticker_packs_list(user_id: int) -> list[dict]:
-    """Every pack the user owns (across kinds), newest first."""
+async def sticker_packs_list(user_id: int, kind: str | None = None) -> list[dict]:
+    """The user's packs (optionally filtered to one kind), active first then
+    newest."""
     out: list[dict] = []
+    q = "SELECT * FROM sticker_packs WHERE user_id = ?"
+    args: list = [int(user_id)]
+    if kind is not None:
+        q += " AND pack_kind = ?"
+        args.append(_normalise_pack_kind(kind))
+    q += " ORDER BY is_active DESC, created_at DESC"
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM sticker_packs WHERE user_id = ? ORDER BY created_at DESC",
-            (int(user_id),),
-        ) as cur:
+        async with db.execute(q, args) as cur:
             async for row in cur:
                 out.append(dict(row))
     return out
 
 
+async def sticker_pack_name_exists(pack_name: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM sticker_packs WHERE pack_name = ?", (pack_name,)
+        ) as cur:
+            return (await cur.fetchone()) is not None
+
+
+async def sticker_pack_set_active(user_id: int, pack_name: str) -> bool:
+    """Make `pack_name` the user's active pack for its kind. Returns False if
+    the pack isn't theirs."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT pack_kind FROM sticker_packs WHERE user_id = ? AND pack_name = ?",
+            (int(user_id), pack_name),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return False
+        k = row["pack_kind"]
+        await db.execute(
+            "UPDATE sticker_packs SET is_active = 0 WHERE user_id = ? AND pack_kind = ?",
+            (int(user_id), k))
+        await db.execute(
+            "UPDATE sticker_packs SET is_active = 1 WHERE user_id = ? AND pack_name = ?",
+            (int(user_id), pack_name))
+        await db.commit()
+        return True
+
+
 async def sticker_pack_create(user_id: int, pack_name: str,
                                pack_title: str, telegram_url: str,
-                               kind: str = "video") -> None:
+                               kind: str = "regular", make_active: bool = True) -> None:
+    """Insert (or upsert by pack_name) a pack row. When make_active, it becomes
+    the user's active pack for that kind (deactivating the others)."""
     k = _normalise_pack_kind(kind)
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
+        if make_active:
+            await db.execute(
+                "UPDATE sticker_packs SET is_active = 0 WHERE user_id = ? AND pack_kind = ?",
+                (int(user_id), k))
         await db.execute("""
             INSERT INTO sticker_packs
-                (user_id, pack_kind, pack_name, pack_title, telegram_url, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, pack_kind) DO UPDATE SET
-                pack_name    = excluded.pack_name,
+                (user_id, pack_kind, pack_name, pack_title, telegram_url, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(pack_name) DO UPDATE SET
                 pack_title   = excluded.pack_title,
-                telegram_url = excluded.telegram_url
-        """, (int(user_id), k, pack_name, pack_title, telegram_url, now))
+                telegram_url = excluded.telegram_url,
+                is_active    = excluded.is_active
+        """, (int(user_id), k, pack_name, pack_title, telegram_url,
+              1 if make_active else 0, now))
         await db.commit()
 
 

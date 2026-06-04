@@ -91,6 +91,44 @@ async def resolve_pack(bot: Bot, user_id: int, first_name: str | None,
     }
 
 
+async def create_named_pack(bot: Bot, user_id: int, first_name: str | None,
+                            title: str, kind: str = "regular") -> dict:
+    """Reserve a NEW named pack (fresh Telegram set name) and make it the user's
+    active pack. The Telegram set is created lazily on the first sticker added.
+    Returns the same shape as resolve_pack (exists_in_db=True)."""
+    k = _canon_kind(kind)
+    bot_username = await get_bot_username(bot)
+    user_slug = _slug(first_name or f"u{user_id}")
+    title = (title or "").strip()[:64] or "My Stickers"
+    tslug = _slug(title)
+    suffix, _ts = _KIND_SUFFIX[k]
+
+    def _candidate(n: int) -> str:
+        base = f"{user_slug}_{tslug}".strip("_") or user_slug
+        base = base[:40].strip("_") or user_slug
+        if n:
+            base = f"{base[:37]}{n}"
+        return f"{base}_{suffix}_by_{bot_username}"
+
+    name = _candidate(0)
+    i = 2
+    while await _db.sticker_pack_name_exists(name):
+        name = _candidate(i)
+        i += 1
+        if i > 99:
+            break
+    telegram_url = f"https://t.me/addstickers/{name}"
+    await _db.sticker_pack_create(user_id, name, title, telegram_url,
+                                  kind=k, make_active=True)
+    return {
+        "pack_name":    name,
+        "pack_title":   title,
+        "telegram_url": telegram_url,
+        "pack_kind":    k,
+        "exists_in_db": True,
+    }
+
+
 async def _set_exists(bot: Bot, pack_name: str) -> bool:
     """Probe Telegram for an existing sticker set by name."""
     try:

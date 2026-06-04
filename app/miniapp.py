@@ -571,12 +571,82 @@ def _meta_to_dict(m) -> dict:
             "imdb_rating": m.imdb_rating, "genres": m.genres}
 
 
+def _trakt_progress_row(it: dict) -> Optional[dict]:
+    """Map one Trakt /sync/playback item → the local resume-row shape, keyed by
+    the Stremio content_id (`tt…` for a movie, `tt…:S:E` for an episode) so it
+    dedupes cleanly against the local resume table. None if not IMDb-addressable."""
+    typ = it.get("type")
+    pct = float(it.get("progress") or 0.0)
+    updated = it.get("paused_at") or ""
+    if typ == "movie":
+        cid = (((it.get("movie") or {}).get("ids") or {}).get("imdb")) or ""
+    elif typ == "episode":
+        show_imdb = (((it.get("show") or {}).get("ids") or {}).get("imdb")) or ""
+        ep = it.get("episode") or {}
+        s, n = ep.get("season"), ep.get("number")
+        cid = f"{show_imdb}:{s}:{n}" if show_imdb and s is not None and n is not None else ""
+    else:
+        return None
+    if not cid.startswith("tt"):
+        return None
+    return {"imdb_id": cid, "progress_pct": round(pct, 1),
+            "position_seconds": None, "duration_seconds": None,
+            "updated_at": updated, "_src": "trakt"}
+
+
+async def _trakt_progress_rows() -> list[dict]:
+    """Trakt's cross-device resume list, mapped to resume-row shape. Best-effort:
+    not connected / network blip / API error all degrade to [] so Continue
+    Watching still renders from local progress alone."""
+    try:
+        from . import trakt as _t
+        tok = _t.load_token()
+        if not tok:
+            return []
+        tok = await asyncio.to_thread(_t.refresh_if_needed, tok)
+        items = await asyncio.wait_for(
+            asyncio.to_thread(_t.playback_progress, tok), timeout=6)
+    except Exception:
+        logger.debug("trakt playback_progress unavailable", exc_info=True)
+        return []
+    rows = [_trakt_progress_row(it) for it in (items or [])]
+    # Match the local list_progress filter: drop watched-through (>92%) and
+    # not-really-started (<1%) so a merged row stays "actually resumable".
+    return [r for r in rows if r and 1.0 <= r["progress_pct"] < 92.0]
+
+
+def _merge_progress(local: list[dict], trakt: list[dict]) -> list[dict]:
+    """Union local + Trakt resume rows, deduped by content_id. The
+    most-recently-updated side wins the progress %, but exact
+    `position_seconds` (only the local table has it) is always carried over so
+    resume-to-the-second still works for titles Trakt also knows about.
+    Newest-first, capped at 12."""
+    by_id: dict[str, dict] = {}
+    for r in [*local, *trakt]:
+        cid = r.get("imdb_id")
+        if not cid:
+            continue
+        prev = by_id.get(cid)
+        if prev is None:
+            by_id[cid] = dict(r)
+            continue
+        newer, older = ((r, prev) if (r.get("updated_at") or "") > (prev.get("updated_at") or "")
+                        else (prev, r))
+        merged = dict(newer)
+        if merged.get("position_seconds") is None and older.get("position_seconds") is not None:
+            merged["position_seconds"] = older["position_seconds"]
+            merged["duration_seconds"] = older.get("duration_seconds")
+        by_id[cid] = merged
+    return sorted(by_id.values(), key=lambda x: x.get("updated_at") or "", reverse=True)[:12]
+
+
 @router.get("/api/miniapp/stremio/discover")
 async def stremio_discover(request: Request):
     """Stremio-style discovery home. Returns three rows:
-      • continue_watching — in-progress titles from the resume table,
-        enriched with poster/name via Cinemeta meta (each carries a
-        progress_pct + resume_id for one-tap continue).
+      • continue_watching — in-progress titles MERGED from the local resume
+        table AND Trakt's cross-device playback progress (a title started on
+        the TV/phone resumes here), enriched with poster/name via Cinemeta
+        meta (each carries a progress_pct + resume_id for one-tap continue).
       • popular_movies / popular_series — Cinemeta "top" catalog.
     Each row is independent: a failure in one returns [] for that row
     rather than failing the whole page."""
@@ -597,10 +667,12 @@ async def stremio_discover(request: Request):
 
     async def _continue() -> list[dict]:
         try:
-            prog = await _ss.list_progress(limit=12)
+            local, trakt = await asyncio.gather(
+                _ss.list_progress(limit=12), _trakt_progress_rows())
         except Exception:
             logger.exception("discover continue-watching list failed")
             return []
+        prog = _merge_progress(local, trakt)
 
         async def _enrich(row: dict) -> Optional[dict]:
             rid = row["imdb_id"]

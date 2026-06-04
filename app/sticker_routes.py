@@ -315,9 +315,13 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
     dst = OUTPUT_DIR / str(user_id) / f"{draft_id}.{out_ext}"
 
     if pack_kind == "video":
-        # Shaped video: build a mask and composite over an opaque fill (webm
-        # can't carry alpha, so the corners are filled — blur or a colour).
+        # Shaped video. Two roads for the area OUTSIDE the shape:
+        #   fill='transparent' → a REAL alpha channel (VP9 + BlockAdditional via
+        #                        webm_alpha) — genuinely see-through corners.
+        #   fill='blur'/'#hex' → opaque fill (webm-without-alpha), the corners
+        #                        are a blurred copy of the video or a colour.
         v_shape = (body.shape or "").strip().lower()
+        v_fill = (body.fill or "blur").strip().lower()
         v_mask: Path | None = None
         v_tmp: list[Path] = []
         if v_shape and v_shape not in _SHAPE_NONE:
@@ -338,14 +342,22 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
             v_mask = mask_png
             v_tmp.append(mask_png)
         try:
-            ok, err = await _sp.make_video_sticker(
-                src, dst,
-                start=float(body.trim_start or 0.0),
-                end=float(body.trim_end or 3.0),
-                crop=crop,
-                shape_mask=v_mask,
-                fill=(body.fill or "blur"),
-            )
+            if v_mask is not None and v_fill == "transparent":
+                ok, err = await _sp.make_transparent_video_sticker(
+                    src, v_mask, dst,
+                    start=float(body.trim_start or 0.0),
+                    end=float(body.trim_end or 3.0),
+                    crop=crop,
+                )
+            else:
+                ok, err = await _sp.make_video_sticker(
+                    src, dst,
+                    start=float(body.trim_start or 0.0),
+                    end=float(body.trim_end or 3.0),
+                    crop=crop,
+                    shape_mask=v_mask,
+                    fill=v_fill,
+                )
         finally:
             for f in v_tmp:
                 try:
@@ -1930,6 +1942,7 @@ _EDIT_HTML = r"""<!doctype html>
       <span class="meta">Corners:</span>
       <span class="pill on" data-fill="blur">🌫 Blur</span>
       <span class="pill" data-fill="color">🎨 Colour</span>
+      <span class="pill" data-fill="transparent">⬚ Transparent</span>
       <input type="color" id="fill-color" value="#ffffff" style="display:none">
     </div>
     <div class="meta" id="shape-hint" style="margin-top:6px">Square = the full (cropped) frame.</div>
@@ -2571,7 +2584,10 @@ window.addEventListener('resize', () => {
 
 makeBtn.addEventListener('click', async () => {
   makeBtn.disabled = true;
-  progressEl.textContent = 'Encoding sticker… (5–20s)';
+  const _transp = (_editorPackKind === 'video' && chosenShape !== 'square' && chosenFill === 'transparent');
+  progressEl.textContent = _transp
+    ? 'Encoding transparent sticker… (10–30s)'
+    : 'Encoding sticker… (5–20s)';
   const body = {
     emoji:      chosenEmoji,
     trim_start: trimStart,
@@ -2593,9 +2609,10 @@ makeBtn.addEventListener('click', async () => {
     }
     // cutout (background removal) is transparent → static only.
     if (_editorPackKind === 'static' && cutout) body.cutout = true;
-    // corner fill is opaque → video only, and only for a non-square shape.
+    // corner fill → video only, non-square shape. 'transparent' = real alpha;
+    // 'blur'/colour = opaque fill.
     if (_editorPackKind === 'video' && chosenShape !== 'square') {
-      body.fill = (chosenFill === 'color') ? fillColor.value : 'blur';
+      body.fill = (chosenFill === 'color') ? fillColor.value : chosenFill;
     }
   }
   try {

@@ -293,6 +293,114 @@ async def make_video_sticker(
     )
 
 
+async def make_transparent_video_sticker(
+    src: Path,
+    mask: Path,
+    dst: Path,
+    *,
+    start: float = 0.0,
+    end: float | None = None,
+    crop: tuple[int, int, int, int] | None = None,
+) -> tuple[bool, str | None]:
+    """Encode a SHAPED video sticker with a REAL alpha channel — genuinely
+    transparent outside the shape, animated.
+
+    ffmpeg can't write WebM alpha in this toolchain (it sets AlphaMode but
+    writes no alpha data — verified), so we do it ourselves:
+      1. render the colour (cover-scaled video) and the alpha (the mask) as two
+         raw y4m streams,
+      2. encode each as VP9 with vpxenc (no alt-ref → frame counts stay aligned),
+      3. mux them into one track with per-frame BlockAdditional alpha via
+         webm_alpha.mux_alpha_webm.
+    Telegram decodes the result as a transparent video sticker (verified).
+    Colour bitrate drops on a ladder until the file fits the 256 KB ceiling.
+    """
+    if not src.exists():
+        return False, f"source not found: {src}"
+    if not shutil.which("ffmpeg"):
+        return False, "ffmpeg not installed in container"
+    if not shutil.which("vpxenc"):
+        return False, "vpxenc not installed (need vpx-tools)"
+    if not Path(mask).exists():
+        return False, "shape mask missing"
+
+    duration = STICKER_MAX_DUR_S
+    if end is not None and end > start:
+        duration = min(end - start, STICKER_MAX_DUR_S)
+    if duration <= 0:
+        return False, "trim window has zero duration"
+
+    S, FPS = STICKER_FRAME_PX, STICKER_MAX_FPS
+    cvf: list[str] = []
+    if crop:
+        cx, cy, cw, ch = crop
+        cw = max(8, int(cw)); ch = max(8, int(ch))
+        cx = max(0, int(cx)); cy = max(0, int(cy))
+        cvf.append(f"crop={cw}:{ch}:{cx}:{cy}")
+    cvf += [f"scale={S}:{S}:force_original_aspect_ratio=increase",
+            f"crop={S}:{S}", f"fps={FPS}", "format=yuv420p"]
+    colour_vf = ",".join(cvf)
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    stem = dst.with_suffix("")
+    col_y4m = stem.with_name(stem.name + "_col.y4m")
+    alp_y4m = stem.with_name(stem.name + "_alp.y4m")
+    col_ivf = stem.with_name(stem.name + "_col.ivf")
+    alp_ivf = stem.with_name(stem.name + "_alp.ivf")
+    tmp = [col_y4m, alp_y4m, col_ivf, alp_ivf]
+    loop = asyncio.get_running_loop()
+    _VP = ["--codec=vp9", "--ivf", "--profile=0", "--auto-alt-ref=0",
+           "--lag-in-frames=0", "--kf-min-dist=0", "--kf-max-dist=9999",
+           "--end-usage=vbr", "--cpu-used=4", "--threads=4"]
+    try:
+        from . import webm_alpha as _wa
+        # 1) colour y4m
+        rc, err = await loop.run_in_executor(None, lambda: _run([
+            "ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(src),
+            "-t", f"{duration:.3f}", "-an", "-vf", colour_vf,
+            "-f", "yuv4mpegpipe", str(col_y4m)], 90))
+        if rc != 0:
+            return False, "colour render failed: " + err.decode("utf-8", "replace")[-160:]
+        # 2) alpha y4m — the static mask, looped to the clip length, as gray luma
+        rc, err = await loop.run_in_executor(None, lambda: _run([
+            "ffmpeg", "-y", "-loop", "1", "-i", str(mask),
+            "-t", f"{duration:.3f}", "-an",
+            "-vf", f"scale={S}:{S},format=gray,fps={FPS},format=yuv420p",
+            "-f", "yuv4mpegpipe", str(alp_y4m)], 90))
+        if rc != 0:
+            return False, "alpha render failed: " + err.decode("utf-8", "replace")[-160:]
+        # 3) alpha is a simple mask → encode once at a low bitrate
+        rc, err = await loop.run_in_executor(None, lambda: _run(
+            ["vpxenc", *_VP, "--target-bitrate=60", "-o", str(alp_ivf), str(alp_y4m)], 90))
+        if rc != 0:
+            return False, "alpha encode failed: " + err.decode("utf-8", "replace")[-160:]
+        # 4) colour bitrate ladder → mux → size check
+        last_size = 0
+        for cbr in ("220", "150", "100", "70"):
+            rc, err = await loop.run_in_executor(None, lambda c=cbr: _run(
+                ["vpxenc", *_VP, f"--target-bitrate={c}", "-o", str(col_ivf), str(col_y4m)], 90))
+            if rc != 0:
+                return False, "colour encode failed: " + err.decode("utf-8", "replace")[-160:]
+            ok, merr = await loop.run_in_executor(
+                None, lambda: _wa.mux_alpha_webm(col_ivf, alp_ivf, dst, codec="vp9"))
+            if not ok:
+                return False, merr or "alpha mux failed"
+            last_size = dst.stat().st_size if dst.exists() else 0
+            if last_size <= STICKER_MAX_BYTES:
+                logger.info("transparent sticker ok: %s @ %s kbps → %d bytes",
+                            src.name, cbr, last_size)
+                return True, None
+            logger.info("transparent too big @ %s: %d > %d", cbr, last_size, STICKER_MAX_BYTES)
+        return False, (f"Output >256KB even at lowest bitrate (last {last_size}). "
+                       "Try a shorter clip.")
+    finally:
+        for f in tmp:
+            try:
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 # Built-in shape presets. Each is a function (size) -> list of polygon points,
 # or the sentinel "ellipse". Custom shapes come in as caller-supplied points.
 def _preset_points(shape: str, s: int) -> list[tuple[float, float]] | str | None:

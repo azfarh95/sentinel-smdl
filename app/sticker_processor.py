@@ -406,6 +406,203 @@ async def make_transparent_video_sticker(
                 pass
 
 
+# ── Per-frame video cutout (transparent animated subject) ──────────────────
+# Background removal that follows a moving subject: segment the frames, build a
+# per-frame alpha, and feed it to the same VP9-alpha encoder the shape path uses.
+# rembg/u2netp on CPU is ~180 ms/frame here, so we segment every Nth frame and
+# linearly interpolate the alpha for the in-between frames (the subject barely
+# moves in ~40 ms) — a ~3 s clip lands around 6-8 s of work. GPU (DirectML) was
+# benchmarked at only ~2x and crashed under concurrency, so CPU it is.
+CUTOUT_FPS       = 24    # < 30 to cut the frame count without visible judder
+CUTOUT_SUBSAMPLE = 2     # segment every 2nd frame, interpolate the rest
+CUTOUT_FEATHER   = 1.5   # px gaussian on each mask → soft edge, less flicker
+
+
+def _segment_frames_sync(frame_paths: list[Path], mask_dir: Path, *,
+                         subsample: int, feather: float,
+                         shape_arr) -> int:
+    """Segment a subset of frames, linearly interpolate the alpha for the
+    skipped ones, feather, optionally intersect a static shape mask, and write
+    mask_%05d.png (grayscale). CPU-bound — call inside an executor. Returns the
+    frame count written."""
+    import bisect
+    import numpy as np
+    from PIL import Image, ImageFilter
+    from rembg import remove
+
+    sess = _rembg_session_get()
+    n = len(frame_paths)
+    if n == 0:
+        return 0
+
+    # Keyframes: every `subsample`-th, and always the last so we never
+    # extrapolate past the final computed mask.
+    step = max(1, int(subsample))
+    key_idx = list(range(0, n, step))
+    if key_idx[-1] != n - 1:
+        key_idx.append(n - 1)
+    keys: dict[int, "np.ndarray"] = {}
+    for i in key_idx:
+        with Image.open(frame_paths[i]) as im:
+            m = remove(im.convert("RGB"), session=sess,
+                       only_mask=True, post_process_mask=False)
+        keys[i] = np.asarray(m.convert("L"), dtype=np.float32)
+
+    ks = sorted(keys.keys())
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        if i in keys:
+            arr = keys[i]
+        else:
+            p = bisect.bisect_right(ks, i)
+            lo, hi = ks[p - 1], ks[p]
+            w = (i - lo) / (hi - lo)
+            arr = keys[lo] * (1.0 - w) + keys[hi] * w
+        img = Image.fromarray(np.clip(arr, 0, 255).astype("uint8"), "L")
+        if feather and feather > 0:
+            img = img.filter(ImageFilter.GaussianBlur(float(feather)))
+        if shape_arr is not None:
+            a = np.asarray(img, dtype=np.float32) * (shape_arr / 255.0)
+            img = Image.fromarray(np.clip(a, 0, 255).astype("uint8"), "L")
+        img.save(mask_dir / f"mask_{i + 1:05d}.png")
+    return n
+
+
+async def make_video_cutout_sticker(
+    src: Path,
+    dst: Path,
+    *,
+    start: float = 0.0,
+    end: float | None = None,
+    crop: tuple[int, int, int, int] | None = None,
+    shape_mask: Path | None = None,
+) -> tuple[bool, str | None]:
+    """Encode a VIDEO sticker whose background is removed per-frame → a real
+    alpha channel that tracks the moving subject. Optionally intersect a static
+    shape mask (cutout ∩ shape). Reuses the VP9-alpha muxer.
+
+    Pipeline: ffmpeg → 512² PNG frames @ CUTOUT_FPS → rembg per-frame alpha
+    (subsampled + interpolated) → colour y4m + alpha y4m → vpxenc ×2 → mux.
+    """
+    if not src.exists():
+        return False, f"source not found: {src}"
+    if not shutil.which("ffmpeg"):
+        return False, "ffmpeg not installed in container"
+    if not shutil.which("vpxenc"):
+        return False, "vpxenc not installed (need vpx-tools)"
+
+    duration = STICKER_MAX_DUR_S
+    if end is not None and end > start:
+        duration = min(end - start, STICKER_MAX_DUR_S)
+    if duration <= 0:
+        return False, "trim window has zero duration"
+
+    S, FPS = STICKER_FRAME_PX, CUTOUT_FPS
+    cvf: list[str] = []
+    if crop:
+        cx, cy, cw, ch = crop
+        cw = max(8, int(cw)); ch = max(8, int(ch))
+        cx = max(0, int(cx)); cy = max(0, int(cy))
+        cvf.append(f"crop={cw}:{ch}:{cx}:{cy}")
+    cvf += [f"scale={S}:{S}:force_original_aspect_ratio=increase",
+            f"crop={S}:{S}", f"fps={FPS}"]
+    colour_vf = ",".join(cvf)
+
+    import uuid as _uuid
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    workdir = dst.with_name(f"{dst.stem}_cut_{_uuid.uuid4().hex}")
+    framedir = workdir / "frames"
+    maskdir = workdir / "masks"
+    framedir.mkdir(parents=True, exist_ok=True)
+    col_y4m = workdir / "col.y4m"
+    alp_y4m = workdir / "alp.y4m"
+    col_ivf = workdir / "col.ivf"
+    alp_ivf = workdir / "alp.ivf"
+    loop = asyncio.get_running_loop()
+    _VP = ["--codec=vp9", "--ivf", "--profile=0", "--auto-alt-ref=0",
+           "--lag-in-frames=0", "--kf-min-dist=0", "--kf-max-dist=9999",
+           "--cpu-used=4", "--threads=4"]
+    try:
+        from . import webm_alpha as _wa
+        # 1) colour frames as a PNG sequence (also the rembg input).
+        rc, err = await loop.run_in_executor(None, lambda: _run([
+            "ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(src),
+            "-t", f"{duration:.3f}", "-an", "-vf", colour_vf,
+            str(framedir / "frame_%05d.png")], 120))
+        if rc != 0:
+            return False, "frame extract failed: " + err.decode("utf-8", "replace")[-160:]
+        frame_paths = sorted(framedir.glob("frame_*.png"))
+        if not frame_paths:
+            return False, "no frames extracted"
+
+        # 2) optional static shape mask to intersect with the subject cutout.
+        shape_arr = None
+        if shape_mask is not None and Path(shape_mask).exists():
+            import numpy as _np
+            from PIL import Image as _I
+            with _I.open(shape_mask) as sm:
+                shape_arr = _np.asarray(
+                    sm.convert("L").resize((S, S)), dtype=_np.float32)
+
+        # 3) per-frame segmentation (the heavy CPU step) → mask PNGs.
+        n = await loop.run_in_executor(None, lambda: _segment_frames_sync(
+            frame_paths, maskdir, subsample=CUTOUT_SUBSAMPLE,
+            feather=CUTOUT_FEATHER, shape_arr=shape_arr))
+        if n <= 0:
+            return False, "segmentation produced no masks"
+
+        # 4) colour y4m from the frames.
+        rc, err = await loop.run_in_executor(None, lambda: _run([
+            "ffmpeg", "-y", "-framerate", str(FPS),
+            "-i", str(framedir / "frame_%05d.png"),
+            "-vf", "format=yuv420p", "-f", "yuv4mpegpipe", str(col_y4m)], 90))
+        if rc != 0:
+            return False, "colour y4m failed: " + err.decode("utf-8", "replace")[-160:]
+        # 5) alpha y4m from the masks (gray luma).
+        rc, err = await loop.run_in_executor(None, lambda: _run([
+            "ffmpeg", "-y", "-framerate", str(FPS),
+            "-i", str(maskdir / "mask_%05d.png"),
+            "-vf", "format=gray,format=yuv420p", "-f", "yuv4mpegpipe",
+            str(alp_y4m)], 90))
+        if rc != 0:
+            return False, "alpha y4m failed: " + err.decode("utf-8", "replace")[-160:]
+
+        # 6) alpha is a SOFT, animated mask (not a flat shape) — lossless would
+        #    blow the budget, so encode it VBR at a modest bitrate. Colour then
+        #    rides a descending ladder until colour+alpha fit the 256 KB ceiling.
+        rc, err = await loop.run_in_executor(None, lambda: _run(
+            ["vpxenc", *_VP, "--end-usage=vbr", "--target-bitrate=80",
+             "-o", str(alp_ivf), str(alp_y4m)], 90))
+        if rc != 0:
+            return False, "alpha encode failed: " + err.decode("utf-8", "replace")[-160:]
+
+        last_size = 0
+        for cbr in ("200", "140", "90", "60"):
+            rc, err = await loop.run_in_executor(None, lambda c=cbr: _run(
+                ["vpxenc", *_VP, "--end-usage=vbr", f"--target-bitrate={c}",
+                 "-o", str(col_ivf), str(col_y4m)], 90))
+            if rc != 0:
+                return False, "colour encode failed: " + err.decode("utf-8", "replace")[-160:]
+            ok, merr = await loop.run_in_executor(
+                None, lambda: _wa.mux_alpha_webm(col_ivf, alp_ivf, dst, codec="vp9"))
+            if not ok:
+                return False, merr or "alpha mux failed"
+            last_size = dst.stat().st_size if dst.exists() else 0
+            if last_size <= STICKER_MAX_BYTES:
+                logger.info("cutout sticker ok: %s @ %s kbps, %d frames → %d bytes",
+                            src.name, cbr, n, last_size)
+                return True, None
+            logger.info("cutout too big @ %s: %d > %d", cbr, last_size, STICKER_MAX_BYTES)
+        return False, (f"Output >256KB even at lowest bitrate (last {last_size}). "
+                       "Try a shorter clip.")
+    finally:
+        try:
+            import shutil as _sh
+            _sh.rmtree(workdir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 # Built-in shape presets. Each is a function (size) -> list of polygon points,
 # or the sentinel "ellipse". Custom shapes come in as caller-supplied points.
 def _preset_points(shape: str, s: int) -> list[tuple[float, float]] | str | None:

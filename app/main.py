@@ -33,6 +33,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def _warm_rembg():
+    """Pre-load + optimise the u2netp session so the first background cutout
+    (static webp or per-frame video) doesn't pay model-load on a user request.
+    Best-effort, off the critical path."""
+    try:
+        from . import sticker_processor as _sp
+        loop = asyncio.get_running_loop()
+
+        def _warm():
+            from PIL import Image
+            from rembg import remove
+            remove(Image.new("RGB", (64, 64), (128, 128, 128)),
+                   session=_sp._rembg_session_get(),
+                   only_mask=True, post_process_mask=False)
+
+        await loop.run_in_executor(None, _warm)
+        logger.info("rembg/u2netp session pre-warmed")
+    except Exception as e:
+        logger.warning("rembg pre-warm skipped: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db()
@@ -92,6 +113,7 @@ async def lifespan(app: FastAPI):
         logger.warning("user-row self-heal failed: %s", _e)
     asyncio.create_task(start_cleanup_loop())
     asyncio.create_task(start_sticker_cleanup_loop())
+    asyncio.create_task(_warm_rembg())
     # IPTV auto-probe — ticks every 12h with a 10h fresh-skip window so
     # we get one real sweep per day + cheap "skip" calls in between.
     iptv_auto_task = asyncio.create_task(iptv.auto_probe_loop())

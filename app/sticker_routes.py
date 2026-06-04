@@ -387,8 +387,20 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
                 raise HTTPException(status_code=422, detail=f"unsupported shape: {v_shape}")
             v_mask = mask_png
             v_tmp.append(mask_png)
+        v_want_cutout = bool(body.cutout)
         try:
-            if v_mask is not None and v_fill == "transparent":
+            if v_want_cutout:
+                # Per-frame background removal → transparent animated subject
+                # (optionally intersected with the chosen shape). CPU-bound
+                # (~6-8 s); the request waits on it like the other video paths.
+                ok, err = await _sp.make_video_cutout_sticker(
+                    src, dst,
+                    start=float(body.trim_start or 0.0),
+                    end=float(body.trim_end or 3.0),
+                    crop=crop,
+                    shape_mask=v_mask,
+                )
+            elif v_mask is not None and v_fill == "transparent":
                 ok, err = await _sp.make_transparent_video_sticker(
                     src, v_mask, dst,
                     start=float(body.trim_start or 0.0),
@@ -3101,8 +3113,11 @@ makeBtn.addEventListener('click', async () => {
   // In a Studio tool the action button exports the canvas instead of /make.
   if (document.body.classList.contains('studio-active')) { studioExport(); return; }
   makeBtn.disabled = true;
+  const _cutoutVid = (_editorPackKind === 'video' && cutout);
   const _transp = (_editorPackKind === 'video' && chosenShape !== 'square' && effectiveFill() === 'transparent');
-  progressEl.textContent = _transp
+  progressEl.textContent = _cutoutVid
+    ? 'Cutting out the subject frame-by-frame… (10–20s)'
+    : _transp
     ? 'Encoding transparent sticker… (10–30s)'
     : 'Encoding sticker… (5–20s)';
   const body = {
@@ -3124,11 +3139,12 @@ makeBtn.addEventListener('click', async () => {
       }
       body.points = customPoints;
     }
-    // cutout (background removal) is transparent → static only.
-    if (_editorPackKind === 'static' && cutout) body.cutout = true;
-    // corner fill → video only, non-square shape. 'transparent' = real alpha;
-    // 'blur'/colour = opaque fill. Simple mode forces transparent (effectiveFill).
-    if (_editorPackKind === 'video' && chosenShape !== 'square') {
+    // cutout (background removal) → transparent. Static = webp alpha; video =
+    // per-frame alpha (the subject is matted out of every frame).
+    if ((_editorPackKind === 'static' || _editorPackKind === 'video') && cutout) body.cutout = true;
+    // corner fill → video only, non-square shape, when NOT cutting out (cutout
+    // removes the whole background, so the corner-fill choice is moot).
+    if (_editorPackKind === 'video' && chosenShape !== 'square' && !cutout) {
       const ef = effectiveFill();
       body.fill = (ef === 'color') ? fillColor.value : ef;
     }

@@ -286,4 +286,16 @@ export const api = {
         `/api/miniapp/stremio/trakt/watchlist?type=${type}`,
       ),
   },
+
+  // ── Follow-a-show (auto-download new episodes) ────────────────────────────
+  follow: {
+    status: (imdb_id: string) =>
+      get<{ following: boolean }>(
+        `/api/miniapp/stremio/follow/status?imdb_id=${encodeURIComponent(imdb_id)}`,
+      ),
+    set: (imdb_id: string, follow: boolean, title = "", poster = "") =>
+      post<{ ok: boolean; following: boolean }>(
+        "/api/miniapp/stremio/follow", { imdb_id, follow, title, poster },
+      ),
+  },
 };

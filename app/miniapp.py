@@ -1156,6 +1156,48 @@ async def stremio_trakt_watchlist(request: Request, type: str = "movies"):
     return {"ok": True, "items": [d for d in enriched if d]}
 
 
+# ── Follow-a-show (Sonarr-lite auto-download of new episodes) ────────────────
+class _FollowBody(BaseModel):
+    imdb_id: str
+    follow: bool = True
+    title: str = ""
+    poster: str = ""
+
+
+@router.post("/api/miniapp/stremio/follow")
+async def stremio_follow(body: _FollowBody, request: Request):
+    """Follow/unfollow a series. While followed, a background loop auto-grabs
+    newly-aired episodes into your Library (best stream → RD → cache)."""
+    p = await _verify(request)
+    _require_owner(p)
+    from . import follows as _f
+    imdb = (body.imdb_id or "").split(":")[0].strip()   # the SHOW, not an episode id
+    if not imdb.startswith("tt"):
+        raise HTTPException(400, "imdb_id must start with 'tt'")
+    if body.follow:
+        await _f.follow(imdb, title=body.title, poster=body.poster)
+    else:
+        await _f.unfollow(imdb)
+    return {"ok": True, "following": body.follow}
+
+
+@router.get("/api/miniapp/stremio/follow/status")
+async def stremio_follow_status(request: Request, imdb_id: str = ""):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import follows as _f
+    imdb = (imdb_id or "").split(":")[0].strip()
+    return {"following": await _f.is_following(imdb)}
+
+
+@router.get("/api/miniapp/stremio/follows")
+async def stremio_follows(request: Request):
+    p = await _verify(request)
+    _require_owner(p)
+    from . import follows as _f
+    return {"follows": await _f.list_follows()}
+
+
 # ── Stremio P4 — queue + cache routes ──────────────────────────────────────
 
 class _StremioQueueBody(BaseModel):

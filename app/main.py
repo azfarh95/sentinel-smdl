@@ -47,6 +47,13 @@ async def lifespan(app: FastAPI):
         await _ss.init_schema()
         _sq.start_worker()
         logger.info("Theater queue worker started (max_concurrent=%d)", _sq.MAX_CONCURRENT)
+        # Follow-a-show (Sonarr-lite) — auto-grab newly-aired episodes of
+        # followed series through this same queue. Depends on the queue worker.
+        from . import follows as _f
+        await _f.init_db()
+        asyncio.create_task(_f.check_loop())
+        logger.info("Follow-a-show loop started (interval=%ds, enabled=%s)",
+                    _f.CHECK_INTERVAL_S, _f.ENABLED)
     except Exception as e:
         logger.warning("Theater queue startup failed: %s", e)
     # First-boot: default-block adult cam platforms so they don't appear in

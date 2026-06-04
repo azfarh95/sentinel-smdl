@@ -177,10 +177,24 @@
   // Movies: fetch streams immediately.
   // Series: fetch the episode list first; streams come AFTER user picks
   // a specific episode.
+  // Follow-a-show: auto-download new episodes of a followed series.
+  let following = $state(false);
+  async function toggleFollow() {
+    if (!selected || selected.type !== "series") return;
+    try {
+      const r = await api.follow.set(selected.id, !following, selected.name, selected.poster ?? "");
+      following = r.following;
+    } catch (e) { lastError = String(e); }
+  }
+
   async function openDetail(m: MetaItem) {
     returnTo = "discover";
     selected = m; streams = []; episodes = []; pickedEpisode = null;
     view = "detail"; lastError = null;
+    following = false;
+    if (m.type === "series") {
+      api.follow.status(m.id).then(r => { following = r.following; }).catch(() => {});
+    }
     if (m.type === "series") {
       episodesLoading = true;
       try {
@@ -709,6 +723,19 @@
           {/if}
         </div>
       </div>
+
+      <!-- Follow: auto-download new episodes (series only) -->
+      {#if selected.type === "series"}
+        <div class="mb-4">
+          <Button variant={following ? "secondary" : "default"} size="sm" onclick={toggleFollow}>
+            {#if following}
+              <Check class="size-3" /> Following — auto-downloading new episodes
+            {:else}
+              <Plus class="size-3" /> Follow — auto-download new episodes
+            {/if}
+          </Button>
+        </div>
+      {/if}
 
       <!-- Episode picker — series only. Tabs by season, list per season -->
       {#if selected.type === "series"}

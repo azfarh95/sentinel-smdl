@@ -136,6 +136,44 @@ def _build_filter(crop: tuple[int, int, int, int] | None, circle: bool = False) 
     return ",".join(parts)
 
 
+def _build_shaped_filtercomplex(crop: tuple[int, int, int, int] | None,
+                                fill: str = "blur") -> str:
+    """filter_complex for a SHAPED opaque video sticker.
+
+    libvpx can't carry alpha, so a non-rectangular video can't have truly
+    transparent corners. Instead we keep the sharp video INSIDE the shape mask
+    and fill the OUTSIDE with either a blurred, slightly-darkened copy of the
+    same video (the round-video-note look, generalised to any shape) or a solid
+    colour. `maskedmerge` does the per-pixel pick: white mask → foreground,
+    black mask → fill. Result is fully opaque yuv420p — encodes fine.
+
+    Input 0 = the (trimmed) source video; input 1 = the 512² grayscale mask
+    (white = keep). Output label is [out]."""
+    S, FPS = STICKER_FRAME_PX, STICKER_MAX_FPS
+    pre: list[str] = []
+    if crop:
+        cx, cy, cw, ch = crop
+        cw = max(8, int(cw)); ch = max(8, int(ch))
+        cx = max(0, int(cx)); cy = max(0, int(cy))
+        pre.append(f"crop={cw}:{ch}:{cx}:{cy}")
+    pre.append(f"scale={S}:{S}:force_original_aspect_ratio=increase")
+    pre.append(f"crop={S}:{S}")
+    pre.append(f"fps={FPS}")
+    base = ",".join(pre)
+    f = (fill or "blur").strip().lower().lstrip("#")
+    if len(f) in (3, 6) and all(c in "0123456789abcdef" for c in f):
+        r, g, b = _parse_hex_rgb(f)
+        bg = f"[bgsrc]drawbox=0:0:{S}:{S}:color=0x{r:02x}{g:02x}{b:02x}@1.0:t=fill[bg]"
+    else:
+        bg = "[bgsrc]gblur=sigma=22,eq=brightness=-0.05:saturation=0.85[bg]"
+    return (
+        f"[0:v]{base},split[fg][bgsrc];"
+        f"{bg};"
+        f"[1:v]scale={S}:{S},format=gray[m];"
+        f"[bg][fg][m]maskedmerge[out]"
+    )
+
+
 async def make_video_sticker(
     src: Path,
     dst: Path,
@@ -144,6 +182,8 @@ async def make_video_sticker(
     end: float | None = None,
     crop: tuple[int, int, int, int] | None = None,
     circle: bool = False,
+    shape_mask: Path | None = None,
+    fill: str = "blur",
 ) -> tuple[bool, str | None]:
     """Encode `src` into a Telegram video sticker at `dst`.
 
@@ -155,6 +195,11 @@ async def make_video_sticker(
         crop:  (cx, cy, cw, ch) in source-pixel coords; None = no crop
         circle: zoom-crop a round video-note so its opaque corners fall outside
                 the frame (see _build_filter). Stays opaque yuv420p.
+        shape_mask: optional 512² grayscale mask (white = keep). When set, the
+                video is composited INSIDE the shape over a `fill` background
+                (see _build_shaped_filtercomplex) — any shape, still opaque.
+        fill:  'blur' (blurred copy of the video) or a hex colour for the
+                area outside the shape. Ignored when shape_mask is None.
 
     Returns (ok, error_message). On success dst is a valid Telegram video
     sticker (≤256 KB, VP9, 512×512, ≤3s).
@@ -170,28 +215,52 @@ async def make_video_sticker(
     if duration <= 0:
         return False, "trim window has zero duration"
 
-    vf = _build_filter(crop, circle=circle)
+    shaped = shape_mask is not None and Path(shape_mask).exists()
+    if shaped:
+        fc = _build_shaped_filtercomplex(crop, fill=fill)
+    else:
+        vf = _build_filter(crop, circle=circle)
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     last_size = 0
     last_err = ""
     for bitrate in _BITRATE_LADDER:
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", f"{start:.3f}",
-            "-i", str(src),
-            "-t",  f"{duration:.3f}",
-            "-vf", vf,
-            "-c:v", "libvpx-vp9",
-            "-b:v", bitrate,
-            "-crf", "30",
-            "-an",                 # no audio (Telegram strips it anyway)
-            "-pix_fmt", "yuv420p",
-            "-deadline", "good",
-            "-cpu-used", "2",
-            "-row-mt", "1",
-            str(dst),
-        ]
+        if shaped:
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{start:.3f}",
+                "-i", str(src),
+                "-i", str(shape_mask),
+                "-t",  f"{duration:.3f}",
+                "-filter_complex", fc,
+                "-map", "[out]",
+                "-c:v", "libvpx-vp9",
+                "-b:v", bitrate,
+                "-crf", "30",
+                "-an",
+                "-pix_fmt", "yuv420p",
+                "-deadline", "good",
+                "-cpu-used", "2",
+                "-row-mt", "1",
+                str(dst),
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{start:.3f}",
+                "-i", str(src),
+                "-t",  f"{duration:.3f}",
+                "-vf", vf,
+                "-c:v", "libvpx-vp9",
+                "-b:v", bitrate,
+                "-crf", "30",
+                "-an",                 # no audio (Telegram strips it anyway)
+                "-pix_fmt", "yuv420p",
+                "-deadline", "good",
+                "-cpu-used", "2",
+                "-row-mt", "1",
+                str(dst),
+            ]
         loop = asyncio.get_running_loop()
         try:
             rc, stderr = await loop.run_in_executor(None, lambda: _run(cmd, 90))

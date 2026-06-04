@@ -80,14 +80,18 @@ class MakeStickerBody(BaseModel):
     # Trim in seconds. Frontend clamps to [0, duration] before posting.
     trim_start: float = 0.0
     trim_end:   float = 3.0
-    # Shape & cutout — STATIC stickers only (webp carries alpha; webm here
-    # can't, see feedback_smdl_sticker_alpha). Ignored for video/custom_emoji.
+    # Shape & cutout.
     #   shape:  None/'square' = full frame; circle|triangle|diamond|heart|star|custom
     #   points: normalised [[x,y],…] polygon (0..1, output-square space) for 'custom'
-    #   cutout: rembg background removal → transparent subject
+    #   cutout: rembg background removal → transparent subject (STATIC only — webp
+    #           carries alpha; webm here can't, see feedback_smdl_sticker_alpha).
+    # Shapes work for STATIC (true transparent corners) AND VIDEO (opaque: the
+    # area outside the shape is filled per `fill`, since webm has no alpha).
+    #   fill:   'blur' (blurred copy of the video) or a hex colour — VIDEO only.
     shape:  str | None = None
     points: list | None = None
     cutout: bool = False
+    fill:   str | None = None
 
 
 def _coerce_points(raw) -> list[tuple[float, float]] | None:
@@ -311,12 +315,43 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
     dst = OUTPUT_DIR / str(user_id) / f"{draft_id}.{out_ext}"
 
     if pack_kind == "video":
-        ok, err = await _sp.make_video_sticker(
-            src, dst,
-            start=float(body.trim_start or 0.0),
-            end=float(body.trim_end or 3.0),
-            crop=crop,
-        )
+        # Shaped video: build a mask and composite over an opaque fill (webm
+        # can't carry alpha, so the corners are filled — blur or a colour).
+        v_shape = (body.shape or "").strip().lower()
+        v_mask: Path | None = None
+        v_tmp: list[Path] = []
+        if v_shape and v_shape not in _SHAPE_NONE:
+            pts = None
+            if v_shape == "custom":
+                pts = _coerce_points(body.points)
+                if not pts:
+                    await _db.sticker_draft_set_status(
+                        draft_id, "failed", "custom shape needs >=3 points")
+                    raise HTTPException(status_code=422,
+                                        detail="custom shape needs at least 3 points")
+            mask_png = dst.with_name(f"{draft_id}_vmask.png")
+            mres = _sp.build_shape_mask(v_shape, mask_png, points=pts)
+            if mres is None:
+                await _db.sticker_draft_set_status(
+                    draft_id, "failed", f"unsupported shape: {v_shape}")
+                raise HTTPException(status_code=422, detail=f"unsupported shape: {v_shape}")
+            v_mask = mask_png
+            v_tmp.append(mask_png)
+        try:
+            ok, err = await _sp.make_video_sticker(
+                src, dst,
+                start=float(body.trim_start or 0.0),
+                end=float(body.trim_end or 3.0),
+                crop=crop,
+                shape_mask=v_mask,
+                fill=(body.fill or "blur"),
+            )
+        finally:
+            for f in v_tmp:
+                try:
+                    f.unlink(missing_ok=True)
+                except Exception:
+                    pass
         sticker_format = "video"
     elif pack_kind == "static":
         # Shape mask + background cutout are static-only (webp alpha). Build a
@@ -1875,7 +1910,7 @@ _EDIT_HTML = r"""<!doctype html>
   </div>
 
   <div class="section" id="shape-section">
-    <label>Shape &amp; cutout <span class="meta">(still stickers — transparent)</span></label>
+    <label id="shape-label">Shape &amp; cutout <span class="meta">(still stickers — transparent)</span></label>
     <div class="row" id="shape-row">
       <span class="pill on" data-shape="square">▢ Square</span>
       <span class="pill" data-shape="circle">◯ Circle</span>
@@ -1888,6 +1923,12 @@ _EDIT_HTML = r"""<!doctype html>
     <div class="row" style="margin-top:8px">
       <span class="pill" id="cutout-toggle">✂️ Remove background</span>
       <span class="pill" id="draw-clear" style="display:none">↺ Redraw</span>
+    </div>
+    <div class="row" id="fill-row" style="margin-top:8px;display:none">
+      <span class="meta">Corners:</span>
+      <span class="pill on" data-fill="blur">🌫 Blur</span>
+      <span class="pill" data-fill="color">🎨 Colour</span>
+      <input type="color" id="fill-color" value="#ffffff" style="display:none">
     </div>
     <div class="meta" id="shape-hint" style="margin-top:6px">Square = the full (cropped) frame.</div>
   </div>
@@ -2314,21 +2355,35 @@ const _editorPackKind = (() => {
   } catch (e) { return 'video'; }
 })();
 
-// ── Shape & cutout (static webp only — webm here can't carry alpha) ───────
+// ── Shape & cutout ────────────────────────────────────────────────────────
+// STATIC: shapes/cutout cut TRANSPARENT corners (webp alpha).
+// VIDEO:  shapes are kept, but webm can't carry alpha, so the corners are
+//         FILLED (blur of the video, or a colour) — no background-removal.
 const shapeSection = document.getElementById('shape-section');
 const shapeRow     = document.getElementById('shape-row');
 const cutoutToggle = document.getElementById('cutout-toggle');
 const shapeHint    = document.getElementById('shape-hint');
+const shapeLabel   = document.getElementById('shape-label');
 const drawCanvas   = document.getElementById('draw-canvas');
 const drawClearBtn = document.getElementById('draw-clear');
+const fillRow      = document.getElementById('fill-row');
+const fillColor    = document.getElementById('fill-color');
 
 let chosenShape = 'square';   // square|circle|triangle|star|heart|diamond|custom
 let cutout = false;
+let chosenFill = 'blur';      // VIDEO corner fill: 'blur' | 'color'
 let customPoints = [];        // normalised [[x,y],…] in output-square space
 
-// Shapes/cutout produce transparency, which only the static webp encoder
-// supports here — hide the whole section for video & custom-emoji packs.
-if (_editorPackKind !== 'static') shapeSection.style.display = 'none';
+const _isVideoKind = (_editorPackKind === 'video');
+// custom-emoji keeps it simple (no shapes); static & video both get shapes.
+if (_editorPackKind === 'custom_emoji') {
+  shapeSection.style.display = 'none';
+} else if (_isVideoKind) {
+  cutoutToggle.style.display = 'none';     // transparency-only → not for webm
+  fillRow.style.display = '';              // offer the corner fill instead
+  shapeLabel.innerHTML = 'Shape <span class="meta">(video — corners filled, not transparent)</span>';
+  shapeHint.textContent = 'Square = the full (cropped) frame. Pick a shape to frame the video.';
+}
 
 const SHAPE_HINTS = {
   square:   'Square = the full (cropped) frame.',
@@ -2339,13 +2394,24 @@ const SHAPE_HINTS = {
   diamond:  'Diamond cutout — transparent outside.',
   custom:   'Draw a shape over the image (drag a loop), then Make.',
 };
+const SHAPE_HINTS_VIDEO = {
+  square:   'Square = the full (cropped) frame.',
+  circle:   'Circle of video; corners filled (blur/colour).',
+  triangle: 'Triangle of video; corners filled.',
+  star:     'Star of video; corners filled.',
+  heart:    'Heart of video; corners filled.',
+  diamond:  'Diamond of video; corners filled.',
+  custom:   'Draw a shape over the video (drag a loop), then Make.',
+};
 
 shapeRow.addEventListener('click', e => {
   const pill = e.target.closest('[data-shape]');
   if (!pill) return;
   chosenShape = pill.dataset.shape;
   shapeRow.querySelectorAll('[data-shape]').forEach(p => p.classList.toggle('on', p === pill));
-  shapeHint.textContent = SHAPE_HINTS[chosenShape] || '';
+  shapeHint.textContent = (_isVideoKind ? SHAPE_HINTS_VIDEO : SHAPE_HINTS)[chosenShape] || '';
+  // Corner-fill controls only matter for a non-square video shape.
+  if (_isVideoKind) fillRow.style.display = (chosenShape !== 'square') ? '' : 'none';
   const drawing = chosenShape === 'custom';
   drawCanvas.classList.toggle('on', drawing);
   drawClearBtn.style.display = drawing ? '' : 'none';
@@ -2354,6 +2420,13 @@ shapeRow.addEventListener('click', e => {
 cutoutToggle.addEventListener('click', () => {
   cutout = !cutout;
   cutoutToggle.classList.toggle('on', cutout);
+});
+fillRow.addEventListener('click', e => {
+  const pill = e.target.closest('[data-fill]');
+  if (!pill) return;
+  chosenFill = pill.dataset.fill;
+  fillRow.querySelectorAll('[data-fill]').forEach(p => p.classList.toggle('on', p === pill));
+  fillColor.style.display = (chosenFill === 'color') ? '' : 'none';
 });
 drawClearBtn.addEventListener('click', () => { customPoints = []; redrawCustom(); });
 
@@ -2428,8 +2501,8 @@ makeBtn.addEventListener('click', async () => {
   };
   const crop = cropToSourcePixels();
   if (crop) Object.assign(body, { crop_x: crop.x, crop_y: crop.y, crop_w: crop.w, crop_h: crop.h });
-  // Shape & cutout are static-only. Square = no mask.
-  if (_editorPackKind === 'static') {
+  // Shapes apply to static (transparent) AND video (opaque fill). Square = none.
+  if (_editorPackKind === 'static' || _editorPackKind === 'video') {
     if (chosenShape && chosenShape !== 'square') body.shape = chosenShape;
     if (chosenShape === 'custom') {
       if (customPoints.length < 3) {
@@ -2439,7 +2512,12 @@ makeBtn.addEventListener('click', async () => {
       }
       body.points = customPoints;
     }
-    if (cutout) body.cutout = true;
+    // cutout (background removal) is transparent → static only.
+    if (_editorPackKind === 'static' && cutout) body.cutout = true;
+    // corner fill is opaque → video only, and only for a non-square shape.
+    if (_editorPackKind === 'video' && chosenShape !== 'square') {
+      body.fill = (chosenFill === 'color') ? fillColor.value : 'blur';
+    }
   }
   try {
     const r = await api(`/api/sticker_drafts/${DRAFT_ID}/make`, {

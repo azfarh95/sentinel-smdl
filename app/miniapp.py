@@ -3571,6 +3571,15 @@ body.sidebar-collapsed .sidebar-item .icon svg { width: 17px; height: 17px; }
 @keyframes tile-wiggle { from { transform: rotate(-0.7deg); } to { transform: rotate(0.7deg); } }
 .page { display: none; padding: max(12px, calc(env(safe-area-inset-top, 0px) + 4px)) 12px 12px; }
 .page.active { display: block; }
+/* Sticker Maker section nav (top, scrollable) */
+.stk-nav { display: flex; gap: 5px; overflow-x: auto; margin: 0 0 12px; padding-bottom: 2px; scrollbar-width: none; }
+.stk-nav::-webkit-scrollbar { display: none; }
+.stk-nav button { flex: 0 0 auto; font-size: 12.5px; padding: 8px 13px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--separator); color: var(--fg); cursor: pointer; white-space: nowrap; }
+.stk-nav button.on { background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  color: var(--button-text); border-color: transparent; box-shadow: var(--glow); }
+.stk-sec { display: none; }
+.stk-sec.active { display: block; }
 .subtabs { display: flex; gap: 6px; margin: 0 0 14px; overflow-x: auto;
            -webkit-overflow-scrolling: touch; scrollbar-width: none; }
 .subtabs::-webkit-scrollbar { display: none; }
@@ -4099,80 +4108,96 @@ button.warn { background: #ff9500; color: #fff; }
 
   <div class=page id=page-stickers>
     <h1>Sticker Maker</h1>
-    <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
-      <span class=meta style="font-size:12px;color:var(--muted);align-self:center">One pack — video &amp; static together. 🎬/🖼</span>
-      <span style="flex:1"></span>
-      <button class=sec onclick="stickersToggleLookup()" style="font-size:12px" title="View any TG pack + clone stickers into yours">🔍 Look up pack</button>
+    <div class=stk-nav id=stk-nav>
+      <button data-sec=stickers onclick="stkSection('stickers')">🎞 Stickers</button>
+      <button data-sec=add onclick="stkSection('add')">＋ Add</button>
+      <button data-sec=drafts onclick="stkSection('drafts')">✂️ Drafts</button>
+      <button data-sec=pack onclick="stkSection('pack')">📦 Pack</button>
     </div>
-    <div id=stickers-lookup-card class=card style="display:none;margin-bottom:10px">
-      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
-        <span style="font-weight:600;flex:1">Look up any sticker pack</span>
-        <button class=sec onclick="stickersToggleLookup()" style="font-size:11px">✕</button>
-      </div>
-      <div class=meta style="font-size:11px;margin-bottom:8px;color:var(--muted)">
-        Paste a <code>t.me/addstickers/...</code> URL or just the pack name. Telegram limits us to read-only for packs not created by <b>@Sentinel_Media_bot</b>, but you can <i>clone</i> any sticker into one of your own packs and then fully edit it from there.
-      </div>
-      <div style="display:flex;gap:6px">
-        <input id=stickers-lookup-input type=text placeholder="t.me/addstickers/yourpack or yourpack_name" style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:13px">
-        <button onclick="stickersDoLookup()">Look up</button>
-      </div>
-      <div id=stickers-lookup-meta style="margin-top:10px;display:none">
-        <div id=stickers-lookup-title style="font-weight:600;margin-bottom:4px"></div>
-        <div id=stickers-lookup-status class=meta style="font-size:11px;margin-bottom:6px"></div>
-      </div>
-      <div id=stickers-lookup-grid></div>
-    </div>
-    <div class=card id=stickers-pack-card>
-      <div class=empty><span class=spin></span> Loading…</div>
-    </div>
-    <div class=card style="margin-top:10px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-        <span style="font-weight:600">Add to your pack</span>
+
+    <div class="stk-sec active" data-section=stickers>
+      <h2 style="margin:2px 4px 8px;font-size:15px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:8px">
+        <span>In your pack</span>
+        <span id=stickers-pack-count class=meta style="font-size:11px;color:var(--muted)"></span>
         <span style="flex:1"></span>
-        <span class=pill data-mode=instant onclick="stickersSetMode('instant')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">⚡ Instant</span>
-        <span class=pill data-mode=manual onclick="stickersSetMode('manual')" title="Open the editor: scrubber · crop · shapes · background cutout" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">✂️ Edit / crop</span>
-        <input type=text id=stickers-default-emoji maxlength=8 value="🎬" title="Default emoji used in Instant mode" style="width:54px;padding:4px 6px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:18px;text-align:center">
+        <button class=sec id=stickers-refresh-btn onclick=stickersLoadPackContents() style="font-size:11px">↻ Refresh</button>
+      </h2>
+      <div id=stickers-pack-grid>
+        <div class=empty>Loading…</div>
       </div>
-      <div class=meta id=stickers-mode-hint style="font-size:11px;margin-bottom:8px;color:var(--muted)"></div>
-      <input type=file id=stickers-file accept="video/*,image/gif" multiple style="display:none">
-      <input type=file id=stickers-camera accept="video/*" capture="environment" style="display:none">
-      <div id=stickers-dropzone style="border:2px dashed var(--separator);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s">
-        <div style="font-size:30px;line-height:1;margin-bottom:6px">📎</div>
-        <div style="font-weight:600">Tap to pick · drag &amp; drop · or paste</div>
-        <div class=meta style="margin-top:4px;font-size:12px;color:var(--muted)">Videos / GIFs, ≤ 50 MB each. Drop multiple at once.</div>
-      </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
-        <button class=sec onclick="document.getElementById('stickers-camera').click()" style="font-size:12px">📷 Record</button>
-        <button class=sec onclick="document.getElementById('stickers-file').click()" style="font-size:12px">📁 Pick files</button>
-        <span style="flex:1"></span>
-        <span id=stickers-queue-pill class=meta style="font-size:11px;color:var(--muted)"></span>
-      </div>
-      <div id=stickers-upload-progress style="display:none;margin-top:10px">
-        <div style="background:#222;border-radius:6px;height:6px;overflow:hidden">
-          <div id=stickers-upload-bar style="background:var(--accent);height:100%;width:0;transition:width .15s"></div>
+    </div>
+
+    <div class=stk-sec data-section=add>
+      <div class=card>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <span style="font-weight:600">Add to your pack</span>
+          <span style="flex:1"></span>
+          <span class=pill data-mode=instant onclick="stickersSetMode('instant')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">⚡ Instant</span>
+          <span class=pill data-mode=manual onclick="stickersSetMode('manual')" title="Open the editor: scrubber · crop · shapes · background cutout" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">✂️ Edit / crop</span>
+          <input type=text id=stickers-default-emoji maxlength=8 value="🎬" title="Default emoji used in Instant mode" style="width:54px;padding:4px 6px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:18px;text-align:center">
         </div>
-        <div id=stickers-upload-status class=meta style="margin-top:4px;font-size:12px"></div>
+        <div class=meta id=stickers-mode-hint style="font-size:11px;margin-bottom:8px;color:var(--muted)"></div>
+        <input type=file id=stickers-file accept="video/*,image/gif" multiple style="display:none">
+        <input type=file id=stickers-camera accept="video/*" capture="environment" style="display:none">
+        <div id=stickers-dropzone style="border:2px dashed var(--separator);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s">
+          <div style="font-size:30px;line-height:1;margin-bottom:6px">📎</div>
+          <div style="font-weight:600">Tap to pick · drag &amp; drop · or paste</div>
+          <div class=meta style="margin-top:4px;font-size:12px;color:var(--muted)">Videos / GIFs, ≤ 50 MB each. Drop multiple at once.</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+          <button class=sec onclick="document.getElementById('stickers-camera').click()" style="font-size:12px">📷 Record</button>
+          <button class=sec onclick="document.getElementById('stickers-file').click()" style="font-size:12px">📁 Pick files</button>
+          <span style="flex:1"></span>
+          <span id=stickers-queue-pill class=meta style="font-size:11px;color:var(--muted)"></span>
+        </div>
+        <div id=stickers-upload-progress style="display:none;margin-top:10px">
+          <div style="background:#222;border-radius:6px;height:6px;overflow:hidden">
+            <div id=stickers-upload-bar style="background:var(--accent);height:100%;width:0;transition:width .15s"></div>
+          </div>
+          <div id=stickers-upload-status class=meta style="margin-top:4px;font-size:12px"></div>
+        </div>
       </div>
     </div>
-    <h2 style="margin:18px 4px 8px;font-size:15px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:8px">
-      <span>In your pack</span>
-      <span id=stickers-pack-count class=meta style="font-size:11px;color:var(--muted)"></span>
-      <span style="flex:1"></span>
-      <button class=sec id=stickers-refresh-btn onclick=stickersLoadPackContents() style="font-size:11px">↻ Refresh</button>
-    </h2>
-    <div id=stickers-pack-grid>
-      <div class=empty>Loading…</div>
+
+    <div class=stk-sec data-section=drafts>
+      <h2 style="margin:2px 4px 8px;font-size:15px;color:var(--muted);font-weight:600">Drafts</h2>
+      <div id=stickers-drafts>
+        <div class=empty>Drop a video in <b>Add</b>, or send one to <b>@Sentinel_Media_bot</b>, to start a draft.</div>
+      </div>
     </div>
-    <h2 style="margin:18px 4px 8px;font-size:15px;color:var(--muted);font-weight:600">Drafts</h2>
-    <div id=stickers-drafts>
-      <div class=empty>Drop a video above, or send one to <b>@Sentinel_Media_bot</b>, to start a draft.</div>
-    </div>
-    <div style="margin-top:24px;padding:12px;border:1px solid #4a2222;border-radius:10px;background:rgba(120,30,30,0.08)">
-      <div style="font-weight:600;color:#e88;margin-bottom:6px">Danger zone</div>
-      <div class=meta style="font-size:12px;margin-bottom:10px;color:var(--muted)">These actions can't be undone.</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
-        <button class=sec onclick=stickersDeleteAll() style="color:#e88">🗑 Delete all my drafts</button>
-        <button class=sec onclick=stickersDeletePack() style="color:#e88">💥 Delete entire pack</button>
+
+    <div class=stk-sec data-section=pack>
+      <div class=card id=stickers-pack-card>
+        <div class=empty><span class=spin></span> Loading…</div>
+      </div>
+      <div style="display:flex;gap:6px;margin:10px 0;flex-wrap:wrap">
+        <button class=sec onclick="stickersToggleLookup()" style="font-size:12px" title="View any TG pack + clone stickers into yours">🔍 Look up pack</button>
+      </div>
+      <div id=stickers-lookup-card class=card style="display:none;margin-bottom:10px">
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+          <span style="font-weight:600;flex:1">Look up any sticker pack</span>
+          <button class=sec onclick="stickersToggleLookup()" style="font-size:11px">✕</button>
+        </div>
+        <div class=meta style="font-size:11px;margin-bottom:8px;color:var(--muted)">
+          Paste a <code>t.me/addstickers/...</code> URL or just the pack name. Telegram limits us to read-only for packs not created by <b>@Sentinel_Media_bot</b>, but you can <i>clone</i> any sticker into one of your own packs and then fully edit it from there.
+        </div>
+        <div style="display:flex;gap:6px">
+          <input id=stickers-lookup-input type=text placeholder="t.me/addstickers/yourpack or yourpack_name" style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:13px">
+          <button onclick="stickersDoLookup()">Look up</button>
+        </div>
+        <div id=stickers-lookup-meta style="margin-top:10px;display:none">
+          <div id=stickers-lookup-title style="font-weight:600;margin-bottom:4px"></div>
+          <div id=stickers-lookup-status class=meta style="font-size:11px;margin-bottom:6px"></div>
+        </div>
+        <div id=stickers-lookup-grid></div>
+      </div>
+      <div style="margin-top:16px;padding:12px;border:1px solid #4a2222;border-radius:10px;background:rgba(120,30,30,0.08)">
+        <div style="font-weight:600;color:#e88;margin-bottom:6px">Danger zone</div>
+        <div class=meta style="font-size:12px;margin-bottom:10px;color:var(--muted)">These actions can't be undone.</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class=sec onclick=stickersDeleteAll() style="color:#e88">🗑 Delete all my drafts</button>
+          <button class=sec onclick=stickersDeletePack() style="color:#e88">💥 Delete entire pack</button>
+        </div>
       </div>
     </div>
   </div>
@@ -5202,6 +5227,17 @@ async function streamerSignOut() {
   } catch (e) { showErr('Sign-out failed: ' + e); }
 }
 
+// Sticker Maker top-nav: switch the active section (remembered per device).
+function stkSection(sec) {
+  const valid = ['stickers', 'add', 'drafts', 'pack'];
+  if (!valid.includes(sec)) sec = 'stickers';
+  document.querySelectorAll('#page-stickers .stk-sec').forEach(s =>
+    s.classList.toggle('active', s.dataset.section === sec));
+  document.querySelectorAll('#stk-nav button').forEach(b =>
+    b.classList.toggle('on', b.dataset.sec === sec));
+  try { localStorage.setItem('smdl_stk_section', sec); } catch (e) {}
+}
+
 async function loadStickers() {
   const packEl = document.getElementById('stickers-pack-card');
   const draftsEl = document.getElementById('stickers-drafts');
@@ -5223,6 +5259,9 @@ async function loadStickers() {
     });
     // Reflect mode persisted across sessions.
     stickersSetMode(_stickersMode);
+    // Initialise the section nav (remembered per device; default Stickers).
+    let _sec; try { _sec = localStorage.getItem('smdl_stk_section'); } catch (e) {}
+    stkSection(_sec || 'stickers');
   }
   let data;
   try {

@@ -2014,8 +2014,8 @@ _EDIT_HTML = r"""<!doctype html>
       -webkit-overflow-scrolling:touch;}
     .setup-rail{display:none;flex-direction:column;gap:6px;flex:0 0 auto;}
     body.skin-studio .setup-rail{display:flex;}
-    .setup-rail button{width:44px;height:44px;font-size:18px;line-height:1;
-      border-radius:var(--radius);background:var(--surf2);
+    .setup-rail button{width:34px;height:34px;font-size:14px;line-height:1;
+      padding:0;border-radius:var(--radius);background:var(--surf2);
       border:1px solid var(--border);color:var(--text);cursor:pointer;}
     .setup-rail button.on{background:var(--accent);border-color:var(--accent);
       color:var(--onacc);box-shadow:0 0 12px -3px var(--accent);}
@@ -3131,7 +3131,14 @@ async function ensureStudio() {
     backgroundColor: '#000', preserveObjectStacking: true,
     width: STUDIO_PX, height: STUDIO_PX,
   });
-  fcanvas.on('object:added', _snap);
+  // Sticker maker: scale only from corners (uniform) — hide the middle handles
+  // so a layer can't be stretched into a distorted thin sliver.
+  fcanvas.on('object:added', (e) => {
+    if (e && e.target && e.target.setControlsVisibility) {
+      e.target.setControlsVisibility({ mt: false, mb: false, ml: false, mr: false });
+    }
+    _snap();
+  });
   fcanvas.on('object:modified', _snap);
   fcanvas.on('object:removed', _snap);
   _restoring = true;                       // don't snapshot the initial base add

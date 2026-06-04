@@ -1768,7 +1768,7 @@ _EDIT_HTML = r"""<!doctype html>
   <h1>Make sticker</h1>
 
   <div class="video-wrap" id="video-wrap">
-    <video id="vid" muted playsinline></video>
+    <video id="vid" muted playsinline preload="auto"></video>
     <div class="crop-overlay" id="crop-overlay">
       <div class="crop-box" id="crop-box">
         <div class="crop-handle nw" data-h="nw"></div>
@@ -2004,6 +2004,13 @@ vid.addEventListener('loadedmetadata', () => {
   videoDur = vid.duration || 0;
   // Initial window: [0, min(3, dur)].
   setTrim(0, Math.min(MAX_TRIM_S, videoDur), { seekVideo: false });
+  // Mobile WebViews leave the <video> black until the first frame is decoded
+  // AND painted — which only happens on a seek or play, hence the box stayed
+  // black until the user scrubbed. Nudge currentTime just off zero to force a
+  // first-frame paint on load. Bonus: the Studio base-grab (drawImage(vid))
+  // then captures a real frame instead of black if Studio is opened first.
+  try { vid.currentTime = videoDur ? Math.min(0.04, videoDur / 2) : 0.04; }
+  catch (e) {}
 });
 
 vid.addEventListener('timeupdate', () => {

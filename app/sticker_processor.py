@@ -435,32 +435,40 @@ def _preset_points(shape: str, s: int) -> list[tuple[float, float]] | str | None
 
 
 def build_shape_mask(shape: str, out_path: Path, *, size_px: int = STICKER_FRAME_PX,
-                     points: list[tuple[float, float]] | None = None) -> Path | None:
+                     points: list[tuple[float, float]] | None = None,
+                     pad: float = 0.0) -> Path | None:
     """Render an alpha mask (white = keep, black = transparent) for a shape.
 
     shape: 'circle' / 'triangle' / 'diamond' / 'heart' / 'star', or 'custom'
     (then `points` is a normalised [(x,y),…] polygon in 0..1). Drawn at 4×
-    and downscaled for antialiasing. Returns the path, or None if no shape."""
+    and downscaled for antialiasing. Returns the path, or None if no shape.
+
+    pad: fraction (0..0.3) of breathing margin inset on every side, so the
+    shape floats free of the frame instead of kissing its edges (0 = inscribed,
+    maximum size)."""
     try:
         from PIL import Image, ImageDraw
     except Exception as e:
         logger.warning("PIL unavailable for shape mask: %s", e)
         return None
     ss = size_px * 4
+    pad = max(0.0, min(0.3, float(pad or 0.0)))
+    m = pad * ss                 # inset margin in 4× space
+    inner = ss - 2 * m           # shape is drawn inside this centred box
     img = Image.new("L", (ss, ss), 0)
     d = ImageDraw.Draw(img)
     if shape == "custom":
         if not points or len(points) < 3:
             return None
-        d.polygon([(x * ss, y * ss) for x, y in points], fill=255)
+        d.polygon([(m + x * inner, m + y * inner) for x, y in points], fill=255)
     else:
-        spec = _preset_points(shape, ss)
+        spec = _preset_points(shape, inner)
         if spec is None:
             return None
         if spec == "ellipse":
-            d.ellipse([0, 0, ss - 1, ss - 1], fill=255)
+            d.ellipse([m, m, m + inner - 1, m + inner - 1], fill=255)
         else:
-            d.polygon(spec, fill=255)
+            d.polygon([(m + px, m + py) for px, py in spec], fill=255)
     img = img.resize((size_px, size_px), Image.LANCZOS)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(str(out_path))

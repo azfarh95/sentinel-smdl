@@ -92,6 +92,9 @@ class MakeStickerBody(BaseModel):
     points: list | None = None
     cutout: bool = False
     fill:   str | None = None
+    # Inset the shape so it floats free of the frame edges (a breathing margin)
+    # instead of being inscribed edge-to-edge. Applies to static + video shapes.
+    padding: bool = False
 
 
 def _coerce_points(raw) -> list[tuple[float, float]] | None:
@@ -117,6 +120,8 @@ def _coerce_points(raw) -> list[tuple[float, float]] | None:
 
 
 _SHAPE_NONE = {"", "square", "none", "rect", "rectangle"}
+# Breathing margin applied when the per-sticker "padding" toggle is on.
+_SHAPE_PAD = 0.07
 
 
 class RenamePackBody(BaseModel):
@@ -334,7 +339,8 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
                     raise HTTPException(status_code=422,
                                         detail="custom shape needs at least 3 points")
             mask_png = dst.with_name(f"{draft_id}_vmask.png")
-            mres = _sp.build_shape_mask(v_shape, mask_png, points=pts)
+            mres = _sp.build_shape_mask(v_shape, mask_png, points=pts,
+                                        pad=(_SHAPE_PAD if body.padding else 0.0))
             if mres is None:
                 await _db.sticker_draft_set_status(
                     draft_id, "failed", f"unsupported shape: {v_shape}")
@@ -404,7 +410,8 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
                         raise HTTPException(status_code=422,
                                             detail="custom shape needs at least 3 points")
                 mask_png = dst.with_name(f"{draft_id}_mask.png")
-                mres = _sp.build_shape_mask(shape, mask_png, points=pts)
+                mres = _sp.build_shape_mask(shape, mask_png, points=pts,
+                                            pad=(_SHAPE_PAD if body.padding else 0.0))
                 if mres is None:
                     await _db.sticker_draft_set_status(
                         draft_id, "failed", f"unsupported shape: {shape}")
@@ -1945,6 +1952,10 @@ _EDIT_HTML = r"""<!doctype html>
       <span class="pill" data-fill="transparent">⬚ Transparent</span>
       <input type="color" id="fill-color" value="#ffffff" style="display:none">
     </div>
+    <div class="row" id="pad-row" style="margin-top:8px;display:none">
+      <span class="pill" id="pad-toggle">⊡ Padding</span>
+      <span class="meta">float the shape free of the frame edges</span>
+    </div>
     <div class="meta" id="shape-hint" style="margin-top:6px">Square = the full (cropped) frame.</div>
   </div>
 
@@ -2386,22 +2397,33 @@ const drawCanvas   = document.getElementById('draw-canvas');
 const drawClearBtn = document.getElementById('draw-clear');
 const fillRow      = document.getElementById('fill-row');
 const fillColor    = document.getElementById('fill-color');
+const padRow       = document.getElementById('pad-row');
+const padToggle    = document.getElementById('pad-toggle');
 
+const SHAPE_PAD = 0.07;       // matches backend _SHAPE_PAD (breathing margin)
 let chosenShape = 'square';   // square|circle|triangle|star|heart|diamond|custom
 let cutout = false;
-let chosenFill = 'blur';      // VIDEO corner fill: 'blur' | 'color'
+let chosenFill = 'blur';      // VIDEO corner fill: 'blur' | 'color' | 'transparent'
+let chosenPad = false;        // float the shape free of the frame edges
 let customPoints = [];        // normalised [[x,y],…] in output-square space
 
 const _isVideoKind = (_editorPackKind === 'video');
+// Show the per-shape extras (corner fill for video, padding for any shape)
+// only once a non-square shape is picked.
+function _refreshShapeExtras() {
+  const shaped = chosenShape !== 'square';
+  if (_isVideoKind) fillRow.style.display = shaped ? '' : 'none';
+  padRow.style.display = shaped ? '' : 'none';
+}
 // custom-emoji keeps it simple (no shapes); static & video both get shapes.
 if (_editorPackKind === 'custom_emoji') {
   shapeSection.style.display = 'none';
 } else if (_isVideoKind) {
   cutoutToggle.style.display = 'none';     // transparency-only → not for webm
-  fillRow.style.display = '';              // offer the corner fill instead
-  shapeLabel.innerHTML = 'Shape <span class="meta">(video — corners filled, not transparent)</span>';
+  shapeLabel.innerHTML = 'Shape <span class="meta">(video — corners filled or transparent)</span>';
   shapeHint.textContent = 'Square = the full (cropped) frame. Pick a shape to frame the video.';
 }
+_refreshShapeExtras();
 
 const SHAPE_HINTS = {
   square:   'Square = the full (cropped) frame.',
@@ -2428,8 +2450,7 @@ shapeRow.addEventListener('click', e => {
   chosenShape = pill.dataset.shape;
   shapeRow.querySelectorAll('[data-shape]').forEach(p => p.classList.toggle('on', p === pill));
   shapeHint.textContent = (_isVideoKind ? SHAPE_HINTS_VIDEO : SHAPE_HINTS)[chosenShape] || '';
-  // Corner-fill controls only matter for a non-square video shape.
-  if (_isVideoKind) fillRow.style.display = (chosenShape !== 'square') ? '' : 'none';
+  _refreshShapeExtras();   // fill (video) + padding controls, non-square only
   const drawing = chosenShape === 'custom';
   const preset  = !drawing && chosenShape !== 'square';   // circle/heart/star/…
   drawCanvas.classList.toggle('on', drawing);             // freehand draw (captures input)
@@ -2453,6 +2474,11 @@ fillRow.addEventListener('click', e => {
   chosenFill = pill.dataset.fill;
   fillRow.querySelectorAll('[data-fill]').forEach(p => p.classList.toggle('on', p === pill));
   fillColor.style.display = (chosenFill === 'color') ? '' : 'none';
+});
+padToggle.addEventListener('click', () => {
+  chosenPad = !chosenPad;
+  padToggle.classList.toggle('on', chosenPad);
+  _refreshShapePreview();   // preview the new margin live
 });
 drawClearBtn.addEventListener('click', () => { customPoints = []; redrawCustom(); });
 
@@ -2540,7 +2566,8 @@ function redrawShapePreview() {
   if (chosenShape === 'square' || chosenShape === 'custom') return;
   const sq = outputSquareRect();
   if (!sq.side) return;
-  const ox = sq.left - wr.left, oy = sq.top - wr.top, s = sq.side;
+  let ox = sq.left - wr.left, oy = sq.top - wr.top, s = sq.side;
+  if (chosenPad) { const m = s * SHAPE_PAD; ox += m; oy += m; s -= 2 * m; }  // breathing margin
   // dim everything, then punch the shape clear so the video shows through it
   ctx.save();
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
@@ -2614,6 +2641,8 @@ makeBtn.addEventListener('click', async () => {
     if (_editorPackKind === 'video' && chosenShape !== 'square') {
       body.fill = (chosenFill === 'color') ? fillColor.value : chosenFill;
     }
+    // breathing-margin toggle (static + video), non-square shapes only.
+    if (chosenShape !== 'square' && chosenPad) body.padding = true;
   }
   try {
     const r = await api(`/api/sticker_drafts/${DRAFT_ID}/make`, {

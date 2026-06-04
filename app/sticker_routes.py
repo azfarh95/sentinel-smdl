@@ -456,6 +456,91 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
     }
 
 
+class ComposeBody(BaseModel):
+    # data-URL or raw base64 of the composited 512×512 PNG from the Studio canvas.
+    png_b64: str
+    emoji: str = "🎬"
+
+
+@router.post("/api/sticker_drafts/{draft_id}/compose")
+async def compose_sticker(draft_id: int, body: ComposeBody, request: Request):
+    """Studio export. Unlike /make (which re-processes the source frame), this
+    takes a fully-composited 512×512 PNG (cutout + text + overlays from the
+    Fabric.js canvas) and encodes IT directly to a static webp sticker, then
+    adds it to the user's static pack — same pack-add path as /make."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    first_name = (payload.get("user") or {}).get("first_name")
+
+    d = await _db.sticker_draft_get(draft_id, user_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="draft not found")
+
+    import base64
+    raw = body.png_b64.split(",", 1)[-1] if body.png_b64.startswith("data:") else body.png_b64
+    try:
+        png_bytes = base64.b64decode(raw, validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid png_b64")
+    if not png_bytes or len(png_bytes) > 8_000_000:
+        raise HTTPException(status_code=400, detail="composited PNG missing or too large")
+
+    await _db.sticker_draft_set_status(draft_id, "processing")
+    out_dir = OUTPUT_DIR / str(user_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    comp_png = out_dir / f"{draft_id}_studio.png"
+    dst = out_dir / f"{draft_id}.webp"
+    try:
+        comp_png.write_bytes(png_bytes)
+        ok, err = await _sp.make_static_sticker(
+            comp_png, dst, crop=None, seek_s=0.0, mask=None, keep_alpha=True)
+    finally:
+        try:
+            comp_png.unlink(missing_ok=True)
+        except Exception:
+            pass
+    if not ok:
+        await _db.sticker_draft_set_status(draft_id, "failed", err)
+        raise HTTPException(status_code=422, detail=err or "encode failed")
+
+    from .bot import get_application
+    tg_app = get_application()
+    if tg_app is None:
+        await _db.sticker_draft_set_status(draft_id, "failed", "bot not running")
+        raise HTTPException(status_code=503, detail="bot not running")
+    pack = await _st.resolve_pack(tg_app.bot, user_id, first_name, kind="static")
+    try:
+        file_id, set_url = await _st.upload_and_add(
+            tg_app.bot, user_id, dst, emoji=(body.emoji or "🎬"),
+            pack_name=pack["pack_name"], pack_title=pack["pack_title"],
+            sticker_format="static", sticker_type="regular")
+    except TelegramError as e:
+        msg = str(e)
+        await _db.sticker_draft_set_status(draft_id, "failed", msg)
+        if "PEER_ID_INVALID" in msg or "user not found" in msg.lower():
+            raise HTTPException(status_code=400,
+                                detail="Send /start to the bot first, then try again.")
+        raise HTTPException(status_code=502, detail=f"Telegram: {msg}")
+
+    if not pack.get("exists_in_db"):
+        await _db.sticker_pack_create(user_id, pack["pack_name"], pack["pack_title"],
+                                      set_url, kind="static")
+    await _db.sticker_record(user_id=user_id, pack_name=pack["pack_name"],
+                             source_draft_id=draft_id, emoji=body.emoji or "🎬",
+                             telegram_file_id=file_id, webm_path=str(dst))
+    await _db.sticker_draft_set_status(draft_id, "awaiting_edit")
+    try:
+        await tg_app.bot.send_sticker(chat_id=user_id, sticker=file_id)
+        await tg_app.bot.send_message(
+            chat_id=user_id, text=f"✅ Added to your pack:\n{set_url}",
+            disable_web_page_preview=True)
+    except Exception as e:
+        logger.warning("compose confirmation DM failed for u=%s: %s", user_id, e)
+    return {"ok": True, "sticker_file_id": file_id, "set_url": set_url,
+            "pack_name": pack["pack_name"]}
+
+
 @router.post("/api/sticker_drafts/{draft_id}/delete")
 async def delete_one(draft_id: int, request: Request):
     payload = await _mini._verify(request)
@@ -1590,6 +1675,7 @@ _EDIT_HTML = r"""<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Make Sticker</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/fabric@5.3.0/dist/fabric.min.js"></script>
   <style>
     :root { color-scheme: dark light; }
     body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -1661,6 +1747,20 @@ _EDIT_HTML = r"""<!doctype html>
     #make-btn:disabled{opacity:.6;cursor:wait;}
     #progress{margin-top:10px;font-size:13px;color:var(--tg-theme-hint-color,#999);}
     .back{display:inline-block;margin-bottom:8px;color:#5ac8fa;cursor:pointer;}
+    /* 🎨 Studio (Fabric.js compositing) */
+    #studio-stage{display:flex;justify-content:center;background:#000;
+                  border-radius:8px;padding:8px;}
+    #studio-stage .canvas-container{touch-action:none;}
+    #studio-stage canvas{touch-action:none;border-radius:4px;}
+    #studio-panel select,#studio-panel input[type=text]{padding:6px 8px;
+        border-radius:6px;border:1px solid #555;background:#181818;color:#fff;
+        font-size:14px;}
+    #studio-panel input[type=color]{width:30px;height:30px;padding:0;border:0;
+        background:none;border-radius:6px;cursor:pointer;}
+    #studio-export-btn{margin-top:10px;width:100%;background:#284;
+        border:1px solid #284;color:#dfd;font-size:15px;padding:10px;
+        border-radius:8px;cursor:pointer;}
+    #studio-export-btn:disabled{opacity:.6;cursor:wait;}
   </style>
 </head>
 <body>
@@ -1750,6 +1850,43 @@ _EDIT_HTML = r"""<!doctype html>
   <button id="make-btn">✨ Make sticker</button>
   <div id="progress"></div>
 
+  <div class="section" id="studio-section">
+    <label>🎨 Studio <span class="meta">(compose captions over the frame — static sticker)</span></label>
+    <div class="row">
+      <button class="action" id="studio-open-btn">Open studio</button>
+      <span class="meta" id="studio-hint">Add outlined captions, drag &amp; resize, then export.</span>
+    </div>
+    <div id="studio-panel" style="display:none;margin-top:10px">
+      <div id="studio-stage">
+        <canvas id="studio-canvas" width="320" height="320"></canvas>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <input id="studio-text" type="text" maxlength="60" placeholder="Caption…"
+               style="flex:1;min-width:120px;width:auto;font-size:15px">
+        <button class="action" id="studio-add-text">➕ Text</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="meta">Fill</span><input type="color" id="studio-fill" value="#ffffff">
+        <span class="meta">Outline</span><input type="color" id="studio-stroke" value="#000000">
+        <span class="pill" id="studio-bold">𝐁 Bold</span>
+        <select id="studio-font" title="Font">
+          <option value="Impact" selected>Impact</option>
+          <option value="Arial">Arial</option>
+          <option value="Georgia">Georgia</option>
+          <option value="'Comic Sans MS',cursive">Comic</option>
+          <option value="'Courier New',monospace">Mono</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="action" id="studio-del">🗑 Delete layer</button>
+        <button class="action" id="studio-front">⬆ Front</button>
+        <button class="action" id="studio-back">⬇ Back</button>
+      </div>
+      <button id="studio-export-btn">📤 Export to sticker</button>
+      <div id="studio-progress" class="meta" style="margin-top:6px"></div>
+    </div>
+  </div>
+
 <script>
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
@@ -1783,6 +1920,7 @@ const makeBtn = document.getElementById('make-btn');
 const progressEl = document.getElementById('progress');
 
 let chosenEmoji = '🎬';
+let _previewBlobUrl = null;   // same-origin blob URL of the preview — Studio base layer
 emojiGrid.querySelector('button[data-emoji="🎬"]').classList.add('active');
 
 emojiGrid.addEventListener('click', e => {
@@ -1810,7 +1948,8 @@ emojiCustom.addEventListener('input', () => {
       return;
     }
     const blob = await r.blob();
-    vid.src = URL.createObjectURL(blob);
+    _previewBlobUrl = URL.createObjectURL(blob);
+    vid.src = _previewBlobUrl;
   } catch (e) {
     progressEl.textContent = '❌ Preview load failed: ' + e.message;
   }
@@ -2233,6 +2372,140 @@ makeBtn.addEventListener('click', async () => {
     makeBtn.disabled = false;
   }
 });
+
+// ── 🎨 Studio (Fabric.js compositing → static webp) ───────────────────────
+// The Studio is a free-form layer compositor: a base frame + draggable,
+// resizable text layers (with outline). Export rasterises the canvas to a
+// 512² PNG and POSTs it to /compose, which encodes it to a static sticker.
+const STUDIO_PX = 320;        // on-screen canvas; exported ×(512/STUDIO_PX)
+let fcanvas = null;           // fabric.Canvas (lazily built on first open)
+let _studioBold = false;
+let _studioBuilt = false;
+
+function _studioGrabBase() {
+  // Prefer a frame from the <video> (video drafts); fall back to the preview
+  // blob as an image (static-image drafts). Both are same-origin → no taint.
+  if (vid.videoWidth > 0) {
+    const c = document.createElement('canvas');
+    c.width = vid.videoWidth; c.height = vid.videoHeight;
+    try { c.getContext('2d').drawImage(vid, 0, 0); return c.toDataURL('image/png'); }
+    catch (e) { return _previewBlobUrl; }
+  }
+  return _previewBlobUrl;
+}
+
+function _studioAddBase(url) {
+  if (!url || !fcanvas) return;
+  fabric.Image.fromURL(url, img => {
+    if (!img || !img.width) return;
+    const s = Math.max(STUDIO_PX / img.width, STUDIO_PX / img.height); // cover
+    img.set({ left: STUDIO_PX / 2, top: STUDIO_PX / 2,
+              originX: 'center', originY: 'center',
+              scaleX: s, scaleY: s, selectable: true });
+    fcanvas.add(img); fcanvas.sendToBack(img); fcanvas.renderAll();
+  });
+}
+
+function openStudio() {
+  const panel = document.getElementById('studio-panel');
+  const btn = document.getElementById('studio-open-btn');
+  const opening = panel.style.display === 'none';
+  panel.style.display = opening ? '' : 'none';
+  btn.textContent = opening ? 'Close studio' : 'Open studio';
+  if (!opening || _studioBuilt) return;
+  _studioBuilt = true;
+  fcanvas = new fabric.Canvas('studio-canvas', {
+    backgroundColor: '#000', preserveObjectStacking: true,
+    width: STUDIO_PX, height: STUDIO_PX,
+  });
+  _studioAddBase(_studioGrabBase());
+}
+
+function _studioActiveText() {
+  const o = fcanvas && fcanvas.getActiveObject();
+  return o && o.type === 'i-text' ? o : null;
+}
+
+function studioAddText() {
+  if (!fcanvas) return;
+  const inp = document.getElementById('studio-text');
+  const txt = (inp.value || '').trim() || 'TEXT';
+  const t = new fabric.IText(txt, {
+    left: STUDIO_PX / 2, top: STUDIO_PX * 0.82,
+    originX: 'center', originY: 'center', textAlign: 'center',
+    fontFamily: document.getElementById('studio-font').value,
+    fontWeight: _studioBold ? 'bold' : 'normal',
+    fill: document.getElementById('studio-fill').value,
+    stroke: document.getElementById('studio-stroke').value,
+    strokeWidth: 2.4, paintFirst: 'stroke', strokeLineJoin: 'round',
+    fontSize: 40, shadow: 'rgba(0,0,0,0.5) 0 2px 4px',
+  });
+  fcanvas.add(t); fcanvas.setActiveObject(t); fcanvas.renderAll();
+  inp.value = '';
+}
+
+async function studioExport() {
+  if (!fcanvas) return;
+  const prog = document.getElementById('studio-progress');
+  const btn = document.getElementById('studio-export-btn');
+  fcanvas.discardActiveObject(); fcanvas.renderAll();
+  let png;
+  try {
+    png = fcanvas.toDataURL({ format: 'png', multiplier: 512 / STUDIO_PX });
+  } catch (e) {
+    prog.textContent = '❌ Export blocked (image security): ' + e.message;
+    return;
+  }
+  btn.disabled = true; prog.textContent = 'Encoding sticker… (5–15s)';
+  try {
+    const r = await api(`/api/sticker_drafts/${DRAFT_ID}/compose`, {
+      method: 'POST', body: JSON.stringify({ png_b64: png, emoji: chosenEmoji }),
+    });
+    prog.innerHTML = '✅ Added! <a href="#" id="studio-pack-link" style="color:#5ac8fa">Open your pack</a>';
+    const link = document.getElementById('studio-pack-link');
+    link.addEventListener('click', ev => {
+      ev.preventDefault();
+      if (tg && tg.openTelegramLink) tg.openTelegramLink(r.set_url);
+      else window.open(r.set_url, '_blank');
+    });
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+  } catch (e) {
+    prog.textContent = '❌ ' + e.message;
+  } finally { btn.disabled = false; }
+}
+
+document.getElementById('studio-open-btn').addEventListener('click', openStudio);
+document.getElementById('studio-add-text').addEventListener('click', studioAddText);
+document.getElementById('studio-text').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); studioAddText(); }
+});
+document.getElementById('studio-fill').addEventListener('input', e => {
+  const t = _studioActiveText(); if (t) { t.set('fill', e.target.value); fcanvas.renderAll(); }
+});
+document.getElementById('studio-stroke').addEventListener('input', e => {
+  const t = _studioActiveText(); if (t) { t.set('stroke', e.target.value); fcanvas.renderAll(); }
+});
+document.getElementById('studio-font').addEventListener('change', e => {
+  const t = _studioActiveText(); if (t) { t.set('fontFamily', e.target.value); fcanvas.renderAll(); }
+});
+document.getElementById('studio-bold').addEventListener('click', () => {
+  _studioBold = !_studioBold;
+  document.getElementById('studio-bold').classList.toggle('on', _studioBold);
+  const t = _studioActiveText();
+  if (t) { t.set('fontWeight', _studioBold ? 'bold' : 'normal'); fcanvas.renderAll(); }
+});
+document.getElementById('studio-del').addEventListener('click', () => {
+  if (!fcanvas) return;
+  const o = fcanvas.getActiveObject();
+  if (o) { fcanvas.remove(o); fcanvas.renderAll(); }
+});
+document.getElementById('studio-front').addEventListener('click', () => {
+  const o = fcanvas && fcanvas.getActiveObject(); if (o) { fcanvas.bringToFront(o); fcanvas.renderAll(); }
+});
+document.getElementById('studio-back').addEventListener('click', () => {
+  const o = fcanvas && fcanvas.getActiveObject(); if (o) { fcanvas.sendToBack(o); fcanvas.renderAll(); }
+});
+document.getElementById('studio-export-btn').addEventListener('click', studioExport);
 </script>
 </body></html>
 """

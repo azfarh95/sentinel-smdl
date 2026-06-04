@@ -1798,6 +1798,8 @@ _EDIT_HTML = r"""<!doctype html>
     .draw-canvas{position:absolute;inset:0;display:none;
                  touch-action:none;cursor:crosshair;}
     .draw-canvas.on{display:block;}
+    /* Preset-shape preview: shown but click-through so the crop box stays draggable. */
+    .draw-canvas.preview{display:block;pointer-events:none;cursor:default;}
     .section{margin-top:14px;}
     .section label{display:block;font-size:12px;
                     color:var(--tg-theme-hint-color,#999);margin-bottom:4px;}
@@ -2266,6 +2268,7 @@ cropModeToggle.addEventListener('click', () => {
   cropModeToggle.classList.toggle('on', cropMode);
   cropModeToggle.textContent = cropMode ? 'Pick region' : 'Center fill';
   refreshCropOverlay();
+  _refreshShapePreview();   // output square moved (box ⇄ centred-video)
 });
 aspectLockToggle.addEventListener('click', () => {
   aspectLock = !aspectLock;
@@ -2277,6 +2280,7 @@ aspectLockToggle.addEventListener('click', () => {
     drawCropBox();
   }
   refreshCropOverlay();
+  _refreshShapePreview();
 });
 
 // Drag the whole box.
@@ -2315,6 +2319,7 @@ window.addEventListener('pointermove', e => {
     cropX = nx; cropY = ny; cropW = Math.max(40, nw); cropH = Math.max(40, nh);
     clampCropToVideo(); drawCropBox();
   }
+  if (_boxDrag || _handleDrag) _refreshShapePreview();   // keep the shape outline glued to the box
 });
 window.addEventListener('pointerup', () => {
   if (_boxDrag) { _boxDrag = null; cropBox.classList.remove('dragging'); }
@@ -2413,9 +2418,17 @@ shapeRow.addEventListener('click', e => {
   // Corner-fill controls only matter for a non-square video shape.
   if (_isVideoKind) fillRow.style.display = (chosenShape !== 'square') ? '' : 'none';
   const drawing = chosenShape === 'custom';
-  drawCanvas.classList.toggle('on', drawing);
+  const preset  = !drawing && chosenShape !== 'square';   // circle/heart/star/…
+  drawCanvas.classList.toggle('on', drawing);             // freehand draw (captures input)
+  drawCanvas.classList.toggle('preview', preset);         // shape preview (click-through)
   drawClearBtn.style.display = drawing ? '' : 'none';
-  if (drawing) { resizeDrawCanvas(); redrawCustom(); } else { customPoints = []; }
+  if (drawing) { resizeDrawCanvas(); redrawCustom(); }
+  else if (preset) { redrawShapePreview(); }
+  else {           // square: no overlay
+    customPoints = [];
+    const ctx = drawCanvas.getContext('2d');
+    ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+  }
 });
 cutoutToggle.addEventListener('click', () => {
   cutout = !cutout;
@@ -2438,7 +2451,11 @@ function outputSquareRect() {
   if (cropMode && cropW && cropH) {
     const wr = wrap.getBoundingClientRect();
     const side = Math.min(cropW, cropH);
-    return { left: wr.left + cropX, top: wr.top + cropY, side };
+    // The encoder cover-scales the crop box then CENTER-crops it to a square,
+    // so the square that becomes the sticker is the CENTRE of the box (not its
+    // corner). Centre it here so the shape preview matches the real output.
+    return { left: wr.left + cropX + (cropW - side) / 2,
+             top:  wr.top  + cropY + (cropH - side) / 2, side };
   }
   const side = Math.min(vr.width, vr.height);
   return { left: vr.left + (vr.width - side) / 2, top: vr.top + (vr.height - side) / 2, side };
@@ -2464,6 +2481,67 @@ function redrawCustom() {
   ctx.strokeStyle = '#5ac8fa'; ctx.lineWidth = 2;
   ctx.fill(); ctx.stroke();
 }
+
+// Preset-shape polygons in 0..1 output-square space — MUST mirror the backend
+// _preset_points so the preview matches the encoded mask exactly.
+const SHAPE_PRESETS = {
+  triangle: [[0.5, 0], [0, 1], [1, 1]],
+  diamond:  [[0.5, 0], [1, 0.5], [0.5, 1], [0, 0.5]],
+  heart:    [[0.50, 0.95], [0.06, 0.52], [0.06, 0.30], [0.22, 0.16],
+             [0.40, 0.18], [0.50, 0.30], [0.60, 0.18], [0.78, 0.16],
+             [0.94, 0.30], [0.94, 0.52]],
+  star:     (() => {
+    const p = [], cx = 0.5, cy = 0.5, oR = 0.5, iR = 0.21;
+    for (let i = 0; i < 10; i++) {
+      const r = (i % 2 === 0) ? oR : iR;
+      const a = -Math.PI / 2 + i * Math.PI / 5;
+      p.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+    }
+    return p;
+  })(),
+};
+function _pathShape(ctx, ox, oy, s) {
+  ctx.beginPath();
+  if (chosenShape === 'circle') {
+    ctx.ellipse(ox + s / 2, oy + s / 2, s / 2, s / 2, 0, 0, Math.PI * 2);
+    return;
+  }
+  const pts = SHAPE_PRESETS[chosenShape];
+  if (!pts) return;
+  pts.forEach((p, i) => {
+    const x = ox + p[0] * s, y = oy + p[1] * s;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.closePath();
+}
+// WYSIWYG preview of a preset shape: dim outside the shape, outline it. Shows
+// the user exactly what a circle/heart/star/… will frame before they Make.
+function redrawShapePreview() {
+  const wr = wrap.getBoundingClientRect();
+  const W = Math.round(wr.width), H = Math.round(wr.height);
+  if (drawCanvas.width !== W || drawCanvas.height !== H) {
+    drawCanvas.width = W; drawCanvas.height = H;
+  }
+  const ctx = drawCanvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+  if (chosenShape === 'square' || chosenShape === 'custom') return;
+  const sq = outputSquareRect();
+  if (!sq.side) return;
+  const ox = sq.left - wr.left, oy = sq.top - wr.top, s = sq.side;
+  // dim everything, then punch the shape clear so the video shows through it
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'destination-out';
+  _pathShape(ctx, ox, oy, s); ctx.fill();
+  ctx.restore();
+  // outline the shape
+  _pathShape(ctx, ox, oy, s);
+  ctx.strokeStyle = '#5ac8fa'; ctx.lineWidth = 2; ctx.stroke();
+}
+function _refreshShapePreview() {
+  if (drawCanvas.classList.contains('preview')) redrawShapePreview();
+}
 let _drawing = false;
 function _addCustomPoint(e) {
   const sq = outputSquareRect();
@@ -2488,6 +2566,7 @@ drawCanvas.addEventListener('pointermove', e => {
 drawCanvas.addEventListener('pointerup', () => { _drawing = false; redrawCustom(); });
 window.addEventListener('resize', () => {
   if (chosenShape === 'custom') { resizeDrawCanvas(); redrawCustom(); }
+  else _refreshShapePreview();
 });
 
 makeBtn.addEventListener('click', async () => {

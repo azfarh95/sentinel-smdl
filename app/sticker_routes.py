@@ -1958,9 +1958,10 @@ _EDIT_HTML = r"""<!doctype html>
     #make-btn:disabled{opacity:.6;cursor:wait;}
     #progress{margin-top:10px;font-size:13px;color:var(--dim);}
     .back{display:inline-block;margin-bottom:8px;color:var(--accent);cursor:pointer;}
-    /* 🎨 Studio (Fabric.js compositing) */
-    #studio-stage{display:flex;justify-content:center;background:#000;
-                  border-radius:8px;padding:8px;}
+    /* 🎨 Studio (Fabric.js compositing) — canvas pinned in the dock */
+    #studio-stage{justify-content:center;background:#000;
+                  border-radius:var(--radius);padding:8px;}
+    body.studio-active #studio-stage{display:flex;}
     #studio-stage .canvas-container{touch-action:none;}
     #studio-stage canvas{touch-action:none;border-radius:4px;}
     #studio-panel select,#studio-panel input[type=text]{padding:6px 8px;
@@ -1980,11 +1981,19 @@ _EDIT_HTML = r"""<!doctype html>
     .preview-dock .video-wrap video{max-height:36vh;width:auto;max-width:100%;}
     .preview-dock #result-preview{width:128px;height:128px;}
     .tool-panel{display:none;}
-    body[data-tab="trim"]   [data-panel="trim"],
-    body[data-tab="crop"]   [data-panel="crop"],
-    body[data-tab="shape"]  [data-panel="shape"],
-    body[data-tab="emoji"]  [data-panel="emoji"],
-    body[data-tab="studio"] [data-panel="studio"]{display:block;}
+    body[data-tab="trim"]    [data-panel="trim"],
+    body[data-tab="crop"]    [data-panel="crop"],
+    body[data-tab="shape"]   [data-panel="shape"],
+    body[data-tab="emoji"]   [data-panel="emoji"],
+    body[data-tab="text"]    [data-panel="text"],
+    body[data-tab="image"]   [data-panel="image"],
+    body[data-tab="cutout"]  [data-panel="cutout"],
+    body[data-tab="outline"] [data-panel="outline"],
+    body[data-tab="layers"]  [data-panel="layers"]{display:block;}
+    /* Studio tools pin the compositor canvas in the dock (and hide the video). */
+    #studio-stage{display:none;}
+    body.studio-active .studio-row{display:none;}
+    body.studio-active #studio-stage{display:flex;}
     .toolbar{position:fixed;left:0;right:0;bottom:0;z-index:50;background:var(--bg);
       border-top:1px solid var(--border);padding:8px 12px;
       box-shadow:0 -4px 18px rgba(0,0,0,0.35);}
@@ -2029,6 +2038,9 @@ _EDIT_HTML = r"""<!doctype html>
         <canvas id="result-preview" width="256" height="256"></canvas>
         <div class="result-cap">Result preview ▶</div>
       </div>
+    </div>
+    <div id="studio-stage" data-tier="pro">
+      <canvas id="studio-canvas" width="320" height="320"></canvas>
     </div>
     <div class="meta simple-only" style="margin-top:6px">
       ✨ Pick a shape &amp; emoji below, then Make. Want trim &amp; crop? Switch to <b>⚡ Pro</b>.
@@ -2111,61 +2123,73 @@ _EDIT_HTML = r"""<!doctype html>
     </div>
   </div>
 
-  <div class="section tool-panel" data-panel="studio" id="studio-section" data-tier="pro">
-    <label>🎨 Studio <span class="meta">(compose captions over the frame — static sticker)</span></label>
+  <!-- Studio compositor — split into bottom-nav tools (canvas lives in the dock). -->
+  <div class="section tool-panel" data-panel="text" data-tier="pro" id="studio-section">
+    <label>Text &amp; emoji layers</label>
     <div class="row">
-      <button class="action" id="studio-open-btn">Open studio</button>
-      <span class="meta" id="studio-hint">Add outlined captions, drag &amp; resize, then export.</span>
+      <input id="studio-text" type="text" maxlength="60" placeholder="Caption…"
+             style="flex:1;min-width:120px;width:auto;font-size:15px">
+      <button class="action" id="studio-add-text">➕ Add text</button>
     </div>
-    <div id="studio-panel" style="display:none;margin-top:10px">
-      <div id="studio-stage">
-        <canvas id="studio-canvas" width="320" height="320"></canvas>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <input id="studio-text" type="text" maxlength="60" placeholder="Caption…"
-               style="flex:1;min-width:120px;width:auto;font-size:15px">
-        <button class="action" id="studio-add-text">➕ Text</button>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <span class="meta">Fill</span><input type="color" id="studio-fill" value="#ffffff">
-        <span class="meta">Outline</span><input type="color" id="studio-stroke" value="#000000">
-        <span class="pill" id="studio-bold">𝐁 Bold</span>
-        <select id="studio-font" title="Font">
-          <option value="Impact" selected>Impact</option>
-          <option value="Arial">Arial</option>
-          <option value="Georgia">Georgia</option>
-          <option value="'Comic Sans MS',cursive">Comic</option>
-          <option value="'Courier New',monospace">Mono</option>
-        </select>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <input id="studio-emoji" type="text" maxlength="8" placeholder="😀"
-               style="width:54px;text-align:center;font-size:18px">
-        <button class="action" id="studio-add-emoji">➕ Emoji</button>
-        <label class="action" for="studio-img" style="margin:0;cursor:pointer">🖼 Image…</label>
-        <input id="studio-img" type="file" accept="image/*" style="display:none">
-        <button class="action" id="studio-cutout">✂️ Cut out subject</button>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <span class="pill" id="studio-outline-toggle">🔲 Die-cut outline</span>
-        <input type="color" id="studio-outline-color" value="#ffffff" title="Outline colour">
-        <span class="meta">Width</span>
-        <input type="range" id="studio-outline-width" min="4" max="32" value="12"
-               style="flex:1;min-width:70px">
-        <span class="meta" id="studio-outline-w-l">12px</span>
-      </div>
-      <div class="meta" id="studio-outline-hint" style="margin-top:4px">
-        Outline hugs transparent edges — pairs with “Cut out subject”.
-      </div>
-      <div class="row" style="margin-top:8px">
-        <button class="action" id="studio-undo">↶ Undo</button>
-        <button class="action" id="studio-redo">↷ Redo</button>
-        <button class="action" id="studio-del">🗑 Delete</button>
-        <button class="action" id="studio-front">⬆ Front</button>
-        <button class="action" id="studio-back">⬇ Back</button>
-      </div>
-      <button id="studio-export-btn">📤 Export to sticker</button>
-      <div id="studio-progress" class="meta" style="margin-top:6px"></div>
+    <div class="row" style="margin-top:8px">
+      <span class="meta">Fill</span><input type="color" id="studio-fill" value="#ffffff">
+      <span class="meta">Outline</span><input type="color" id="studio-stroke" value="#000000">
+      <span class="pill" id="studio-bold">𝐁 Bold</span>
+      <select id="studio-font" title="Font">
+        <option value="Impact" selected>Impact</option>
+        <option value="Arial">Arial</option>
+        <option value="Georgia">Georgia</option>
+        <option value="'Comic Sans MS',cursive">Comic</option>
+        <option value="'Courier New',monospace">Mono</option>
+      </select>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <input id="studio-emoji" type="text" maxlength="8" placeholder="😀"
+             style="width:54px;text-align:center;font-size:18px">
+      <button class="action" id="studio-add-emoji">➕ Add emoji</button>
+    </div>
+  </div>
+
+  <div class="section tool-panel" data-panel="image" data-tier="pro">
+    <label>Image overlay</label>
+    <div class="row">
+      <label class="action" for="studio-img" style="cursor:pointer">🖼 Upload image…</label>
+      <input id="studio-img" type="file" accept="image/*" style="display:none">
+      <span class="meta">Drop a logo or photo onto the canvas.</span>
+    </div>
+  </div>
+
+  <div class="section tool-panel" data-panel="cutout" data-tier="pro">
+    <label>Cut out subject</label>
+    <div class="row">
+      <button class="action" id="studio-cutout">✂️ Remove background</button>
+      <span class="meta">Isolate the person/object from the base frame.</span>
+    </div>
+  </div>
+
+  <div class="section tool-panel" data-panel="outline" data-tier="pro">
+    <label>Die-cut outline</label>
+    <div class="row">
+      <span class="pill" id="studio-outline-toggle">🔲 Outline</span>
+      <input type="color" id="studio-outline-color" value="#ffffff" title="Outline colour">
+      <span class="meta">Width</span>
+      <input type="range" id="studio-outline-width" min="4" max="32" value="12"
+             style="flex:1;min-width:70px">
+      <span class="meta" id="studio-outline-w-l">12px</span>
+    </div>
+    <div class="meta" id="studio-outline-hint" style="margin-top:4px">
+      Outline hugs transparent edges — pairs with “Cut out subject”.
+    </div>
+  </div>
+
+  <div class="section tool-panel" data-panel="layers" data-tier="pro">
+    <label>Layers</label>
+    <div class="row">
+      <button class="action" id="studio-undo">↶ Undo</button>
+      <button class="action" id="studio-redo">↷ Redo</button>
+      <button class="action" id="studio-del">🗑 Delete</button>
+      <button class="action" id="studio-front">⬆ Front</button>
+      <button class="action" id="studio-back">⬇ Back</button>
     </div>
   </div>
 
@@ -2176,7 +2200,11 @@ _EDIT_HTML = r"""<!doctype html>
       <button data-tab="crop"  data-tier="std">⛶ Crop</button>
       <button data-tab="shape">◯ Shape</button>
       <button data-tab="emoji">😀 Emoji</button>
-      <button data-tab="studio" data-tier="pro">🎨 Studio</button>
+      <button data-tab="text"    data-tier="pro">➕ Text</button>
+      <button data-tab="image"   data-tier="pro">🖼 Image</button>
+      <button data-tab="cutout"  data-tier="pro">✂️ Cutout</button>
+      <button data-tab="outline" data-tier="pro">🔲 Outline</button>
+      <button data-tab="layers"  data-tier="pro">▤ Layers</button>
     </div>
     <button id="make-btn">✨ Make sticker</button>
   </div>
@@ -2211,6 +2239,9 @@ applySkin((() => { try { return localStorage.getItem('smdl_sticker_skin'); }
                    catch (e) { return null; } })() || 'playful');
 
 // ── Tool tabs (sticky preview · bottom tab bar) ───────────────────────────
+// The Studio compositor's tools live in the same scrollable row; selecting one
+// pins the canvas in the dock and turns the action button into Export.
+const STUDIO_TABS = ['text', 'image', 'cutout', 'outline', 'layers'];
 function _tabVisible(tab) {
   const b = document.querySelector('#tool-tabs button[data-tab="' + tab + '"]');
   return !!b && getComputedStyle(b).display !== 'none';
@@ -2220,6 +2251,11 @@ function setTab(tab) {
   document.body.dataset.tab = tab;
   document.querySelectorAll('#tool-tabs button').forEach(
     b => b.classList.toggle('on', b.dataset.tab === tab));
+  const studio = STUDIO_TABS.includes(tab);
+  document.body.classList.toggle('studio-active', studio);   // dock → canvas
+  const mk = document.getElementById('make-btn');
+  if (mk) mk.textContent = studio ? '📤 Export sticker' : '✨ Make sticker';
+  if (studio) { try { ensureStudio(); } catch (_) {} }       // build canvas once
 }
 document.getElementById('tool-tabs').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]');
@@ -2907,6 +2943,8 @@ window.addEventListener('resize', () => {
 });
 
 makeBtn.addEventListener('click', async () => {
+  // In a Studio tool the action button exports the canvas instead of /make.
+  if (document.body.classList.contains('studio-active')) { studioExport(); return; }
   makeBtn.disabled = true;
   const _transp = (_editorPackKind === 'video' && chosenShape !== 'square' && effectiveFill() === 'transparent');
   progressEl.textContent = _transp
@@ -3042,13 +3080,11 @@ function _addImage(url, opts = {}) {
   });
 }
 
-async function openStudio() {
-  const panel = document.getElementById('studio-panel');
-  const btn = document.getElementById('studio-open-btn');
-  const opening = panel.style.display === 'none';
-  panel.style.display = opening ? '' : 'none';
-  btn.textContent = opening ? 'Close studio' : 'Open studio';
-  if (!opening || _studioBuilt) return;
+// Build the Fabric compositor once, lazily — called when the first Studio
+// tool (Text/Image/Cutout/Outline/Layers) is opened. The canvas lives in the
+// preview dock; the tools are bottom-nav tabs.
+async function ensureStudio() {
+  if (_studioBuilt) return;
   _studioBuilt = true;
   fcanvas = new fabric.Canvas('studio-canvas', {
     backgroundColor: '#000', preserveObjectStacking: true,
@@ -3103,7 +3139,7 @@ function studioAddEmoji() {
 
 async function studioCutout() {
   if (!fcanvas) return;
-  const prog = document.getElementById('studio-progress');
+  const prog = document.getElementById('progress');
   const base = fcanvas.getObjects().find(o => o.studioRole === 'base')
             || fcanvas.getObjects().find(o => o.type === 'image');
   // Cut from the base's full-resolution element (same-origin data-URL → no
@@ -3140,8 +3176,8 @@ async function studioCutout() {
 
 async function studioExport() {
   if (!fcanvas) return;
-  const prog = document.getElementById('studio-progress');
-  const btn = document.getElementById('studio-export-btn');
+  const prog = document.getElementById('progress');
+  const btn = document.getElementById('make-btn');
   fcanvas.discardActiveObject(); fcanvas.renderAll();
   let png;
   try {
@@ -3174,7 +3210,6 @@ async function studioExport() {
   } finally { btn.disabled = false; }
 }
 
-document.getElementById('studio-open-btn').addEventListener('click', openStudio);
 document.getElementById('studio-add-text').addEventListener('click', studioAddText);
 document.getElementById('studio-text').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); studioAddText(); }
@@ -3232,7 +3267,6 @@ document.getElementById('studio-back').addEventListener('click', () => {
   const o = fcanvas && fcanvas.getActiveObject();
   if (o) { fcanvas.sendToBack(o); fcanvas.renderAll(); _snap(); }
 });
-document.getElementById('studio-export-btn').addEventListener('click', studioExport);
 </script>
 </body></html>
 """

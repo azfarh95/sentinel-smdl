@@ -4100,9 +4100,7 @@ button.warn { background: #ff9500; color: #fff; }
   <div class=page id=page-stickers>
     <h1>Sticker Maker</h1>
     <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
-      <button class=sec data-kind=video onclick="stickersSwitchKind('video')" style="font-size:12px">🎬 Video</button>
-      <button class=sec data-kind=static onclick="stickersSwitchKind('static')" style="font-size:12px">🖼 Static</button>
-      <button class=sec data-kind=custom_emoji onclick="stickersSwitchKind('custom_emoji')" style="font-size:12px">😀 Emoji</button>
+      <span class=meta style="font-size:12px;color:var(--muted);align-self:center">One pack — video &amp; static together. 🎬/🖼</span>
       <span style="flex:1"></span>
       <button class=sec onclick="stickersToggleLookup()" style="font-size:12px" title="View any TG pack + clone stickers into yours">🔍 Look up pack</button>
     </div>
@@ -5426,10 +5424,18 @@ function _renderPackSticker(s, idx, packType) {
   card.dataset.fileId = s.file_id;
   const tagEl = s.is_video ? 'video' : 'img';
   const media = document.createElement(tagEl);
-  media.style.cssText = 'width:100%;aspect-ratio:1;object-fit:contain;background:#000;border-radius:6px';
-  if (s.is_video) { media.setAttribute('muted',''); media.setAttribute('playsinline',''); media.setAttribute('loop',''); media.setAttribute('autoplay',''); }
-  // Stream the sticker bytes via our own proxy so the WebView can play them
-  // (Telegram file_path URLs leak the bot token, not embeddable).
+  media.style.cssText = 'width:100%;aspect-ratio:1;object-fit:contain;background:#0c0c0c;border-radius:6px';
+  if (s.is_video) {
+    media.setAttribute('muted',''); media.setAttribute('playsinline','');
+    media.setAttribute('loop',''); media.setAttribute('autoplay','');
+    // Mobile WebViews leave a <video> black until a frame is decoded+painted —
+    // which only happens on play/seek. If autoplay is throttled in a grid, nudge
+    // currentTime so at least the first frame shows instead of a black square.
+    media.addEventListener('loadeddata', () => {
+      try { if (media.paused) media.currentTime = 0.04; } catch (e) {}
+    }, { once: true });
+  }
+  // Stream the sticker bytes via our own proxy (TG file_path URLs leak the token).
   fetch('/api/sticker_pack/sticker_file/' + encodeURIComponent(s.file_id), {
     headers: { 'X-Init-Data': initData },
   }).then(r => r.ok ? r.blob() : null)
@@ -5439,16 +5445,24 @@ function _renderPackSticker(s, idx, packType) {
   const meta = document.createElement('div');
   meta.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:13px';
   meta.innerHTML = '<span style="font-size:18px">' + esc(s.emoji || '🎬') + '</span>' +
-    '<span class=meta style="font-size:11px;color:var(--muted)">#' + (idx + 1) + '</span>';
+    '<span class=meta style="font-size:11px;color:var(--muted)">#' + (idx + 1) + '</span>' +
+    '<span style="flex:1"></span>' +
+    '<span title="' + (s.is_video ? 'video' : 'static') + '" style="font-size:12px;opacity:.8">' +
+      (s.is_video ? '🎬' : '🖼') + '</span>';
   card.appendChild(meta);
+  // Declutter: per-sticker actions are hidden until you tap the card.
   const actions = document.createElement('div');
-  actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px';
+  actions.style.cssText = 'display:none;flex-wrap:wrap;gap:4px;margin-top:2px';
   actions.innerHTML =
     '<button class=sec style="font-size:11px;padding:4px 6px" title="Change emoji" onclick="stickersEditEmoji(this)">✎</button>' +
     '<button class=sec style="font-size:11px;padding:4px 6px" title="Keywords" onclick="stickersEditKeywords(this)">🔑</button>' +
     '<button class=sec style="font-size:11px;padding:4px 6px" title="Set as cover" onclick="stickersSetCover(this)">⭐</button>' +
     '<button class=sec style="font-size:11px;padding:4px 6px;color:#e88" title="Remove from pack" onclick="stickersRemoveFromPack(this)">🗑</button>';
   card.appendChild(actions);
+  card.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return;   // let the action buttons work
+    actions.style.display = actions.style.display === 'none' ? 'flex' : 'none';
+  });
   return card;
 }
 

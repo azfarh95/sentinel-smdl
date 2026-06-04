@@ -1801,6 +1801,15 @@ _EDIT_HTML = r"""<!doctype html>
                 background:#000;border-radius:8px;overflow:hidden;
                 touch-action:none;}
     .video-wrap video{display:block;width:100%;max-height:50vh;}
+    /* Editor canvas (left) + live result preview (right) */
+    .studio-row{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;}
+    .studio-row .video-wrap{flex:0 1 auto;max-height:50vh;}
+    .result-pane{flex:0 0 auto;display:flex;flex-direction:column;
+                 align-items:center;}
+    #result-preview{width:170px;height:170px;border-radius:8px;
+                    background:#0c0c0c;border:1px solid #333;}
+    .result-cap{font-size:11px;color:var(--tg-theme-hint-color,#999);
+                margin-top:4px;}
     .crop-overlay{position:absolute;inset:0;pointer-events:none;}
     .crop-overlay.on{pointer-events:auto;}
     .crop-box{position:absolute;border:2px solid #fff;
@@ -1883,17 +1892,23 @@ _EDIT_HTML = r"""<!doctype html>
   <div class="back" onclick="location.href='/app?tab=stickers'">← Back to drafts</div>
   <h1>Make sticker</h1>
 
-  <div class="video-wrap" id="video-wrap">
-    <video id="vid" muted playsinline preload="auto"></video>
-    <div class="crop-overlay" id="crop-overlay">
-      <div class="crop-box" id="crop-box">
-        <div class="crop-handle nw" data-h="nw"></div>
-        <div class="crop-handle ne" data-h="ne"></div>
-        <div class="crop-handle sw" data-h="sw"></div>
-        <div class="crop-handle se" data-h="se"></div>
+  <div class="studio-row">
+    <div class="video-wrap" id="video-wrap">
+      <video id="vid" muted playsinline preload="auto"></video>
+      <div class="crop-overlay" id="crop-overlay">
+        <div class="crop-box" id="crop-box">
+          <div class="crop-handle nw" data-h="nw"></div>
+          <div class="crop-handle ne" data-h="ne"></div>
+          <div class="crop-handle sw" data-h="sw"></div>
+          <div class="crop-handle se" data-h="se"></div>
+        </div>
       </div>
+      <canvas class="draw-canvas" id="draw-canvas"></canvas>
     </div>
-    <canvas class="draw-canvas" id="draw-canvas"></canvas>
+    <div class="result-pane">
+      <canvas id="result-preview" width="256" height="256"></canvas>
+      <div class="result-cap">Result preview ▶</div>
+    </div>
   </div>
   <div class="meta" style="margin-top:6px">
     <span id="crop-mode-hint">Center fill: the middle of the video is cropped square into the sticker.</span>
@@ -1916,7 +1931,7 @@ _EDIT_HTML = r"""<!doctype html>
     </div>
     <div class="row" style="margin-top:8px">
       <button class="action" id="smart-trim-btn">🎯 Smart trim</button>
-      <button class="action" id="preview-btn">▶ Preview window</button>
+      <button class="action" id="preview-btn">⏸ Pause</button>
       <span class="meta" id="smart-trim-status"></span>
     </div>
   </div>
@@ -2148,17 +2163,25 @@ function setTrim(s, e, opts) {
   }
 }
 
+// Gently loop the trim window (muted) so the editor AND the result preview
+// stay live — the "mini studio" feel. Muted+playsinline → autoplay allowed.
+let _autoLoop = true;
+function _startAutoLoop() {
+  if (!_autoLoop) return;
+  try { vid.currentTime = trimStart; } catch (e) {}
+  const pr = vid.play(); if (pr && pr.catch) pr.catch(() => {});
+}
+
 vid.addEventListener('loadedmetadata', () => {
   videoDur = vid.duration || 0;
   // Initial window: [0, min(3, dur)].
   setTrim(0, Math.min(MAX_TRIM_S, videoDur), { seekVideo: false });
   // Mobile WebViews leave the <video> black until the first frame is decoded
-  // AND painted — which only happens on a seek or play, hence the box stayed
-  // black until the user scrubbed. Nudge currentTime just off zero to force a
-  // first-frame paint on load. Bonus: the Studio base-grab (drawImage(vid))
-  // then captures a real frame instead of black if Studio is opened first.
+  // AND painted — which only happens on a seek or play. Nudge currentTime just
+  // off zero to force a first-frame paint, then start the loop.
   try { vid.currentTime = videoDur ? Math.min(0.04, videoDur / 2) : 0.04; }
   catch (e) {}
+  _startAutoLoop();
 });
 
 vid.addEventListener('timeupdate', () => {
@@ -2166,6 +2189,11 @@ vid.addEventListener('timeupdate', () => {
   const p = vid.currentTime / videoDur;
   tCursor.style.left = (p * 100) + '%';
   tCurL.textContent = _fmt(vid.currentTime);
+  // Loop the window — but never fight an active scrub (trim handle or crop box).
+  if (_autoLoop && !_dragHandle && !_boxDrag && !_handleDrag &&
+      (vid.currentTime >= trimEnd - 0.03 || vid.currentTime < trimStart - 0.15)) {
+    try { vid.currentTime = trimStart; } catch (e) {}
+  }
 });
 
 let _dragHandle = null;
@@ -2204,22 +2232,12 @@ timeline.addEventListener('click', e => {
   try { vid.currentTime = _xToTime(e.clientX); } catch (err) {}
 });
 
-// Preview the trimmed window — play from trimStart, pause at trimEnd.
-let _previewing = false;
+// Play / pause the looping preview.
 document.getElementById('preview-btn').addEventListener('click', () => {
-  if (_previewing) { vid.pause(); _previewing = false; return; }
-  try {
-    vid.currentTime = trimStart;
-    vid.play();
-    _previewing = true;
-    const onTU = () => {
-      if (vid.currentTime >= trimEnd - 0.05) {
-        vid.pause(); vid.removeEventListener('timeupdate', onTU);
-        _previewing = false;
-      }
-    };
-    vid.addEventListener('timeupdate', onTU);
-  } catch (e) {}
+  const btn = document.getElementById('preview-btn');
+  _autoLoop = !_autoLoop;
+  if (_autoLoop) { btn.textContent = '⏸ Pause'; _startAutoLoop(); }
+  else { btn.textContent = '▶ Play'; try { vid.pause(); } catch (e) {} }
 });
 
 // Smart trim — backend ffmpeg scene-detect picks a 3-second window.
@@ -2474,7 +2492,9 @@ fillRow.addEventListener('click', e => {
   chosenFill = pill.dataset.fill;
   fillRow.querySelectorAll('[data-fill]').forEach(p => p.classList.toggle('on', p === pill));
   fillColor.style.display = (chosenFill === 'color') ? '' : 'none';
+  _refreshShapePreview();           // WYSIWYG: margin now shows the new fill
 });
+fillColor.addEventListener('input', () => { if (chosenFill === 'color') _refreshShapePreview(); });
 padToggle.addEventListener('click', () => {
   chosenPad = !chosenPad;
   padToggle.classList.toggle('on', chosenPad);
@@ -2539,22 +2559,34 @@ const SHAPE_PRESETS = {
     return p;
   })(),
 };
-function _pathShape(ctx, ox, oy, s) {
-  ctx.beginPath();
+function _shapePath2D(ox, oy, s) {
+  const p = new Path2D();
   if (chosenShape === 'circle') {
-    ctx.ellipse(ox + s / 2, oy + s / 2, s / 2, s / 2, 0, 0, Math.PI * 2);
-    return;
+    p.ellipse(ox + s / 2, oy + s / 2, s / 2, s / 2, 0, 0, Math.PI * 2);
+    return p;
   }
   const pts = SHAPE_PRESETS[chosenShape];
-  if (!pts) return;
-  pts.forEach((p, i) => {
-    const x = ox + p[0] * s, y = oy + p[1] * s;
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  if (!pts) return p;
+  pts.forEach((pt, i) => {
+    const x = ox + pt[0] * s, y = oy + pt[1] * s;
+    if (i === 0) p.moveTo(x, y); else p.lineTo(x, y);
   });
-  ctx.closePath();
+  p.closePath();
+  return p;
 }
-// WYSIWYG preview of a preset shape: dim outside the shape, outline it. Shows
-// the user exactly what a circle/heart/star/… will frame before they Make.
+function _drawChecker(ctx, W, H) {
+  const c = 11;
+  for (let y = 0; y < H; y += c) {
+    for (let x = 0; x < W; x += c) {
+      ctx.fillStyle = (((x / c | 0) + (y / c | 0)) % 2 === 0)
+        ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.32)';
+      ctx.fillRect(x, y, c, c);
+    }
+  }
+}
+// WYSIWYG preview: the shape stays clear (sharp video shows through), and the
+// MARGIN renders the actual Corners fill — blurred video / solid colour /
+// checkerboard for transparent — so what you see is what Make produces.
 function redrawShapePreview() {
   const wr = wrap.getBoundingClientRect();
   const W = Math.round(wr.width), H = Math.round(wr.height);
@@ -2568,20 +2600,105 @@ function redrawShapePreview() {
   if (!sq.side) return;
   let ox = sq.left - wr.left, oy = sq.top - wr.top, s = sq.side;
   if (chosenPad) { const m = s * SHAPE_PAD; ox += m; oy += m; s -= 2 * m; }  // breathing margin
-  // dim everything, then punch the shape clear so the video shows through it
+  const shape = _shapePath2D(ox, oy, s);
+  // Clip to the EXTERIOR (frame minus shape) via even-odd, then paint the fill.
+  const ext = new Path2D();
+  ext.rect(0, 0, W, H);
+  ext.addPath(shape);
+  // static shapes are always transparent; video uses the Corners choice.
+  const fillMode = _isVideoKind ? chosenFill : 'transparent';
   ctx.save();
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.fillRect(0, 0, W, H);
-  ctx.globalCompositeOperation = 'destination-out';
-  _pathShape(ctx, ox, oy, s); ctx.fill();
+  ctx.clip(ext, 'evenodd');
+  if (fillMode === 'color') {
+    ctx.globalAlpha = 0.92; ctx.fillStyle = fillColor.value;
+    ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1;
+  } else if (fillMode === 'blur') {
+    try {
+      const vr = vid.getBoundingClientRect();
+      ctx.filter = 'blur(7px) brightness(0.92) saturate(0.85)';
+      ctx.drawImage(vid, vr.left - wr.left, vr.top - wr.top, vr.width, vr.height);
+      ctx.filter = 'none';
+    } catch (e) {
+      ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, W, H);
+    }
+  } else {                                  // transparent
+    _drawChecker(ctx, W, H);
+  }
   ctx.restore();
-  // outline the shape
-  _pathShape(ctx, ox, oy, s);
-  ctx.strokeStyle = '#5ac8fa'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.strokeStyle = '#5ac8fa'; ctx.lineWidth = 2; ctx.stroke(shape);
 }
 function _refreshShapePreview() {
   if (drawCanvas.classList.contains('preview')) redrawShapePreview();
 }
+
+// ── Live result preview (right pane) — exactly what the sticker will look ────
+const resultCanvas = document.getElementById('result-preview');
+const resultCtx = resultCanvas ? resultCanvas.getContext('2d') : null;
+
+// The square region of the SOURCE the encoder turns into the 512² sticker:
+// the centre square of the crop box (pick-region) or of the whole video.
+function sourceSquare() {
+  const vw = vid.videoWidth, vh = vid.videoHeight;
+  if (!vw || !vh) return null;
+  let rx = 0, ry = 0, rw = vw, rh = vh;
+  const c = cropToSourcePixels();
+  if (c) { rx = c.x; ry = c.y; rw = c.w; rh = c.h; }
+  const side = Math.min(rw, rh);
+  return { sx: rx + (rw - side) / 2, sy: ry + (rh - side) / 2, side };
+}
+
+// Shape path in result-canvas space (0..R), padding-inset to match the encoder.
+function _resultShapePath2D(R) {
+  const p = new Path2D();
+  const pad = chosenPad ? SHAPE_PAD : 0;
+  const m = pad * R, inner = R - 2 * m;
+  if (chosenShape === 'circle') {
+    p.ellipse(R / 2, R / 2, inner / 2, inner / 2, 0, 0, Math.PI * 2);
+    return p;
+  }
+  const pts = (chosenShape === 'custom')
+    ? (customPoints.length >= 3 ? customPoints : null)
+    : SHAPE_PRESETS[chosenShape];
+  if (!pts) return null;
+  pts.forEach((pt, i) => {
+    const x = m + pt[0] * inner, y = m + pt[1] * inner;
+    if (i === 0) p.moveTo(x, y); else p.lineTo(x, y);
+  });
+  p.closePath();
+  return p;
+}
+
+function renderResult() {
+  if (!resultCtx) return;
+  const R = resultCanvas.width;
+  resultCtx.clearRect(0, 0, R, R);
+  const sq = sourceSquare();
+  if (!sq) return;
+  const shaped = (chosenShape !== 'square');
+  const fillMode = shaped ? (_isVideoKind ? chosenFill : 'transparent') : 'opaque';
+  // 1) margin fill (only when shaped) — mirrors the Corners choice
+  if (shaped) {
+    if (fillMode === 'transparent') _drawChecker(resultCtx, R, R);
+    else if (fillMode === 'color') { resultCtx.fillStyle = fillColor.value; resultCtx.fillRect(0, 0, R, R); }
+    else if (fillMode === 'blur') {
+      try {
+        resultCtx.filter = 'blur(6px) brightness(0.92) saturate(0.85)';
+        resultCtx.drawImage(vid, sq.sx, sq.sy, sq.side, sq.side, 0, 0, R, R);
+        resultCtx.filter = 'none';
+      } catch (e) { resultCtx.fillStyle = '#1a1a1a'; resultCtx.fillRect(0, 0, R, R); }
+    }
+  }
+  // 2) sharp video, clipped to the shape (or the full square for 'square')
+  resultCtx.save();
+  const path = shaped ? _resultShapePath2D(R) : null;
+  if (path) resultCtx.clip(path);
+  try { resultCtx.drawImage(vid, sq.sx, sq.sy, sq.side, sq.side, 0, 0, R, R); } catch (e) {}
+  resultCtx.restore();
+}
+
+let _resultRAF = 0;
+function _resultLoop() { renderResult(); _resultRAF = requestAnimationFrame(_resultLoop); }
+if (resultCtx) _resultLoop();
 let _drawing = false;
 function _addCustomPoint(e) {
   const sq = outputSquareRect();

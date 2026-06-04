@@ -72,6 +72,39 @@ Telegram bot wrapping yt-dlp + a few hundred extractor sites.
 - `sticker_routes.py` + `sticker_processor.py` (ffmpeg encoder)
 - Background TTL cleanup of expired drafts
 
+### v2.6 · Sticker Studio + transparent video + pack model + cutout (early June 2026)
+Major expansion of v2.5 — the sticker maker went from "trim/crop/emoji" to a
+real studio with transparent video, multi-pack management, and one-tap import.
+
+- **Sticker Studio** (Fabric.js compositor on `/stickers/{id}/edit`) — text /
+  emoji / image overlay layers, in-canvas background cutout, server-side
+  **die-cut white outline**, undo/redo. Tiers 1 + 2.
+- **Shaped video stickers** — circle / heart / star / diamond / freehand on a
+  blurred or solid fill (opaque), WYSIWYG shape preview on the crop overlay.
+- **True transparent video** — `app/webm_alpha.py`, a dependency-free Matroska
+  muxer that pairs vpxenc colour + alpha VP9 IVF into one track (AlphaMode +
+  per-frame BlockAdditional). ffmpeg's libvpx can't write WebM alpha; this does.
+  `vpx-tools` baked into the image. Telegram-verified.
+- **Per-frame video cutout** — background removal that tracks a moving subject →
+  animated transparent sticker. CPU `rembg`/`u2netp` with frame-subsampling
+  (segment every 2nd frame @24fps, interpolate + feather), session pre-warmed at
+  startup. GPU/DirectML evaluated and rejected — see
+  [ADR MED-003](https://docs.az-sentinel.xyz/adrs/media/003-video-cutout-cpu-matting/).
+- **Editor UI revamp** — Simple / Standard / Pro skins that gate *complexity*
+  (not just looks): sticky preview + bottom tool tabs, Pro left-rail, Clip/Crop/
+  Shape/Emoji + Studio tools.
+- **Unified pack model** — a "pack" is just your stickers, **video + static
+  mixed** (Telegram allows it; the kind tabs were dropped). Multiple **named
+  packs** with an active one where new stickers land; front-page (Mini App
+  `/app?tab=stickers`) revamped into Stickers / Add / Pack sections + pack picker.
+- **Send-a-sticker import** — send any sticker to the bot → clone it into your
+  pack; per-user `single` / `all` preference; a deep-link button imports the
+  **whole** source set into a new pack named after it
+  (`/api/sticker_pack/import_set`, `/api/sticker_import_pref`).
+- Commits `395cc1c` (Studio T2), `2c72cfc`/`b251a7d` (alpha video), `61225bd`
+  (skins), `b70f118` (pack picker), `d37e394` (import), `cff9b05` (video cutout),
+  `fdd3580` (cutout-static fix). Branch `feat/trakt-sync`.
+
 ### v3.0 · IPTV browser (early May 2026 — late May 2026)
 - New `/iptv` Mini App page — Netflix-style channel grid
 - Initial sources: `iptv-org/iptv` global catalogue
@@ -479,3 +512,7 @@ When deciding what to build next:
                 account deletion, app/pwa_routes.py (PWA/TWA), android-twa
                 Bubblewrap manifest. Operator handoff remains (public host,
                 Play account, signing keys, Billing products). Not merged.
+- 2026-06-05 — backfilled v2.6 (Sticker Studio + transparent video + unified
+                pack model + send-a-sticker import + per-frame video cutout) on
+                `feat/trakt-sync`. Recorded ADR MED-003 (CPU matting; GPU/
+                DirectML evaluated + rejected with benchmarks). azfar + Claude.

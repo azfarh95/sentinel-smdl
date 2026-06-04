@@ -1598,6 +1598,123 @@ async def build() -> Application:
             )
         await msg.reply_text(body, reply_markup=kb)
 
+    def _import_keyboard(set_name: str) -> InlineKeyboardMarkup | None:
+        """Deep-link button that opens the Mini App's Stickers tab primed to
+        import the WHOLE source pack into a new pack (see miniapp.py ?import=)."""
+        from urllib.parse import quote
+        su = _stickers_url()
+        if not su or not set_name:
+            return None
+        url = f"{su}&import={quote(set_name, safe='')}"
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("📦 Import the whole pack",
+                                 web_app=WebAppInfo(url=url))
+        ]])
+
+    async def handle_incoming_sticker(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Send a sticker to the bot → clone it into the user's pack.
+
+        Default behaviour (pref `sticker_import_{uid}` = 'single'): clone just
+        the ONE sticker into the user's active pack, then tell them they can
+        grab the whole set and offer a deep-link button that opens the Mini App
+        primed to import the entire source pack as a NEW pack named after it.
+
+        If the pref is 'all' (set in the Mini App's Pack tab): import the whole
+        source set straight away into a fresh named pack.
+        """
+        from . import database as _stickers_db
+        from . import sticker_routes as _sr
+
+        msg = update.effective_message
+        chat = update.effective_chat
+        if not msg or not chat or chat.type != "private":
+            return
+        st = msg.sticker
+        if not st:
+            return
+        user = update.effective_user
+        if not user:
+            return
+        chat_id = chat.id
+        try:
+            await _db_users.record_interaction(
+                chat_id, username=user.username,
+                first_name=user.first_name, last_name=user.last_name,
+            )
+        except Exception:
+            pass
+        if not await _auth.is_authorized(chat_id):
+            return
+
+        # Animated .tgs can't be re-encoded as webm/webp — refuse cleanly.
+        if getattr(st, "is_animated", False) and not getattr(st, "is_video", False):
+            await msg.reply_text(
+                "That's an animated (.tgs) sticker — I can only clone static "
+                "and video stickers right now."
+            )
+            return
+
+        set_name = (st.set_name or "").strip()
+        emoji = st.emoji or ("🎬" if getattr(st, "is_video", False) else "🖼️")
+
+        # Per-user default: clone one, or import the whole source set.
+        try:
+            pref = await _stickers_db.get_setting(f"sticker_import_{user.id}")
+        except Exception:
+            pref = ""
+        mode = pref if pref in ("single", "all") else "single"
+
+        if mode == "all" and set_name:
+            note = await msg.reply_text("📦 Importing the whole pack…")
+            try:
+                r = await _sr.import_whole_set(
+                    ctx.application, user.id, user.first_name, set_name,
+                )
+            except Exception as e:
+                detail = getattr(e, "detail", None) or str(e)
+                await note.edit_text(f"⚠ Couldn't import that pack: {str(detail)[:160]}")
+                return
+            pack = r.get("pack") or {}
+            url = pack.get("telegram_url") or ""
+            extra = ""
+            if r.get("skipped"):
+                extra += f"\n• Skipped {r['skipped']} (animated)."
+            if r.get("errors"):
+                extra += f"\n• {len(r['errors'])} couldn't be copied."
+            await note.edit_text(
+                f"✨ Imported {r.get('added', 0)} of {r.get('source_total', 0)} "
+                f"stickers into a new pack:\n{url}{extra}",
+                disable_web_page_preview=True,
+            )
+            return
+
+        # mode == 'single' → clone just this one into the active pack.
+        try:
+            res = await _sr._clone_one_sticker(
+                ctx.application, user.id, user.first_name,
+                st.file_id, "regular", emoji,
+            )
+        except Exception as e:
+            detail = getattr(e, "detail", None) or str(e)
+            await msg.reply_text(f"⚠ Couldn't clone that sticker: {str(detail)[:160]}")
+            return
+
+        set_url = res.get("set_url") or ""
+        if set_name:
+            await msg.reply_text(
+                f"✨ Added that sticker to your pack:\n{set_url}\n\n"
+                "Want the rest of the set too? Import the whole pack into a new "
+                "one — it'll be named after the original.",
+                reply_markup=_import_keyboard(set_name),
+                disable_web_page_preview=True,
+            )
+        else:
+            await msg.reply_text(
+                f"✨ Added that sticker to your pack:\n{set_url}",
+                reply_markup=_sticker_keyboard(),
+                disable_web_page_preview=True,
+            )
+
     async def handle_stickers_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Open the sticker MiniApp."""
         chat_id = update.effective_chat.id
@@ -1664,6 +1781,13 @@ async def build() -> Application:
     _app.add_handler(CommandHandler("stickers",    handle_stickers_cmd))
     _app.add_handler(CommandHandler("pack",        handle_pack_cmd))
     _app.add_handler(CommandHandler("delete_data", handle_delete_data_cmd))
+    # Incoming Telegram stickers → clone into the user's pack. Registered
+    # BEFORE the media handler (a sticker never matches the media filters, but
+    # keep it first so intent is unambiguous).
+    _app.add_handler(MessageHandler(
+        filters.Sticker.ALL & filters.ChatType.PRIVATE,
+        handle_incoming_sticker,
+    ))
     _app.add_handler(MessageHandler(
         (filters.VIDEO | filters.ANIMATION | filters.VIDEO_NOTE | filters.PHOTO
          | filters.Document.VIDEO | filters.Document.IMAGE

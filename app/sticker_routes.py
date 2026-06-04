@@ -943,15 +943,10 @@ async def _clone_one_sticker(tg_app, user_id: int, first_name: str | None,
     if sniff is None:
         raise HTTPException(415, "unsupported source format (not webm/webp/png)")
     src_format, ext = sniff
-    if target_kind == "custom_emoji":
-        target_sticker_format = src_format
-    else:
-        if (target_kind == "video" and src_format != "video"
-                or target_kind == "static" and src_format != "static"):
-            raise HTTPException(400,
-                f"target_kind={target_kind} is incompatible with source "
-                f"format={src_format}")
-        target_sticker_format = src_format
+    # The unified 'regular' pack accepts BOTH video and static (Telegram allows
+    # mixed), and custom_emoji keeps its source format — so we never reject on
+    # format. Clone in the source's own format.
+    target_sticker_format = src_format
     import uuid as _uuid
     scratch_dir = DRAFTS_DIR / str(user_id)
     scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -1057,15 +1052,8 @@ async def clone_pack(body: ClonePackBody, request: Request) -> dict:
             skipped += 1
             errors.append({"index": idx, "reason": "animated stickers can't be cloned"})
             continue
-        # Compatibility precheck without re-downloading bytes.
-        src_format = "video" if getattr(s, "is_video", False) else "static"
-        if target_kind != "custom_emoji":
-            if (target_kind == "video" and src_format != "video"
-                    or target_kind == "static" and src_format != "static"):
-                skipped += 1
-                errors.append({"index": idx,
-                               "reason": f"{src_format} sticker can't clone into {target_kind} pack"})
-                continue
+        # No format precheck — a 'regular' pack mixes video + static. (Animated
+        # .tgs is filtered above; it can't be cloned as webm/webp.)
         try:
             r = await _clone_one_sticker(
                 tg_app, user_id, first_name,
@@ -1096,6 +1084,98 @@ async def clone_pack(body: ClonePackBody, request: Request) -> dict:
         "processed":     len(stickers),
         "truncated":     truncated,
     }
+
+
+async def import_whole_set(tg_app, user_id: int, first_name: str | None,
+                           source: str, limit: int = 120) -> dict:
+    """Import a whole source pack into a NEW pack of the user's, named after it.
+    Mints a fresh (active) pack from the source title, then clones every
+    compatible sticker into it. Shared by the API endpoint and the bot's
+    send-a-sticker 'import all' flow. Raises HTTPException on a bad/missing
+    source (the endpoint propagates it; the bot catches it)."""
+    pack_name = _parse_pack_name(source)
+    if not pack_name:
+        raise HTTPException(status_code=400, detail="source is required")
+    try:
+        src_set = await tg_app.bot.get_sticker_set(name=pack_name)
+    except TelegramError as e:
+        msg = str(e).lower()
+        if "not found" in msg or "stickerset_invalid" in msg:
+            raise HTTPException(status_code=404, detail=f"source pack '{pack_name}' not found")
+        raise HTTPException(status_code=502, detail=f"Telegram: {e}")
+
+    title = (getattr(src_set, "title", None) or "Imported pack").strip()[:60]
+    new_pack = await _st.create_named_pack(tg_app.bot, user_id, first_name, title, kind="regular")
+    limit = max(1, min(int(limit or 120), 120))
+    stickers = list(src_set.stickers or [])[:limit]
+    added = 0
+    skipped = 0
+    errors: list[dict] = []
+    target_url = new_pack["telegram_url"]
+    for idx, s in enumerate(stickers):
+        if getattr(s, "is_animated", False):
+            skipped += 1
+            continue
+        try:
+            r = await _clone_one_sticker(
+                tg_app, user_id, first_name, s.file_id, "regular",
+                emoji=(getattr(s, "emoji", None) or "🎬"))
+            added += 1
+            target_url = r["set_url"]
+        except HTTPException as e:
+            errors.append({"index": idx, "reason": str(e.detail)})
+            if "TOO_MUCH" in str(e.detail).upper():
+                break
+        except Exception as e:
+            errors.append({"index": idx, "reason": f"{type(e).__name__}: {e}"})
+    return {
+        "pack": {**new_pack, "telegram_url": target_url},
+        "added": added, "skipped": skipped, "errors": errors,
+        "source_total": len(src_set.stickers or []),
+        "source_title": title,
+    }
+
+
+class ImportSetBody(BaseModel):
+    source: str            # pack short-name or a t.me/addstickers/... URL
+    limit: int = 120
+
+
+@router.post("/api/sticker_pack/import_set")
+async def import_set(body: ImportSetBody, request: Request) -> dict:
+    """Import a whole source pack into a NEW pack of yours named after it.
+    Drives the 'import whole pack' button from the send-a-sticker flow."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    first_name = (payload.get("user") or {}).get("first_name")
+    tg_app = _require_bot()
+    r = await import_whole_set(tg_app, user_id, first_name, body.source, limit=body.limit)
+    return {"ok": True, **r}
+
+
+class ImportPrefBody(BaseModel):
+    mode: str              # 'single' | 'all'
+
+
+@router.get("/api/sticker_import_pref")
+async def get_import_pref(request: Request) -> dict:
+    """Per-user default for sending a sticker to the bot (single vs whole pack)."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    mode = await _db.get_setting(f"sticker_import_{user_id}")
+    return {"mode": mode if mode in ("single", "all") else "single"}
+
+
+@router.post("/api/sticker_import_pref")
+async def set_import_pref(body: ImportPrefBody, request: Request) -> dict:
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    mode = body.mode if body.mode in ("single", "all") else "single"
+    await _db.set_setting(f"sticker_import_{user_id}", mode)
+    return {"ok": True, "mode": mode}
 
 
 # ── Smart trim (ffmpeg scene-detect → "best" 3s window) ────────────────────

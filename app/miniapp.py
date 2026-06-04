@@ -4115,6 +4115,16 @@ button.warn { background: #ff9500; color: #fff; }
     </div>
 
     <div class="stk-sec active" data-section=stickers>
+      <div id=stickers-import-banner style="display:none;margin:0 2px 10px;padding:11px 13px;border:1px solid var(--accent);border-radius:10px;background:rgba(80,120,255,0.10)">
+        <div style="font-weight:600;margin-bottom:3px" id=stickers-import-title>Import a pack</div>
+        <div class=meta id=stickers-import-sub style="font-size:12px;margin-bottom:9px;color:var(--muted)"></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <button id=stickers-import-go onclick="stickersDoImport()">📦 Import whole pack</button>
+          <button class=sec onclick="stickersDismissImport()" style="font-size:12px">Dismiss</button>
+          <span style="flex:1"></span>
+          <span id=stickers-import-status class=meta style="font-size:11px;color:var(--muted)"></span>
+        </div>
+      </div>
       <h2 style="margin:2px 4px 8px;font-size:15px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:8px">
         <span>In your pack</span>
         <span id=stickers-pack-count class=meta style="font-size:11px;color:var(--muted)"></span>
@@ -4166,6 +4176,15 @@ button.warn { background: #ff9500; color: #fff; }
     <div class=stk-sec data-section=pack>
       <div class=meta style="font-size:11px;color:var(--muted);margin:0 2px 6px">Your packs — tap to switch where new stickers land.</div>
       <div id=stickers-pack-picker style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center"></div>
+      <div class=card style="margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-weight:600">Send a sticker to the bot</span>
+          <span style="flex:1"></span>
+          <span class=pill data-imp=single onclick="stickersSetImportPref('single')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">＋ Add one</span>
+          <span class=pill data-imp=all onclick="stickersSetImportPref('all')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">📦 Whole pack</span>
+        </div>
+        <div class=meta style="font-size:11px;margin-top:6px;color:var(--muted)">Sending any sticker to <b>@Sentinel_Media_bot</b> clones it to you. <b>Add one</b> drops just that sticker into your active pack (and offers a button to grab the rest). <b>Whole pack</b> clones the entire set into a brand-new pack automatically.</div>
+      </div>
       <div class=card id=stickers-pack-card>
         <div class=empty><span class=spin></span> Loading…</div>
       </div>
@@ -5289,6 +5308,77 @@ async function stickersNewPack() {
   } catch (e) { showErr('Create failed: ' + e); }
 }
 
+// ── Send-a-sticker import preference (single vs whole-pack) ──
+let _stkImportPref = 'single';
+function _paintImportPref() {
+  document.querySelectorAll('#page-stickers .pill[data-imp]').forEach(p => {
+    const on = p.dataset.imp === _stkImportPref;
+    p.style.background = on ? 'linear-gradient(180deg,var(--accent),var(--accent-2))' : '#222';
+    p.style.color = on ? 'var(--button-text)' : '#bbb';
+    p.style.borderColor = on ? 'transparent' : '#333';
+  });
+}
+async function stickersLoadImportPref() {
+  try {
+    const r = await api('/api/sticker_import_pref');
+    _stkImportPref = (r && r.mode === 'all') ? 'all' : 'single';
+  } catch (e) { _stkImportPref = 'single'; }
+  _paintImportPref();
+}
+async function stickersSetImportPref(mode) {
+  const prev = _stkImportPref;
+  _stkImportPref = (mode === 'all') ? 'all' : 'single';
+  _paintImportPref();
+  try {
+    await api('/api/sticker_import_pref', { method: 'POST', body: JSON.stringify({ mode: _stkImportPref }) });
+    showOk(_stkImportPref === 'all' ? 'Sending a sticker now imports the whole pack' : 'Sending a sticker now adds just that one');
+  } catch (e) { _stkImportPref = prev; _paintImportPref(); showErr('Save failed: ' + e); }
+}
+
+// ── Import-whole-pack banner (deep-linked from the bot via ?import=) ──
+let _stkImportSource = '';
+function stickersShowImportBanner(setName) {
+  _stkImportSource = (setName || '').trim();
+  const b = document.getElementById('stickers-import-banner');
+  if (!b || !_stkImportSource) return;
+  document.getElementById('stickers-import-title').textContent = '📦 Import “' + _stkImportSource + '”';
+  document.getElementById('stickers-import-sub').textContent =
+    'Clone the whole set into a brand-new pack named after the original. Your existing packs are untouched.';
+  document.getElementById('stickers-import-status').textContent = '';
+  const go = document.getElementById('stickers-import-go');
+  if (go) { go.disabled = false; go.textContent = '📦 Import whole pack'; }
+  b.style.display = '';
+}
+function stickersDismissImport() {
+  _stkImportSource = '';
+  const b = document.getElementById('stickers-import-banner');
+  if (b) b.style.display = 'none';
+}
+async function stickersDoImport() {
+  if (!_stkImportSource) return;
+  const go = document.getElementById('stickers-import-go');
+  const st = document.getElementById('stickers-import-status');
+  if (go) { go.disabled = true; go.textContent = 'Importing…'; }
+  if (st) st.textContent = 'Cloning stickers — this can take a moment.';
+  try {
+    const r = await api('/api/sticker_pack/import_set', { method: 'POST', body: JSON.stringify({ source: _stkImportSource }) });
+    const pack = r.pack || {};
+    let extra = '';
+    if (r.skipped) extra += ' · ' + r.skipped + ' skipped';
+    if (r.errors && r.errors.length) extra += ' · ' + r.errors.length + ' failed';
+    showOk('Imported ' + (r.added || 0) + ' of ' + (r.source_total || 0) + ' into "' + (pack.pack_title || 'new pack') + '"' + extra);
+    stickersDismissImport();
+    _stickersContentsKindShown = null;
+    await loadStickers();
+    await stickersLoadPackContents();
+    await stickersLoadPacks();
+  } catch (e) {
+    if (st) st.textContent = '';
+    if (go) { go.disabled = false; go.textContent = '📦 Import whole pack'; }
+    showErr('Import failed: ' + e);
+  }
+}
+
 async function loadStickers() {
   const packEl = document.getElementById('stickers-pack-card');
   const draftsEl = document.getElementById('stickers-drafts');
@@ -5314,6 +5404,7 @@ async function loadStickers() {
     let _sec; try { _sec = localStorage.getItem('smdl_stk_section'); } catch (e) {}
     stkSection(_sec || 'stickers');
     stickersLoadPacks();
+    stickersLoadImportPref();
   }
   let data;
   try {
@@ -8011,12 +8102,28 @@ initPreviewGestures();
 // route into the SPA without duplicating Mini App surfaces.
 const _bootTabs = new Set(['home','downloads','notifications','search','watchlist','library','stickers','streamer','files','scraper','settings','admin']);
 let _bootTab = 'home';
+let _bootImport = '';
 try {
   const qp = new URLSearchParams(window.location.search);
   const t = (qp.get('tab') || '').trim().toLowerCase();
   if (t && _bootTabs.has(t)) _bootTab = t;
+  // Deep-link from the bot's "Import the whole pack" button.
+  _bootImport = (qp.get('import') || '').trim();
+  if (_bootImport) {
+    _bootTab = 'stickers';
+    // loadStickers()'s init reads this to pick its section — pin it to
+    // 'stickers' so it doesn't restore a remembered 'pack'/'add' and hide
+    // the import banner.
+    try { localStorage.setItem('smdl_stk_section', 'stickers'); } catch (e) {}
+  }
 } catch (e) { /* old browsers: stay on home */ }
 goto(_bootTab);
+if (_bootImport) {
+  try { stkSection('stickers'); } catch (e) {}
+  // loadStickers() (fired by goto) wires the section; show the banner now —
+  // it only needs DOM, and the import call itself re-auths server-side.
+  setTimeout(function () { try { stickersShowImportBanner(_bootImport); } catch (e) {} }, 60);
+}
 // Surface the unread-activity badge on the home tile (best-effort).
 refreshNotifBadge();
 </script>

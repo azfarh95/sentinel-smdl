@@ -46,11 +46,23 @@ def _slug(s: str) -> str:
 
 # Per-kind naming + title suffix so the three packs are obviously distinct
 # both as URLs and in Telegram's UI.
+# A 'regular' pack mixes video + static (Telegram allows it). It reuses the old
+# video pack's "pack" suffix so existing video packs ARE the regular pack — no
+# data migration on Telegram's side. custom_emoji stays its own pack type.
 _KIND_SUFFIX = {
-    "video":        ("pack",  "SMDL Stickers"),
-    "static":       ("img",   "SMDL Stickers (Images)"),
+    "regular":      ("pack",  "SMDL Stickers"),
     "custom_emoji": ("emoji", "SMDL Emoji"),
 }
+
+
+def _canon_kind(kind: str | None) -> str:
+    """video + static → one 'regular' pack; custom_emoji stays separate."""
+    k = (kind or "regular").strip().lower()
+    if k in ("video", "static", "regular"):
+        return "regular"
+    if k == "custom_emoji":
+        return "custom_emoji"
+    return "regular"
 
 
 async def resolve_pack(bot: Bot, user_id: int, first_name: str | None,
@@ -59,7 +71,7 @@ async def resolve_pack(bot: Bot, user_id: int, first_name: str | None,
     name if missing. Does NOT call Telegram yet — that happens on first
     sticker. Returns {pack_name, pack_title, telegram_url, pack_kind,
     exists_in_db}."""
-    k = kind if kind in _KIND_SUFFIX else "video"
+    k = _canon_kind(kind)
     existing = await _db.sticker_pack_get(user_id, k)
     if existing:
         return {**existing, "pack_kind": k, "exists_in_db": True}

@@ -220,6 +220,18 @@ async def init_db():
             """)
             await db.execute("DROP TABLE sticker_packs")
             await db.execute("ALTER TABLE sticker_packs_v2 RENAME TO sticker_packs")
+        # 2026-06-04: Telegram allows mixed static+video in ONE 'regular' set,
+        # so the video/static split is retired — promote the video pack to the
+        # unified 'regular' pack (it reuses the same Telegram set name, so no
+        # data is lost). A static-only user's pack is promoted too; a user who
+        # had BOTH keeps the static one as an inert legacy row. Idempotent: once
+        # promoted there are no 'video' rows left to touch.
+        await db.execute("UPDATE sticker_packs SET pack_kind='regular' WHERE pack_kind='video'")
+        await db.execute("""
+            UPDATE sticker_packs SET pack_kind='regular'
+            WHERE pack_kind='static' AND user_id NOT IN
+                (SELECT user_id FROM sticker_packs WHERE pack_kind='regular')
+        """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS stickers (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1313,12 +1325,19 @@ async def sticker_drafts_purge(draft_ids: list[int]) -> None:
 # ── Sticker packs ────────────────────────────────────────────────────────────
 
 
-_VALID_PACK_KINDS = ("video", "static", "custom_emoji")
+# Telegram allows mixed static+video in one 'regular' set (per-sticker
+# InputSticker.format), so the old video/static split is gone — both map to
+# the single 'regular' pack. Only custom_emoji is a genuinely separate type.
+_VALID_PACK_KINDS = ("regular", "custom_emoji")
 
 
 def _normalise_pack_kind(kind: str | None) -> str:
-    k = (kind or "video").strip().lower()
-    return k if k in _VALID_PACK_KINDS else "video"
+    k = (kind or "regular").strip().lower()
+    if k in ("video", "static", "regular"):
+        return "regular"
+    if k == "custom_emoji":
+        return "custom_emoji"
+    return "regular"
 
 
 async def sticker_pack_get(user_id: int, kind: str = "video") -> dict | None:

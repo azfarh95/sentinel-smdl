@@ -1967,6 +1967,33 @@ _EDIT_HTML = r"""<!doctype html>
         border:1px solid var(--accent);color:var(--onacc);font-size:15px;
         padding:11px;border-radius:var(--radius-lg);cursor:pointer;font-weight:600;}
     #studio-export-btn:disabled{opacity:.6;cursor:wait;}
+    /* ── App shell: sticky preview · swappable tool panels · fixed tab bar ── */
+    body{padding-bottom:150px;}                 /* clear the fixed toolbar */
+    .preview-dock{position:sticky;top:0;z-index:40;background:var(--bg);
+      padding:2px 0 8px;}
+    .preview-dock .video-wrap{max-height:36vh;}
+    .preview-dock .video-wrap video{max-height:36vh;width:auto;max-width:100%;}
+    .preview-dock #result-preview{width:128px;height:128px;}
+    .tool-panel{display:none;}
+    body[data-tab="trim"]   [data-panel="trim"],
+    body[data-tab="crop"]   [data-panel="crop"],
+    body[data-tab="shape"]  [data-panel="shape"],
+    body[data-tab="emoji"]  [data-panel="emoji"],
+    body[data-tab="studio"] [data-panel="studio"]{display:block;}
+    .toolbar{position:fixed;left:0;right:0;bottom:0;z-index:50;background:var(--bg);
+      border-top:1px solid var(--border);padding:8px 12px;
+      box-shadow:0 -4px 18px rgba(0,0,0,0.35);}
+    .tabs{display:flex;gap:5px;overflow-x:auto;margin-bottom:8px;
+      scrollbar-width:none;}
+    .tabs::-webkit-scrollbar{display:none;}
+    .tabs button{flex:1 0 auto;min-width:56px;font-size:12px;padding:8px 8px;
+      border-radius:var(--radius);background:var(--surf2);border:1px solid var(--border);
+      color:var(--text);cursor:pointer;white-space:nowrap;
+      transition:background .12s;}
+    .tabs button.on{background:var(--accent);border-color:var(--accent);
+      color:var(--onacc);font-weight:600;}
+    .toolbar #make-btn{margin-top:0;}
+    .toolbar #progress{margin:0 0 6px;}
   </style>
 </head>
 <body>
@@ -1979,32 +2006,31 @@ _EDIT_HTML = r"""<!doctype html>
     <button data-skin="studio">⚡ Pro</button>
   </div>
 
-  <div class="studio-row">
-    <div class="video-wrap" id="video-wrap">
-      <video id="vid" muted playsinline preload="auto"></video>
-      <div class="crop-overlay" id="crop-overlay">
-        <div class="crop-box" id="crop-box">
-          <div class="crop-handle nw" data-h="nw"></div>
-          <div class="crop-handle ne" data-h="ne"></div>
-          <div class="crop-handle sw" data-h="sw"></div>
-          <div class="crop-handle se" data-h="se"></div>
+  <div class="preview-dock">
+    <div class="studio-row">
+      <div class="video-wrap" id="video-wrap">
+        <video id="vid" muted playsinline preload="auto"></video>
+        <div class="crop-overlay" id="crop-overlay">
+          <div class="crop-box" id="crop-box">
+            <div class="crop-handle nw" data-h="nw"></div>
+            <div class="crop-handle ne" data-h="ne"></div>
+            <div class="crop-handle sw" data-h="sw"></div>
+            <div class="crop-handle se" data-h="se"></div>
+          </div>
         </div>
+        <canvas class="draw-canvas" id="draw-canvas"></canvas>
       </div>
-      <canvas class="draw-canvas" id="draw-canvas"></canvas>
+      <div class="result-pane" data-tier="std">
+        <canvas id="result-preview" width="256" height="256"></canvas>
+        <div class="result-cap">Result preview ▶</div>
+      </div>
     </div>
-    <div class="result-pane" data-tier="std">
-      <canvas id="result-preview" width="256" height="256"></canvas>
-      <div class="result-cap">Result preview ▶</div>
+    <div class="meta simple-only" style="margin-top:6px">
+      ✨ Pick a shape &amp; emoji below, then Make. Want trim &amp; crop? Switch to <b>⚡ Pro</b>.
     </div>
-  </div>
-  <div class="meta" style="margin-top:6px" data-tier="std">
-    <span id="crop-mode-hint">Center fill: the middle of the video is cropped square into the sticker.</span>
-  </div>
-  <div class="meta simple-only" style="margin-top:8px">
-    ✨ The first ~3s and a centre square become your sticker. Want trim, crop &amp; shapes? Switch to <b>⚡ Pro</b>.
   </div>
 
-  <div class="section" data-tier="std">
+  <div class="section tool-panel" data-panel="trim" data-tier="std">
     <label>Trim window (≤ 3 seconds)</label>
     <div class="timeline" id="timeline">
       <div class="timeline-track">
@@ -2026,16 +2052,17 @@ _EDIT_HTML = r"""<!doctype html>
     </div>
   </div>
 
-  <div class="section" data-tier="std">
+  <div class="section tool-panel" data-panel="crop" data-tier="std">
     <label>Crop</label>
     <div class="row">
       <span class="pill" id="crop-mode-toggle">Center fill</span>
       <span class="pill on" id="aspect-lock-toggle">🔒 1 : 1</span>
       <span class="meta">Toggle "Pick region" to drag a box on the video.</span>
     </div>
+    <div class="meta" id="crop-mode-hint" style="margin-top:6px">Center fill: the middle of the video is cropped square into the sticker.</div>
   </div>
 
-  <div class="section" id="shape-section">
+  <div class="section tool-panel" data-panel="shape" id="shape-section">
     <label id="shape-label">Shape <span class="meta">(tap one — Simple keeps a clean transparent cut)</span></label>
     <div class="row" id="shape-row">
       <span class="pill on" data-shape="square">▢ Square</span>
@@ -2064,7 +2091,7 @@ _EDIT_HTML = r"""<!doctype html>
     <div class="meta adv-only" id="shape-hint" style="margin-top:6px">Square = the full (cropped) frame.</div>
   </div>
 
-  <div class="section">
+  <div class="section tool-panel" data-panel="emoji">
     <label>Emoji (tap one or paste your own)</label>
     <div class="emojirow" id="emoji-grid">
       <button data-emoji="🎬">🎬</button>
@@ -2079,10 +2106,7 @@ _EDIT_HTML = r"""<!doctype html>
     </div>
   </div>
 
-  <button id="make-btn">✨ Make sticker</button>
-  <div id="progress"></div>
-
-  <div class="section" id="studio-section" data-tier="pro">
+  <div class="section tool-panel" data-panel="studio" id="studio-section" data-tier="pro">
     <label>🎨 Studio <span class="meta">(compose captions over the frame — static sticker)</span></label>
     <div class="row">
       <button class="action" id="studio-open-btn">Open studio</button>
@@ -2140,6 +2164,18 @@ _EDIT_HTML = r"""<!doctype html>
     </div>
   </div>
 
+  <div class="toolbar">
+    <div id="progress"></div>
+    <div class="tabs" id="tool-tabs">
+      <button data-tab="trim"  data-tier="std">✂️ Trim</button>
+      <button data-tab="crop"  data-tier="std">⛶ Crop</button>
+      <button data-tab="shape">◯ Shape</button>
+      <button data-tab="emoji">😀 Emoji</button>
+      <button data-tab="studio" data-tier="pro">🎨 Studio</button>
+    </div>
+    <button id="make-btn">✨ Make sticker</button>
+  </div>
+
 <script>
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
@@ -2161,12 +2197,30 @@ document.getElementById('skin-switch').addEventListener('click', e => {
   const b = e.target.closest('button[data-skin]');
   if (!b) return;
   applySkin(b.dataset.skin);
-  // The effective corner fill can change with the mode (Simple → transparent),
-  // so refresh the on-video shape preview. (Defined later; exists by click time.)
+  // Mode change can hide the current tab (e.g. Pro→Simple hides Trim/Crop) and
+  // flips the effective corner fill → re-validate the tab + refresh the preview.
+  setTab(document.body.dataset.tab || 'shape');
   try { _refreshShapePreview(); } catch (_) {}
 });
 applySkin((() => { try { return localStorage.getItem('smdl_sticker_skin'); }
                    catch (e) { return null; } })() || 'playful');
+
+// ── Tool tabs (sticky preview · bottom tab bar) ───────────────────────────
+function _tabVisible(tab) {
+  const b = document.querySelector('#tool-tabs button[data-tab="' + tab + '"]');
+  return !!b && getComputedStyle(b).display !== 'none';
+}
+function setTab(tab) {
+  if (!_tabVisible(tab)) tab = 'shape';   // Shape is in every tier
+  document.body.dataset.tab = tab;
+  document.querySelectorAll('#tool-tabs button').forEach(
+    b => b.classList.toggle('on', b.dataset.tab === tab));
+}
+document.getElementById('tool-tabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-tab]');
+  if (b) setTab(b.dataset.tab);
+});
+setTab('shape');
 
 async function api(path, opts = {}) {
   opts.headers = Object.assign({}, opts.headers || {}, {
@@ -2554,6 +2608,9 @@ function _refreshShapeExtras() {
 // custom-emoji keeps it simple (no shapes); static & video both get shapes.
 if (_editorPackKind === 'custom_emoji') {
   shapeSection.style.display = 'none';
+  const _st = document.querySelector('#tool-tabs [data-tab="shape"]');
+  if (_st) _st.style.display = 'none';
+  if (document.body.dataset.tab === 'shape') setTab('emoji');
 } else if (_isVideoKind) {
   cutoutToggle.style.display = 'none';     // transparency-only → not for webm
   shapeLabel.innerHTML = 'Shape <span class="meta">(video — corners filled or transparent)</span>';

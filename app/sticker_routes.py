@@ -2031,7 +2031,7 @@ _EDIT_HTML = r"""<!doctype html>
   </div>
 
   <div class="section tool-panel" data-panel="trim" data-tier="std">
-    <label>Trim window (≤ 3 seconds)</label>
+    <label>Pick your 3 seconds <span class="meta">(Telegram caps video stickers at 3s)</span></label>
     <div class="timeline" id="timeline">
       <div class="timeline-track">
         <div class="timeline-range" id="timeline-range"></div>
@@ -2167,7 +2167,7 @@ _EDIT_HTML = r"""<!doctype html>
   <div class="toolbar">
     <div id="progress"></div>
     <div class="tabs" id="tool-tabs">
-      <button data-tab="trim"  data-tier="std">✂️ Trim</button>
+      <button data-tab="trim"  data-tier="std">✂️ Clip</button>
       <button data-tab="crop"  data-tier="std">⛶ Crop</button>
       <button data-tab="shape">◯ Shape</button>
       <button data-tab="emoji">😀 Emoji</button>

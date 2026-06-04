@@ -1980,8 +1980,7 @@ _EDIT_HTML = r"""<!doctype html>
     .preview-dock .video-wrap{max-height:36vh;}
     .preview-dock .video-wrap video{max-height:36vh;width:auto;max-width:100%;}
     .preview-dock #result-preview{width:128px;height:128px;}
-    /* Fixed-height tool space so switching tabs never shifts the layout. */
-    .tool-panel{display:none;min-height:30vh;box-sizing:border-box;align-content:start;}
+    .tool-panel{display:none;}
     body[data-tab="trim"]    [data-panel="trim"],
     body[data-tab="crop"]    [data-panel="crop"],
     body[data-tab="shape"]   [data-panel="shape"],
@@ -2009,12 +2008,13 @@ _EDIT_HTML = r"""<!doctype html>
       color:var(--onacc);font-weight:600;}
     .toolbar #make-btn{margin-top:0;}
     .toolbar #progress{margin:0 0 6px;}
-    /* Setup rail (Pro): video-sticker tools, vertical, left of the canvas. */
-    .dock-row{display:flex;gap:8px;align-items:flex-start;}
-    .dock-content{flex:1 1 auto;min-width:0;}
+    /* Tool area: setup rail (Pro) + the active tool's controls, fixed height. */
+    .tool-area{display:flex;gap:8px;align-items:stretch;}
+    .tool-panels{flex:1 1 auto;min-width:0;height:30vh;overflow-y:auto;
+      -webkit-overflow-scrolling:touch;}
     .setup-rail{display:none;flex-direction:column;gap:6px;flex:0 0 auto;}
     body.skin-studio .setup-rail{display:flex;}
-    .setup-rail button{width:46px;height:46px;font-size:18px;line-height:1;
+    .setup-rail button{width:44px;height:44px;font-size:18px;line-height:1;
       border-radius:var(--radius);background:var(--surf2);
       border:1px solid var(--border);color:var(--text);cursor:pointer;}
     .setup-rail button.on{background:var(--accent);border-color:var(--accent);
@@ -2037,43 +2037,41 @@ _EDIT_HTML = r"""<!doctype html>
   </div>
 
   <div class="preview-dock">
-    <div class="dock-row">
-      <!-- Setup rail (Pro only): video-sticker tools, vertical, left of the canvas -->
-      <div class="setup-rail" id="setup-rail">
-        <button data-tab="trim"  data-tier="std" title="Clip">✂️</button>
-        <button data-tab="crop"  data-tier="std" title="Crop">⛶</button>
-        <button data-tab="shape" title="Shape">◯</button>
-        <button data-tab="emoji" title="Emoji">😀</button>
-      </div>
-      <div class="dock-content">
-        <div class="studio-row">
-          <div class="video-wrap" id="video-wrap">
-            <video id="vid" muted playsinline preload="auto"></video>
-            <div class="crop-overlay" id="crop-overlay">
-              <div class="crop-box" id="crop-box">
-                <div class="crop-handle nw" data-h="nw"></div>
-                <div class="crop-handle ne" data-h="ne"></div>
-                <div class="crop-handle sw" data-h="sw"></div>
-                <div class="crop-handle se" data-h="se"></div>
-              </div>
-            </div>
-            <canvas class="draw-canvas" id="draw-canvas"></canvas>
-          </div>
-          <div class="result-pane" data-tier="std">
-            <canvas id="result-preview" width="256" height="256"></canvas>
-            <div class="result-cap">Result preview ▶</div>
+    <div class="studio-row">
+      <div class="video-wrap" id="video-wrap">
+        <video id="vid" muted playsinline preload="auto"></video>
+        <div class="crop-overlay" id="crop-overlay">
+          <div class="crop-box" id="crop-box">
+            <div class="crop-handle nw" data-h="nw"></div>
+            <div class="crop-handle ne" data-h="ne"></div>
+            <div class="crop-handle sw" data-h="sw"></div>
+            <div class="crop-handle se" data-h="se"></div>
           </div>
         </div>
-        <div id="studio-stage" data-tier="pro">
-          <canvas id="studio-canvas" width="320" height="320"></canvas>
-        </div>
+        <canvas class="draw-canvas" id="draw-canvas"></canvas>
       </div>
+      <div class="result-pane" data-tier="std">
+        <canvas id="result-preview" width="256" height="256"></canvas>
+        <div class="result-cap">Result preview ▶</div>
+      </div>
+    </div>
+    <div id="studio-stage" data-tier="pro">
+      <canvas id="studio-canvas" width="320" height="320"></canvas>
     </div>
     <div class="meta simple-only" style="margin-top:6px">
       ✨ Pick a shape &amp; emoji below, then Make. Want trim &amp; crop? Switch to <b>⚡ Pro</b>.
     </div>
   </div>
 
+  <div class="tool-area">
+    <!-- Setup rail (Pro only): video-sticker tools, icon-only, left of the controls -->
+    <div class="setup-rail" id="setup-rail">
+      <button data-tab="trim"  data-tier="std" title="Clip">✂️</button>
+      <button data-tab="crop"  data-tier="std" title="Crop">⛶</button>
+      <button data-tab="shape" title="Shape">◯</button>
+      <button data-tab="emoji" title="Emoji">😀</button>
+    </div>
+    <div class="tool-panels">
   <div class="section tool-panel" data-panel="trim" data-tier="std">
     <label>Pick your 3 seconds <span class="meta">(Telegram caps video stickers at 3s)</span></label>
     <div class="timeline" id="timeline">
@@ -2217,6 +2215,9 @@ _EDIT_HTML = r"""<!doctype html>
       <button class="action" id="studio-del">🗑 Delete</button>
       <button class="action" id="studio-front">⬆ Front</button>
       <button class="action" id="studio-back">⬇ Back</button>
+    </div>
+  </div>
+
     </div>
   </div>
 
@@ -3120,10 +3121,10 @@ function _addImage(url, opts = {}) {
 async function ensureStudio() {
   if (_studioBuilt) return;
   _studioBuilt = true;
-  // Size the square canvas to the space left of the rail (Pro), capped at 320.
-  const dc = document.querySelector('.dock-content');
-  const avail = dc ? dc.clientWidth : 320;
-  STUDIO_PX = Math.max(220, Math.min(320, Math.round(avail) - 2));
+  // Size the square canvas to the (full-width) dock, capped at 320.
+  const stage = document.getElementById('studio-stage');
+  const avail = stage ? stage.clientWidth : 320;
+  STUDIO_PX = Math.max(240, Math.min(320, Math.round(avail) - 18));
   const cv = document.getElementById('studio-canvas');
   cv.width = STUDIO_PX; cv.height = STUDIO_PX;
   fcanvas = new fabric.Canvas('studio-canvas', {

@@ -195,6 +195,24 @@ distribution **v4.0** · monetization **v9.0**.
 
 ## Planned — what's next
 
+### v2.7 · Sticker Studio depth (next focused session)
+**Status**: planned · scope agreed 2026-06-05 (anchor order **B → A → C → D**)
+**Depends on**: v2.6 (shipped)
+**Spec**: [sentinel-docs/planning/smdl-stickers-v27.md](https://docs.az-sentinel.xyz/planning/smdl-stickers-v27/)
+
+Take the sticker maker from "feature-complete editor" to "studio with depth":
+- **B · Background job queue + progress** *(foundational)* — `sticker_jobs` table +
+  asyncio worker; `/make` enqueues + returns `{job_id}`; Mini App progress poll/SSE
+  + Telegram push on done. Removes the 7–20 s blocking encode.
+- **A · Animated overlays on video** *(flagship)* — per-frame compositing so text /
+  emoji / image / outline layers ride an *animated* sticker (Studio is static-only
+  today). Reuses the cutout frame→encode pipeline. Depends on B.
+- **C · Matting & encoder tuning** — stronger matte (RMBG/BiRefNet vs u2netp),
+  temporal de-flicker, 2-pass VP9, parallel CPU matting.
+- **D · Library depth (more DB)** — `stickers` gains tags/format/dims/use_count/
+  sort_order/soft-delete; `sticker_presets`; cross-pack search; reorder / re-edit /
+  trash+restore.
+
 ### v4.1 · Recording lifecycle controls (~1 day work)
 **Status**: planned
 **Depends on**: nothing

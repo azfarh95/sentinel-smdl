@@ -2009,6 +2009,21 @@ _EDIT_HTML = r"""<!doctype html>
       color:var(--onacc);font-weight:600;}
     .toolbar #make-btn{margin-top:0;}
     .toolbar #progress{margin:0 0 6px;}
+    /* Setup rail (Pro): video-sticker tools, vertical, left of the canvas. */
+    .dock-row{display:flex;gap:8px;align-items:flex-start;}
+    .dock-content{flex:1 1 auto;min-width:0;}
+    .setup-rail{display:none;flex-direction:column;gap:6px;flex:0 0 auto;}
+    body.skin-studio .setup-rail{display:flex;}
+    .setup-rail button{width:46px;height:46px;font-size:18px;line-height:1;
+      border-radius:var(--radius);background:var(--surf2);
+      border:1px solid var(--border);color:var(--text);cursor:pointer;}
+    .setup-rail button.on{background:var(--accent);border-color:var(--accent);
+      color:var(--onacc);box-shadow:0 0 12px -3px var(--accent);}
+    /* In Pro the setup tools live on the rail → drop them from the bottom bar. */
+    body.skin-studio #tool-tabs button[data-tab="trim"],
+    body.skin-studio #tool-tabs button[data-tab="crop"],
+    body.skin-studio #tool-tabs button[data-tab="shape"],
+    body.skin-studio #tool-tabs button[data-tab="emoji"]{display:none;}
   </style>
 </head>
 <body>
@@ -2022,26 +2037,37 @@ _EDIT_HTML = r"""<!doctype html>
   </div>
 
   <div class="preview-dock">
-    <div class="studio-row">
-      <div class="video-wrap" id="video-wrap">
-        <video id="vid" muted playsinline preload="auto"></video>
-        <div class="crop-overlay" id="crop-overlay">
-          <div class="crop-box" id="crop-box">
-            <div class="crop-handle nw" data-h="nw"></div>
-            <div class="crop-handle ne" data-h="ne"></div>
-            <div class="crop-handle sw" data-h="sw"></div>
-            <div class="crop-handle se" data-h="se"></div>
+    <div class="dock-row">
+      <!-- Setup rail (Pro only): video-sticker tools, vertical, left of the canvas -->
+      <div class="setup-rail" id="setup-rail">
+        <button data-tab="trim"  data-tier="std" title="Clip">✂️</button>
+        <button data-tab="crop"  data-tier="std" title="Crop">⛶</button>
+        <button data-tab="shape" title="Shape">◯</button>
+        <button data-tab="emoji" title="Emoji">😀</button>
+      </div>
+      <div class="dock-content">
+        <div class="studio-row">
+          <div class="video-wrap" id="video-wrap">
+            <video id="vid" muted playsinline preload="auto"></video>
+            <div class="crop-overlay" id="crop-overlay">
+              <div class="crop-box" id="crop-box">
+                <div class="crop-handle nw" data-h="nw"></div>
+                <div class="crop-handle ne" data-h="ne"></div>
+                <div class="crop-handle sw" data-h="sw"></div>
+                <div class="crop-handle se" data-h="se"></div>
+              </div>
+            </div>
+            <canvas class="draw-canvas" id="draw-canvas"></canvas>
+          </div>
+          <div class="result-pane" data-tier="std">
+            <canvas id="result-preview" width="256" height="256"></canvas>
+            <div class="result-cap">Result preview ▶</div>
           </div>
         </div>
-        <canvas class="draw-canvas" id="draw-canvas"></canvas>
+        <div id="studio-stage" data-tier="pro">
+          <canvas id="studio-canvas" width="320" height="320"></canvas>
+        </div>
       </div>
-      <div class="result-pane" data-tier="std">
-        <canvas id="result-preview" width="256" height="256"></canvas>
-        <div class="result-cap">Result preview ▶</div>
-      </div>
-    </div>
-    <div id="studio-stage" data-tier="pro">
-      <canvas id="studio-canvas" width="320" height="320"></canvas>
     </div>
     <div class="meta simple-only" style="margin-top:6px">
       ✨ Pick a shape &amp; emoji below, then Make. Want trim &amp; crop? Switch to <b>⚡ Pro</b>.
@@ -2243,14 +2269,17 @@ applySkin((() => { try { return localStorage.getItem('smdl_sticker_skin'); }
 // The Studio compositor's tools live in the same scrollable row; selecting one
 // pins the canvas in the dock and turns the action button into Export.
 const STUDIO_TABS = ['text', 'image', 'cutout', 'outline', 'layers'];
+const _TAB_SEL = '#tool-tabs [data-tab], #setup-rail [data-tab]';
 function _tabVisible(tab) {
-  const b = document.querySelector('#tool-tabs button[data-tab="' + tab + '"]');
-  return !!b && getComputedStyle(b).display !== 'none';
+  // visible if ANY copy of the tab (bottom bar OR the Pro setup rail) is shown
+  return Array.from(document.querySelectorAll(
+    '#tool-tabs [data-tab="' + tab + '"], #setup-rail [data-tab="' + tab + '"]'))
+    .some(b => getComputedStyle(b).display !== 'none');
 }
 function setTab(tab) {
   if (!_tabVisible(tab)) tab = 'shape';   // Shape is in every tier
   document.body.dataset.tab = tab;
-  document.querySelectorAll('#tool-tabs button').forEach(
+  document.querySelectorAll(_TAB_SEL).forEach(
     b => b.classList.toggle('on', b.dataset.tab === tab));
   const studio = STUDIO_TABS.includes(tab);
   document.body.classList.toggle('studio-active', studio);   // dock → canvas
@@ -2259,6 +2288,10 @@ function setTab(tab) {
   if (studio) { try { ensureStudio(); } catch (_) {} }       // build canvas once
 }
 document.getElementById('tool-tabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-tab]');
+  if (b) setTab(b.dataset.tab);
+});
+document.getElementById('setup-rail').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]');
   if (b) setTab(b.dataset.tab);
 });
@@ -3006,7 +3039,7 @@ makeBtn.addEventListener('click', async () => {
 // emoji and image layers, optional background cut-out, and a server-side
 // die-cut outline. Export rasterises the canvas to a 512² PNG and POSTs it
 // to /compose, which encodes it to a static sticker.
-const STUDIO_PX = 320;        // on-screen canvas; exported ×(512/STUDIO_PX)
+let STUDIO_PX = 320;          // on-screen canvas (sized to fit at build); exported ×(512/STUDIO_PX)
 let fcanvas = null;           // fabric.Canvas (lazily built on first open)
 let _studioBold = false;
 let _studioBuilt = false;
@@ -3087,6 +3120,12 @@ function _addImage(url, opts = {}) {
 async function ensureStudio() {
   if (_studioBuilt) return;
   _studioBuilt = true;
+  // Size the square canvas to the space left of the rail (Pro), capped at 320.
+  const dc = document.querySelector('.dock-content');
+  const avail = dc ? dc.clientWidth : 320;
+  STUDIO_PX = Math.max(220, Math.min(320, Math.round(avail) - 2));
+  const cv = document.getElementById('studio-canvas');
+  cv.width = STUDIO_PX; cv.height = STUDIO_PX;
   fcanvas = new fabric.Canvas('studio-canvas', {
     backgroundColor: '#000', preserveObjectStacking: true,
     width: STUDIO_PX, height: STUDIO_PX,

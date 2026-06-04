@@ -2414,11 +2414,20 @@ function setTab(tab) {
   document.body.dataset.tab = tab;
   document.querySelectorAll(_TAB_SEL).forEach(
     b => b.classList.toggle('on', b.dataset.tab === tab));
-  const studio = STUDIO_TABS.includes(tab);
+  // Video cutout is animated (per-frame /make), NOT a static Studio composite —
+  // so the Cutout tab on a video must not flip into studio/export mode.
+  const studio = STUDIO_TABS.includes(tab)
+              && !(tab === 'cutout' && _editorPackKind === 'video');
   document.body.classList.toggle('studio-active', studio);   // dock → canvas
   const mk = document.getElementById('make-btn');
   if (mk) mk.textContent = studio ? '📤 Export sticker' : '✨ Make sticker';
   if (studio) { try { ensureStudio(); } catch (_) {} }       // build canvas once
+  // On the Cutout tab for video, mirror the cutout flag so the main Make
+  // button produces the same animated per-frame cutout as the in-panel button.
+  if (tab === 'cutout' && _editorPackKind === 'video') {
+    cutout = true;
+    if (cutoutToggle) cutoutToggle.classList.add('on');
+  }
 }
 document.getElementById('tool-tabs').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]');
@@ -2777,8 +2786,9 @@ const _editorPackKind = (() => {
 
 // ── Shape & cutout ────────────────────────────────────────────────────────
 // STATIC: shapes/cutout cut TRANSPARENT corners (webp alpha).
-// VIDEO:  shapes are kept, but webm can't carry alpha, so the corners are
-//         FILLED (blur of the video, or a colour) — no background-removal.
+// VIDEO:  shapes either FILL the corners (blur/colour) or go TRANSPARENT (real
+//         VP9 alpha); background-removal ("Remove background") now works too via
+//         a per-frame alpha cutout that keeps the sticker animated.
 const shapeSection = document.getElementById('shape-section');
 const shapeRow     = document.getElementById('shape-row');
 const cutoutToggle = document.getElementById('cutout-toggle');
@@ -2820,9 +2830,16 @@ if (_editorPackKind === 'custom_emoji') {
   if (_st) _st.style.display = 'none';
   if (document.body.dataset.tab === 'shape') setTab('emoji');
 } else if (_isVideoKind) {
-  cutoutToggle.style.display = 'none';     // transparency-only → not for webm
-  shapeLabel.innerHTML = 'Shape <span class="meta">(video — corners filled or transparent)</span>';
-  shapeHint.textContent = 'Square = the full (cropped) frame. Pick a shape to frame the video.';
+  // Video CAN be background-removed now — per-frame alpha keeps it animated.
+  cutoutToggle.textContent = '✂️ Remove background';
+  shapeLabel.innerHTML = 'Shape <span class="meta">(video — frame it, or cut out the subject)</span>';
+  shapeHint.textContent = 'Square = the full (cropped) frame. Pick a shape to frame it, or “Remove background” to cut out the moving subject (stays animated, ~10–20s).';
+  // The dedicated Studio "Cutout" tab is a static composite — for video it
+  // instead runs the animated per-frame cutout. Relabel so that's clear.
+  const _cb = document.getElementById('studio-cutout');
+  if (_cb) _cb.textContent = '✂️ Remove background (keep animated)';
+  const _cm = document.querySelector('[data-panel="cutout"] .meta');
+  if (_cm) _cm.textContent = 'Removes the background from every frame — the sticker stays animated. (~10–20s)';
 }
 _refreshShapeExtras();
 
@@ -3321,7 +3338,42 @@ function studioAddEmoji() {
   inp.value = '';
 }
 
+// Animated per-frame cutout for VIDEO: posts /make with cutout, adds the
+// transparent webm straight to the pack (no static Studio composite).
+async function videoCutoutMake() {
+  const prog = document.getElementById('progress');
+  const btn = document.getElementById('studio-cutout');
+  if (btn) btn.disabled = true;
+  prog.textContent = 'Cutting out the subject frame-by-frame… (10–20s)';
+  const body = {
+    emoji: chosenEmoji, trim_start: trimStart, trim_end: trimEnd,
+    pack_kind: 'video', cutout: true,
+  };
+  const crop = cropToSourcePixels();
+  if (crop) Object.assign(body, { crop_x: crop.x, crop_y: crop.y, crop_w: crop.w, crop_h: crop.h });
+  if (chosenShape && chosenShape !== 'square') {
+    body.shape = chosenShape;
+    if (chosenShape === 'custom' && customPoints.length >= 3) body.points = customPoints;
+  }
+  try {
+    const r = await api(`/api/sticker_drafts/${DRAFT_ID}/make`, {
+      method: 'POST', body: JSON.stringify(body),
+    });
+    prog.innerHTML = '✅ Added (animated)! <a href="#" id="vc-pack-link" style="color:#5ac8fa">Open your pack</a>';
+    const link = document.getElementById('vc-pack-link');
+    if (link) link.addEventListener('click', ev => {
+      ev.preventDefault();
+      if (tg && tg.openTelegramLink) tg.openTelegramLink(r.set_url);
+      else window.open(r.set_url, '_blank');
+    });
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+  } catch (e) { prog.textContent = '❌ ' + e.message; }
+  finally { if (btn) btn.disabled = false; }
+}
+
 async function studioCutout() {
+  // Video → animated per-frame cutout instead of the static Fabric cutout.
+  if (_editorPackKind === 'video') return videoCutoutMake();
   if (!fcanvas) return;
   const prog = document.getElementById('progress');
   const base = fcanvas.getObjects().find(o => o.studioRole === 'base')

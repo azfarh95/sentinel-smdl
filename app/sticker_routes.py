@@ -1847,6 +1847,11 @@ _EDIT_HTML = r"""<!doctype html>
     body.skin-studio h1{letter-spacing:.14em;text-transform:uppercase;
       font-size:13px;color:var(--dim);}
     body.skin-playful h1{font-size:19px;}
+    /* Top bar: Back + mode selector on one line */
+    .topbar{display:flex;align-items:center;justify-content:space-between;
+      gap:10px;flex-wrap:wrap;margin-bottom:8px;}
+    .topbar .back{margin:0;}
+    .topbar .skin-switch{margin:0;}
     /* Skin switcher (segmented control) */
     .skin-switch{display:inline-flex;gap:3px;background:var(--surf2);
       border:1px solid var(--border);border-radius:999px;padding:3px;margin:0 0 12px;}
@@ -1997,13 +2002,13 @@ _EDIT_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <div class="back" onclick="location.href='/app?tab=stickers'">← Back to drafts</div>
-  <h1>Make sticker</h1>
-
-  <div class="skin-switch" id="skin-switch">
-    <button data-skin="playful">😊 Simple</button>
-    <button data-skin="native">✈️ Standard</button>
-    <button data-skin="studio">⚡ Pro</button>
+  <div class="topbar">
+    <div class="back" onclick="location.href='/app?tab=stickers'">← Back</div>
+    <div class="skin-switch" id="skin-switch">
+      <button data-skin="playful">😊 Simple</button>
+      <button data-skin="native">✈️ Standard</button>
+      <button data-skin="studio">⚡ Pro</button>
+    </div>
   </div>
 
   <div class="preview-dock">

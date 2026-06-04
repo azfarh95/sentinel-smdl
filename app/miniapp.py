@@ -4111,7 +4111,6 @@ button.warn { background: #ff9500; color: #fff; }
     <div class=stk-nav id=stk-nav>
       <button data-sec=stickers onclick="stkSection('stickers')">🎞 Stickers</button>
       <button data-sec=add onclick="stkSection('add')">＋ Add</button>
-      <button data-sec=drafts onclick="stkSection('drafts')">✂️ Drafts</button>
       <button data-sec=pack onclick="stkSection('pack')">📦 Pack</button>
     </div>
 
@@ -4134,9 +4133,10 @@ button.warn { background: #ff9500; color: #fff; }
           <span style="flex:1"></span>
           <span class=pill data-mode=instant onclick="stickersSetMode('instant')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">⚡ Instant</span>
           <span class=pill data-mode=manual onclick="stickersSetMode('manual')" title="Open the editor: scrubber · crop · shapes · background cutout" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">✂️ Edit / crop</span>
+          <button class=sec id=stk-info-btn onclick="stickersToggleHint()" title="What do Instant / Edit &amp; crop do?" style="font-size:13px;padding:2px 8px;line-height:1">🛈</button>
           <input type=text id=stickers-default-emoji maxlength=8 value="🎬" title="Default emoji used in Instant mode" style="width:54px;padding:4px 6px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:18px;text-align:center">
         </div>
-        <div class=meta id=stickers-mode-hint style="font-size:11px;margin-bottom:8px;color:var(--muted)"></div>
+        <div class=meta id=stickers-mode-hint style="display:none;font-size:11px;margin-bottom:8px;color:var(--muted)"></div>
         <input type=file id=stickers-file accept="video/*,image/gif" multiple style="display:none">
         <input type=file id=stickers-camera accept="video/*" capture="environment" style="display:none">
         <div id=stickers-dropzone style="border:2px dashed var(--separator);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s">
@@ -4157,12 +4157,9 @@ button.warn { background: #ff9500; color: #fff; }
           <div id=stickers-upload-status class=meta style="margin-top:4px;font-size:12px"></div>
         </div>
       </div>
-    </div>
-
-    <div class=stk-sec data-section=drafts>
-      <h2 style="margin:2px 4px 8px;font-size:15px;color:var(--muted);font-weight:600">Drafts</h2>
+      <h2 style="margin:16px 4px 8px;font-size:15px;color:var(--muted);font-weight:600">Drafts</h2>
       <div id=stickers-drafts>
-        <div class=empty>Drop a video in <b>Add</b>, or send one to <b>@Sentinel_Media_bot</b>, to start a draft.</div>
+        <div class=empty>Drop a video above, or send one to <b>@Sentinel_Media_bot</b>, to start a draft.</div>
       </div>
     </div>
 
@@ -5229,7 +5226,7 @@ async function streamerSignOut() {
 
 // Sticker Maker top-nav: switch the active section (remembered per device).
 function stkSection(sec) {
-  const valid = ['stickers', 'add', 'drafts', 'pack'];
+  const valid = ['stickers', 'add', 'pack'];
   if (!valid.includes(sec)) sec = 'stickers';
   document.querySelectorAll('#page-stickers .stk-sec').forEach(s =>
     s.classList.toggle('active', s.dataset.section === sec));
@@ -5797,8 +5794,14 @@ function stickersSetMode(m) {
   if (emojiInput) emojiInput.style.display = m === 'instant' ? '' : 'none';
   const hint = document.getElementById('stickers-mode-hint');
   if (hint) hint.innerHTML = m === 'instant'
-    ? '⚡ Upload → convert with sane defaults (centre crop, first 3s) → DM\\'d to you. A single drop also leaves a draft below — tap <b>✂️ Edit &amp; crop</b> to re-crop, pick a shape, or cut out the background.'
-    : '✂️ Upload creates a draft. Tap <b>✂️ Edit &amp; crop</b> on it for the editor: scrubber, crop region, shapes (circle / triangle / star / heart / diamond / custom), and background cutout (still stickers).';
+    ? '⚡ <b>Instant</b>: auto-makes a sticker (centre crop, first 3s) and DMs it to you — also leaves a draft to refine.'
+    : '✂️ <b>Edit / crop</b>: upload makes a draft; open the editor to trim, crop, shape, or cut out the background.';
+}
+
+// ℹ️ toggle: show/hide the compact mode explanation next to the pills.
+function stickersToggleHint() {
+  const h = document.getElementById('stickers-mode-hint');
+  if (h) h.style.display = (h.style.display === 'none' || !h.style.display) ? 'block' : 'none';
 }
 
 // Persist default emoji on change.

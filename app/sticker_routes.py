@@ -1980,7 +1980,8 @@ _EDIT_HTML = r"""<!doctype html>
     .preview-dock .video-wrap{max-height:36vh;}
     .preview-dock .video-wrap video{max-height:36vh;width:auto;max-width:100%;}
     .preview-dock #result-preview{width:128px;height:128px;}
-    .tool-panel{display:none;}
+    /* Fixed-height tool space so switching tabs never shifts the layout. */
+    .tool-panel{display:none;min-height:30vh;box-sizing:border-box;align-content:start;}
     body[data-tab="trim"]    [data-panel="trim"],
     body[data-tab="crop"]    [data-panel="crop"],
     body[data-tab="shape"]   [data-panel="shape"],

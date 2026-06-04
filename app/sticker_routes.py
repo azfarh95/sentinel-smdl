@@ -460,6 +460,11 @@ class ComposeBody(BaseModel):
     # data-URL or raw base64 of the composited 512×512 PNG from the Studio canvas.
     png_b64: str
     emoji: str = "🎬"
+    # Die-cut sticker outline (applied server-side on the composited PNG's
+    # alpha silhouette). Only shows where the composition is transparent.
+    outline: bool = False
+    outline_color: str = "#ffffff"
+    outline_width: int = 12
 
 
 @router.post("/api/sticker_drafts/{draft_id}/compose")
@@ -493,6 +498,15 @@ async def compose_sticker(draft_id: int, body: ComposeBody, request: Request):
     dst = out_dir / f"{draft_id}.webp"
     try:
         comp_png.write_bytes(png_bytes)
+        # Optional die-cut outline — runs on the composited PNG before encode.
+        if body.outline:
+            loop = asyncio.get_running_loop()
+            dok, derr = await loop.run_in_executor(
+                None, lambda: _sp.apply_die_cut(
+                    comp_png, comp_png, color=body.outline_color or "#ffffff",
+                    width=int(body.outline_width or 12)))
+            if not dok:
+                logger.warning("die-cut failed for d=%s: %s", draft_id, derr)
         ok, err = await _sp.make_static_sticker(
             comp_png, dst, crop=None, seek_s=0.0, mask=None, keep_alpha=True)
     finally:
@@ -539,6 +553,52 @@ async def compose_sticker(draft_id: int, body: ComposeBody, request: Request):
         logger.warning("compose confirmation DM failed for u=%s: %s", user_id, e)
     return {"ok": True, "sticker_file_id": file_id, "set_url": set_url,
             "pack_name": pack["pack_name"]}
+
+
+class CutoutBody(BaseModel):
+    # data-URL or raw base64 of the frame the Studio wants the subject cut from.
+    png_b64: str
+
+
+@router.post("/api/sticker_drafts/{draft_id}/cutout")
+async def cutout_frame(draft_id: int, body: CutoutBody, request: Request):
+    """Studio helper: background-remove a posted frame and hand back a
+    transparent PNG (data-URL) the canvas swaps in as its base layer. Lets the
+    die-cut outline hug the subject instead of the square edge. Does NOT touch
+    the user's pack — purely an image transform."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    if not await _db.sticker_draft_get(draft_id, user_id):
+        raise HTTPException(status_code=404, detail="draft not found")
+
+    import base64
+    raw = body.png_b64.split(",", 1)[-1] if body.png_b64.startswith("data:") else body.png_b64
+    try:
+        png_bytes = base64.b64decode(raw, validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid png_b64")
+    if not png_bytes or len(png_bytes) > 8_000_000:
+        raise HTTPException(status_code=400, detail="frame missing or too large")
+
+    out_dir = OUTPUT_DIR / str(user_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    in_png = out_dir / f"{draft_id}_cutin.png"
+    cut_png = out_dir / f"{draft_id}_cutout.png"
+    try:
+        in_png.write_bytes(png_bytes)
+        ok, err = await _sp.bg_remove(in_png, cut_png)
+        if not ok:
+            raise HTTPException(status_code=422, detail=err or "cutout failed")
+        data = cut_png.read_bytes()
+    finally:
+        for f in (in_png, cut_png):
+            try:
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
+    b64 = base64.b64encode(data).decode("ascii")
+    return {"ok": True, "png_b64": f"data:image/png;base64,{b64}"}
 
 
 @router.post("/api/sticker_drafts/{draft_id}/delete")
@@ -1878,7 +1938,28 @@ _EDIT_HTML = r"""<!doctype html>
         </select>
       </div>
       <div class="row" style="margin-top:8px">
-        <button class="action" id="studio-del">🗑 Delete layer</button>
+        <input id="studio-emoji" type="text" maxlength="8" placeholder="😀"
+               style="width:54px;text-align:center;font-size:18px">
+        <button class="action" id="studio-add-emoji">➕ Emoji</button>
+        <label class="action" for="studio-img" style="margin:0;cursor:pointer">🖼 Image…</label>
+        <input id="studio-img" type="file" accept="image/*" style="display:none">
+        <button class="action" id="studio-cutout">✂️ Cut out subject</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="pill" id="studio-outline-toggle">🔲 Die-cut outline</span>
+        <input type="color" id="studio-outline-color" value="#ffffff" title="Outline colour">
+        <span class="meta">Width</span>
+        <input type="range" id="studio-outline-width" min="4" max="32" value="12"
+               style="flex:1;min-width:70px">
+        <span class="meta" id="studio-outline-w-l">12px</span>
+      </div>
+      <div class="meta" id="studio-outline-hint" style="margin-top:4px">
+        Outline hugs transparent edges — pairs with “Cut out subject”.
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="action" id="studio-undo">↶ Undo</button>
+        <button class="action" id="studio-redo">↷ Redo</button>
+        <button class="action" id="studio-del">🗑 Delete</button>
         <button class="action" id="studio-front">⬆ Front</button>
         <button class="action" id="studio-back">⬇ Back</button>
       </div>
@@ -2381,39 +2462,86 @@ makeBtn.addEventListener('click', async () => {
 });
 
 // ── 🎨 Studio (Fabric.js compositing → static webp) ───────────────────────
-// The Studio is a free-form layer compositor: a base frame + draggable,
-// resizable text layers (with outline). Export rasterises the canvas to a
-// 512² PNG and POSTs it to /compose, which encodes it to a static sticker.
+// A free-form layer compositor: a base frame + draggable/resizable text,
+// emoji and image layers, optional background cut-out, and a server-side
+// die-cut outline. Export rasterises the canvas to a 512² PNG and POSTs it
+// to /compose, which encodes it to a static sticker.
 const STUDIO_PX = 320;        // on-screen canvas; exported ×(512/STUDIO_PX)
 let fcanvas = null;           // fabric.Canvas (lazily built on first open)
 let _studioBold = false;
 let _studioBuilt = false;
+let _outline = false;         // die-cut outline toggle
 
-function _studioGrabBase() {
-  // Prefer a frame from the <video> (video drafts); fall back to the preview
-  // blob as an image (static-image drafts). Both are same-origin → no taint.
+// ── Undo / redo (JSON snapshots) ──────────────────────────────────────────
+let _hist = [], _redo = [], _restoring = false;
+function _snap() {
+  if (_restoring || !fcanvas) return;
+  try { _hist.push(JSON.stringify(fcanvas.toJSON(['studioRole']))); }
+  catch (e) { return; }
+  if (_hist.length > 40) _hist.shift();
+  _redo = [];
+}
+function _loadState(json) {
+  _restoring = true;
+  fcanvas.loadFromJSON(json, () => { fcanvas.renderAll(); _restoring = false; });
+}
+function studioUndo() {
+  if (_hist.length < 2) return;          // keep at least the base state
+  _redo.push(_hist.pop());
+  _loadState(_hist[_hist.length - 1]);
+}
+function studioRedo() {
+  if (!_redo.length) return;
+  const s = _redo.pop(); _hist.push(s); _loadState(s);
+}
+
+// Always hand Fabric a data-URL (not a blob: URL) so layers survive the
+// toJSON/loadFromJSON round-trip that undo/redo relies on.
+function _studioBaseDataUrl() {
   if (vid.videoWidth > 0) {
     const c = document.createElement('canvas');
     c.width = vid.videoWidth; c.height = vid.videoHeight;
-    try { c.getContext('2d').drawImage(vid, 0, 0); return c.toDataURL('image/png'); }
-    catch (e) { return _previewBlobUrl; }
+    try { c.getContext('2d').drawImage(vid, 0, 0); return Promise.resolve(c.toDataURL('image/png')); }
+    catch (e) {}
   }
-  return _previewBlobUrl;
-}
-
-function _studioAddBase(url) {
-  if (!url || !fcanvas) return;
-  fabric.Image.fromURL(url, img => {
-    if (!img || !img.width) return;
-    const s = Math.max(STUDIO_PX / img.width, STUDIO_PX / img.height); // cover
-    img.set({ left: STUDIO_PX / 2, top: STUDIO_PX / 2,
-              originX: 'center', originY: 'center',
-              scaleX: s, scaleY: s, selectable: true });
-    fcanvas.add(img); fcanvas.sendToBack(img); fcanvas.renderAll();
+  if (!_previewBlobUrl) return Promise.resolve(null);
+  return new Promise(res => {
+    const im = new Image();
+    im.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = im.naturalWidth; c.height = im.naturalHeight;
+      try { c.getContext('2d').drawImage(im, 0, 0); res(c.toDataURL('image/png')); }
+      catch (e) { res(null); }
+    };
+    im.onerror = () => res(null);
+    im.src = _previewBlobUrl;
   });
 }
 
-function openStudio() {
+// Add an image layer. cover=true fits it to fill the square (base frames);
+// otherwise it's dropped at ~45% size as a movable overlay.
+function _addImage(url, opts = {}) {
+  return new Promise(resolve => {
+    if (!url || !fcanvas) { resolve(null); return; }
+    fabric.Image.fromURL(url, img => {
+      if (!img || !img.width) { resolve(null); return; }
+      const s = opts.cover
+        ? Math.max(STUDIO_PX / img.width, STUDIO_PX / img.height)
+        : (STUDIO_PX * 0.45) / Math.max(img.width, img.height);
+      img.set({ left: STUDIO_PX / 2, top: STUDIO_PX / 2,
+                originX: 'center', originY: 'center',
+                scaleX: s, scaleY: s, selectable: true });
+      if (opts.role) img.studioRole = opts.role;
+      fcanvas.add(img);
+      if (opts.toBack) fcanvas.sendToBack(img);
+      if (!opts.silent) fcanvas.setActiveObject(img);
+      fcanvas.renderAll();
+      resolve(img);
+    });
+  });
+}
+
+async function openStudio() {
   const panel = document.getElementById('studio-panel');
   const btn = document.getElementById('studio-open-btn');
   const opening = panel.style.display === 'none';
@@ -2425,7 +2553,14 @@ function openStudio() {
     backgroundColor: '#000', preserveObjectStacking: true,
     width: STUDIO_PX, height: STUDIO_PX,
   });
-  _studioAddBase(_studioGrabBase());
+  fcanvas.on('object:added', _snap);
+  fcanvas.on('object:modified', _snap);
+  fcanvas.on('object:removed', _snap);
+  _restoring = true;                       // don't snapshot the initial base add
+  const url = await _studioBaseDataUrl();
+  if (url) await _addImage(url, { role: 'base', cover: true, toBack: true, silent: true });
+  _restoring = false;
+  _snap();                                 // history seed = base only
 }
 
 function _studioActiveText() {
@@ -2451,6 +2586,57 @@ function studioAddText() {
   inp.value = '';
 }
 
+function studioAddEmoji() {
+  if (!fcanvas) return;
+  const inp = document.getElementById('studio-emoji');
+  const e = (inp.value || '').trim();
+  if (!e) return;
+  // Emoji are colour glyphs — no stroke (an outline looks wrong on them).
+  const t = new fabric.IText(e, {
+    left: STUDIO_PX / 2, top: STUDIO_PX / 2,
+    originX: 'center', originY: 'center', fontSize: 96, editable: false,
+  });
+  fcanvas.add(t); fcanvas.setActiveObject(t); fcanvas.renderAll();
+  inp.value = '';
+}
+
+async function studioCutout() {
+  if (!fcanvas) return;
+  const prog = document.getElementById('studio-progress');
+  const base = fcanvas.getObjects().find(o => o.studioRole === 'base')
+            || fcanvas.getObjects().find(o => o.type === 'image');
+  // Cut from the base's full-resolution element (same-origin data-URL → no
+  // taint); fall back to a fresh frame grab if there's no base layer.
+  let srcUrl = null;
+  if (base && base.getElement) {
+    const el = base.getElement();
+    const c = document.createElement('canvas');
+    c.width = el.naturalWidth || el.width; c.height = el.naturalHeight || el.height;
+    try { c.getContext('2d').drawImage(el, 0, 0); srcUrl = c.toDataURL('image/png'); }
+    catch (e) { srcUrl = null; }
+  }
+  if (!srcUrl) srcUrl = await _studioBaseDataUrl();
+  if (!srcUrl) { prog.textContent = '❌ No base image to cut.'; return; }
+  const btn = document.getElementById('studio-cutout');
+  btn.disabled = true; prog.textContent = 'Removing background… (5–15s)';
+  try {
+    const r = await api(`/api/sticker_drafts/${DRAFT_ID}/cutout`, {
+      method: 'POST', body: JSON.stringify({ png_b64: srcUrl }),
+    });
+    _restoring = true;
+    if (base) fcanvas.remove(base);
+    await _addImage(r.png_b64, { role: 'base', cover: true, toBack: true, silent: true });
+    _restoring = false; _snap();
+    if (!_outline) {     // a cut-out is what makes the outline worth having
+      _outline = true;
+      document.getElementById('studio-outline-toggle').classList.add('on');
+    }
+    prog.textContent = '✅ Background removed — die-cut outline enabled.';
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+  } catch (e) { prog.textContent = '❌ ' + e.message; }
+  finally { btn.disabled = false; }
+}
+
 async function studioExport() {
   if (!fcanvas) return;
   const prog = document.getElementById('studio-progress');
@@ -2463,10 +2649,16 @@ async function studioExport() {
     prog.textContent = '❌ Export blocked (image security): ' + e.message;
     return;
   }
+  const body = { png_b64: png, emoji: chosenEmoji };
+  if (_outline) {
+    body.outline = true;
+    body.outline_color = document.getElementById('studio-outline-color').value;
+    body.outline_width = parseInt(document.getElementById('studio-outline-width').value, 10) || 12;
+  }
   btn.disabled = true; prog.textContent = 'Encoding sticker… (5–15s)';
   try {
     const r = await api(`/api/sticker_drafts/${DRAFT_ID}/compose`, {
-      method: 'POST', body: JSON.stringify({ png_b64: png, emoji: chosenEmoji }),
+      method: 'POST', body: JSON.stringify(body),
     });
     prog.innerHTML = '✅ Added! <a href="#" id="studio-pack-link" style="color:#5ac8fa">Open your pack</a>';
     const link = document.getElementById('studio-pack-link');
@@ -2486,31 +2678,58 @@ document.getElementById('studio-add-text').addEventListener('click', studioAddTe
 document.getElementById('studio-text').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); studioAddText(); }
 });
+document.getElementById('studio-add-emoji').addEventListener('click', studioAddEmoji);
+document.getElementById('studio-emoji').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); studioAddEmoji(); }
+});
+document.getElementById('studio-img').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  if (f && fcanvas) {
+    const rd = new FileReader();
+    rd.onload = () => _addImage(rd.result, { cover: false });
+    rd.readAsDataURL(f);
+  }
+  e.target.value = '';            // allow re-picking the same file
+});
+document.getElementById('studio-cutout').addEventListener('click', studioCutout);
 document.getElementById('studio-fill').addEventListener('input', e => {
   const t = _studioActiveText(); if (t) { t.set('fill', e.target.value); fcanvas.renderAll(); }
 });
+document.getElementById('studio-fill').addEventListener('change', _snap);
 document.getElementById('studio-stroke').addEventListener('input', e => {
   const t = _studioActiveText(); if (t) { t.set('stroke', e.target.value); fcanvas.renderAll(); }
 });
+document.getElementById('studio-stroke').addEventListener('change', _snap);
 document.getElementById('studio-font').addEventListener('change', e => {
-  const t = _studioActiveText(); if (t) { t.set('fontFamily', e.target.value); fcanvas.renderAll(); }
+  const t = _studioActiveText(); if (t) { t.set('fontFamily', e.target.value); fcanvas.renderAll(); _snap(); }
 });
 document.getElementById('studio-bold').addEventListener('click', () => {
   _studioBold = !_studioBold;
   document.getElementById('studio-bold').classList.toggle('on', _studioBold);
   const t = _studioActiveText();
-  if (t) { t.set('fontWeight', _studioBold ? 'bold' : 'normal'); fcanvas.renderAll(); }
+  if (t) { t.set('fontWeight', _studioBold ? 'bold' : 'normal'); fcanvas.renderAll(); _snap(); }
 });
+document.getElementById('studio-outline-toggle').addEventListener('click', () => {
+  _outline = !_outline;
+  document.getElementById('studio-outline-toggle').classList.toggle('on', _outline);
+});
+document.getElementById('studio-outline-width').addEventListener('input', e => {
+  document.getElementById('studio-outline-w-l').textContent = e.target.value + 'px';
+});
+document.getElementById('studio-undo').addEventListener('click', studioUndo);
+document.getElementById('studio-redo').addEventListener('click', studioRedo);
 document.getElementById('studio-del').addEventListener('click', () => {
   if (!fcanvas) return;
   const o = fcanvas.getActiveObject();
   if (o) { fcanvas.remove(o); fcanvas.renderAll(); }
 });
 document.getElementById('studio-front').addEventListener('click', () => {
-  const o = fcanvas && fcanvas.getActiveObject(); if (o) { fcanvas.bringToFront(o); fcanvas.renderAll(); }
+  const o = fcanvas && fcanvas.getActiveObject();
+  if (o) { fcanvas.bringToFront(o); fcanvas.renderAll(); _snap(); }
 });
 document.getElementById('studio-back').addEventListener('click', () => {
-  const o = fcanvas && fcanvas.getActiveObject(); if (o) { fcanvas.sendToBack(o); fcanvas.renderAll(); }
+  const o = fcanvas && fcanvas.getActiveObject();
+  if (o) { fcanvas.sendToBack(o); fcanvas.renderAll(); _snap(); }
 });
 document.getElementById('studio-export-btn').addEventListener('click', studioExport);
 </script>

@@ -352,6 +352,52 @@ async def bg_remove(src: Path, dst: Path) -> tuple[bool, str | None]:
     return (dst.exists(), None if dst.exists() else "no output produced")
 
 
+def _parse_hex_rgb(color: str) -> tuple[int, int, int]:
+    """#rgb / #rrggbb → (r,g,b). Falls back to white on anything malformed."""
+    c = (color or "").lstrip("#")
+    if len(c) == 3:
+        c = "".join(ch * 2 for ch in c)
+    try:
+        return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+    except Exception:
+        return 255, 255, 255
+
+
+def apply_die_cut(src: Path, dst: Path, *, color: str = "#ffffff",
+                  width: int = 12) -> tuple[bool, str | None]:
+    """Add the classic die-cut sticker outline to a transparent PNG.
+
+    Dilates the alpha silhouette by ~`width` px, fills that expanded region
+    with `color`, and composites the original image on top — producing a
+    solid border that hugs every opaque shape (a cut-out subject and/or text).
+    Only meaningful when `src` has transparency; on a fully-opaque frame the
+    border has nowhere to show. Runs synchronously (cheap PIL ops); call from
+    a thread if on the event loop.
+    """
+    from PIL import Image, ImageFilter
+    try:
+        im = Image.open(src).convert("RGBA")
+    except Exception as e:
+        return False, f"open failed: {e}"
+    w = max(1, min(int(width), 40))
+    alpha = im.getchannel("A")
+    # Expand the silhouette by ~w px. Blur spreads the edge, then a low
+    # threshold turns that spread solid → a clean morphological-style dilation
+    # at any radius (fast & separable, unlike a big MaxFilter kernel). A final
+    # 1px blur softens the new outer edge so it isn't aliased.
+    grown = alpha.filter(ImageFilter.GaussianBlur(w))
+    grown = grown.point(lambda p: 255 if p >= 48 else 0)
+    grown = grown.filter(ImageFilter.GaussianBlur(1))
+    border = Image.new("RGBA", im.size, _parse_hex_rgb(color) + (0,))
+    border.putalpha(grown)
+    out = Image.alpha_composite(border, im)
+    try:
+        out.save(dst, "PNG")
+    except Exception as e:
+        return False, f"save failed: {e}"
+    return True, None
+
+
 def _build_static_filter(crop: tuple[int, int, int, int] | None, size_px: int) -> str:
     """Same shape as _build_filter but without the fps cap (static frames
     don't have one) and targeting a configurable square size so we can

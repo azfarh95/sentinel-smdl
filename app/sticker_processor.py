@@ -351,7 +351,7 @@ async def make_transparent_video_sticker(
     loop = asyncio.get_running_loop()
     _VP = ["--codec=vp9", "--ivf", "--profile=0", "--auto-alt-ref=0",
            "--lag-in-frames=0", "--kf-min-dist=0", "--kf-max-dist=9999",
-           "--end-usage=vbr", "--cpu-used=4", "--threads=4"]
+           "--cpu-used=4", "--threads=4"]
     try:
         from . import webm_alpha as _wa
         # 1) colour y4m
@@ -369,16 +369,21 @@ async def make_transparent_video_sticker(
             "-f", "yuv4mpegpipe", str(alp_y4m)], 90))
         if rc != 0:
             return False, "alpha render failed: " + err.decode("utf-8", "replace")[-160:]
-        # 3) alpha is a simple mask → encode once at a low bitrate
+        # 3) alpha is a hard-edged mask — encode LOSSLESS so the silhouette stays
+        #    crisp. Lossy VP9 rings around the sharp edge, leaving a faint
+        #    non-zero alpha in the "transparent" corners → a ghost of the video
+        #    leaks through (looks like a faint square canvas). Lossless kills it,
+        #    and a flat mask compresses tiny anyway.
         rc, err = await loop.run_in_executor(None, lambda: _run(
-            ["vpxenc", *_VP, "--target-bitrate=60", "-o", str(alp_ivf), str(alp_y4m)], 90))
+            ["vpxenc", *_VP, "--lossless=1", "-o", str(alp_ivf), str(alp_y4m)], 90))
         if rc != 0:
             return False, "alpha encode failed: " + err.decode("utf-8", "replace")[-160:]
         # 4) colour bitrate ladder → mux → size check
         last_size = 0
         for cbr in ("220", "150", "100", "70"):
             rc, err = await loop.run_in_executor(None, lambda c=cbr: _run(
-                ["vpxenc", *_VP, f"--target-bitrate={c}", "-o", str(col_ivf), str(col_y4m)], 90))
+                ["vpxenc", *_VP, "--end-usage=vbr", f"--target-bitrate={c}",
+                 "-o", str(col_ivf), str(col_y4m)], 90))
             if rc != 0:
                 return False, "colour encode failed: " + err.decode("utf-8", "replace")[-160:]
             ok, merr = await loop.run_in_executor(

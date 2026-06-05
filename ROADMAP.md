@@ -189,7 +189,7 @@ real studio with transparent video, multi-pack management, and one-tap import.
   gated by the deployment `EDITION` flag, not the key. v9.1 wires them.
 
 **Current state of SMDL**: downloader **v1.6** · IPTV **v3.5** ·
-distribution **v4.0** · monetization **v9.0**.
+stickers **v2.6** · distribution **v4.0** · monetization **v9.0**.
 
 ---
 

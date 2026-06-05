@@ -105,6 +105,34 @@ real studio with transparent video, multi-pack management, and one-tap import.
   (skins), `b70f118` (pack picker), `d37e394` (import), `cff9b05` (video cutout),
   `fdd3580` (cutout-static fix). Branch `feat/trakt-sync`.
 
+### v2.7 · Sticker Studio depth — job queue · animated overlays · matting · library (2026-06-05)
+Took the sticker maker from "feature-complete editor" to a studio with depth.
+Shipped B → A → C → D, each deployed + verified in-container.
+
+- **B · Background job queue + live progress + TG push** — `app/sticker_jobs.py`
+  (a `sticker_jobs` table + semaphore-capped asyncio worker, modeled on the
+  Theater queue). Heavy video encodes (`/make`) now enqueue and return
+  `{job_id}` instead of blocking 7–20 s; the editor polls
+  `/api/sticker_jobs/{id}` for a real progress bar; a Telegram confirmation DM
+  is the "push on completion" so the user can leave the Mini App. Re-queues
+  interrupted jobs on boot. Cheap static encodes keep a synchronous fast-path.
+- **A · Animated overlays on video** — `make_video_overlay_sticker`: the Studio's
+  text/emoji/image layers now composite onto **every** frame (ffmpeg `overlay`,
+  single-frame held across the clip) → an animated sticker, with a cutout path
+  (subject matted out + overlay riding on top via the VP9-alpha pipeline). New
+  `/compose_video` enqueues it; editor badges "🎬 Export animated".
+- **C · Matting + encoder quality** — parallel keyframe matting (thread pool);
+  an opt-in "✨ Best quality" toggle (`hq`) using the heavier `isnet-general-use`
+  model (baked) + a two-pass temporal EMA de-flicker, with graceful fallback to
+  u2netp. (2-pass VP9 deferred as low-value vs the 256 KB ladder.)
+- **D · Library depth** — `stickers` gains tags / sticker_format / dims /
+  use_count / sort_order / soft-delete + a `sticker_presets` table; cross-pack
+  `/api/stickers/search`, tag, soft trash/restore, reorder, preset CRUD; a
+  "🔎 Search your library" surface in the Stickers tab. (Editor preset-apply UI
+  + reorder drag-UI/Telegram-position sync deferred.)
+- Commits `d7bf729` (B), `fa82079` (A), `b38270f` (C), `d2417a1` (D). Branch
+  `feat/trakt-sync`. Spec: [smdl-stickers-v27](https://docs.az-sentinel.xyz/planning/smdl-stickers-v27/).
+
 ### v3.0 · IPTV browser (early May 2026 — late May 2026)
 - New `/iptv` Mini App page — Netflix-style channel grid
 - Initial sources: `iptv-org/iptv` global catalogue
@@ -189,29 +217,11 @@ real studio with transparent video, multi-pack management, and one-tap import.
   gated by the deployment `EDITION` flag, not the key. v9.1 wires them.
 
 **Current state of SMDL**: downloader **v1.6** · IPTV **v3.5** ·
-stickers **v2.6** · distribution **v4.0** · monetization **v9.0**.
+stickers **v2.7** · distribution **v4.0** · monetization **v9.0**.
 
 ---
 
 ## Planned — what's next
-
-### v2.7 · Sticker Studio depth (next focused session)
-**Status**: planned · scope agreed 2026-06-05 (anchor order **B → A → C → D**)
-**Depends on**: v2.6 (shipped)
-**Spec**: [sentinel-docs/planning/smdl-stickers-v27.md](https://docs.az-sentinel.xyz/planning/smdl-stickers-v27/)
-
-Take the sticker maker from "feature-complete editor" to "studio with depth":
-- **B · Background job queue + progress** *(foundational)* — `sticker_jobs` table +
-  asyncio worker; `/make` enqueues + returns `{job_id}`; Mini App progress poll/SSE
-  + Telegram push on done. Removes the 7–20 s blocking encode.
-- **A · Animated overlays on video** *(flagship)* — per-frame compositing so text /
-  emoji / image / outline layers ride an *animated* sticker (Studio is static-only
-  today). Reuses the cutout frame→encode pipeline. Depends on B.
-- **C · Matting & encoder tuning** — stronger matte (RMBG/BiRefNet vs u2netp),
-  temporal de-flicker, 2-pass VP9, parallel CPU matting.
-- **D · Library depth (more DB)** — `stickers` gains tags/format/dims/use_count/
-  sort_order/soft-delete; `sticker_presets`; cross-pack search; reorder / re-edit /
-  trash+restore.
 
 ### v3.6 · Live TV depth — self-healing + actionable + personal + catch-up
 **Status**: planned · scope agreed 2026-06-05 (full plan, **B → A → C → D**)

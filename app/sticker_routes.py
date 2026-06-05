@@ -23,11 +23,12 @@ Static
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -37,6 +38,8 @@ from telegram.error import TelegramError
 from . import database as _db
 from . import sticker_processor as _sp
 from . import sticker_telegram as _st
+from . import sticker_jobs as _sj
+from .sticker_jobs import StickerBuildError
 from . import miniapp as _mini   # reuse _verify, _is_owner
 
 logger = logging.getLogger(__name__)
@@ -320,19 +323,116 @@ async def preview_draft(draft_id: int, request: Request):
     return FileResponse(str(p), media_type=mime, filename=p.name)
 
 
-@router.post("/api/sticker_drafts/{draft_id}/make")
-async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
-    payload = await _mini._verify(request)
-    _mini.require_scope(payload, "smdl.stickers")
-    user_id = int(payload["user"]["id"])
-    first_name = (payload.get("user") or {}).get("first_name")
+# ── Shared build/publish pipeline ────────────────────────────────────────────
+# Used by BOTH the synchronous /make fast-path (cheap static) and the
+# background job worker in sticker_jobs.py (heavy video). Keeping it here, next
+# to the request model + processor helpers it already uses, means the worker
+# only needs a lazy `import sticker_routes` to avoid an import cycle.
 
+
+def _resolve_kind_ext(body: "MakeStickerBody", d: dict) -> tuple[str, str]:
+    """Map the request + draft to (pack_kind, output extension). Different kinds
+    produce different on-disk containers so re-making the same draft as
+    video + static + emoji doesn't smash one over the other. custom_emoji rides
+    webp for single-frame image sources, webm otherwise."""
+    pack_kind = (body.pack_kind or "video").lower()
+    if pack_kind not in ("video", "static", "custom_emoji"):
+        pack_kind = "video"
+    out_ext = {"video": "webm", "static": "webp", "custom_emoji": "webm"}[pack_kind]
+    if pack_kind == "custom_emoji":
+        d_mime = (d.get("mime_type") or "").lower()
+        if d_mime.startswith("image/") and not d_mime.startswith("image/gif"):
+            out_ext = "webp"
+    return pack_kind, out_ext
+
+
+def _is_heavy_encode(pack_kind: str, out_ext: str) -> bool:
+    """Video-container encodes (cutout / transparent / plain video / animated
+    custom-emoji) are the 5–30 s jobs that go async. Single-frame webp encodes
+    stay on the synchronous fast-path."""
+    return pack_kind == "video" or (pack_kind == "custom_emoji" and out_ext == "webm")
+
+
+async def _publish_sticker(user_id: int, first_name: str | None, draft_id: int,
+                           dst: Path, *, emoji: str, pack_kind: str,
+                           sticker_format: str,
+                           progress: "Callable[[float], None] | None" = None) -> dict:
+    """Upload the freshly-encoded `dst` to the user's Telegram pack, persist the
+    pack + sticker rows, reset the draft, and push a confirmation DM. Returns
+    {sticker_file_id, set_url, pack_name}. Raises StickerBuildError on expected
+    failure (bot down, Telegram API error) so both callers can surface it."""
+    from .bot import get_application
+    tg_app = get_application()
+    if tg_app is None:
+        await _db.sticker_draft_set_status(draft_id, "failed", "bot not running")
+        raise StickerBuildError("bot not running", status=503)
+
+    pack = await _st.resolve_pack(tg_app.bot, user_id, first_name, kind=pack_kind)
+    try:
+        file_id, set_url = await _st.upload_and_add(
+            tg_app.bot, user_id, dst,
+            emoji=(emoji or "🎬"),
+            pack_name=pack["pack_name"],
+            pack_title=pack["pack_title"],
+            sticker_format=sticker_format,
+            sticker_type=("custom_emoji" if pack_kind == "custom_emoji" else "regular"),
+        )
+    except TelegramError as e:
+        msg = str(e)
+        logger.warning("Telegram sticker API failed for u=%s d=%s: %s",
+                       user_id, draft_id, msg)
+        await _db.sticker_draft_set_status(draft_id, "failed", msg)
+        # PEER_ID_INVALID = user never DM'd the bot — surface that clearly.
+        if "PEER_ID_INVALID" in msg or "user not found" in msg.lower():
+            raise StickerBuildError(
+                "Send /start to the bot first, then try again.", status=400)
+        raise StickerBuildError(f"Telegram: {msg}", status=502)
+
+    if progress:
+        progress(95)
+
+    # Persist pack + sticker rows
+    if not pack.get("exists_in_db"):
+        await _db.sticker_pack_create(
+            user_id, pack["pack_name"], pack["pack_title"], set_url, kind=pack_kind)
+    await _db.sticker_record(
+        user_id=user_id, pack_name=pack["pack_name"], source_draft_id=draft_id,
+        emoji=emoji or "🎬", telegram_file_id=file_id, webm_path=str(dst))
+    # Reset to 'awaiting_edit' so the user can keep making variants from the
+    # same draft (different emoji / trim / crop). It auto-purges on its 6h TTL.
+    await _db.sticker_draft_set_status(draft_id, "awaiting_edit")
+
+    # Confirmation sticker + link back to the user's DM. This is the "push on
+    # completion" that lets the user leave the Mini App during a long encode.
+    try:
+        await tg_app.bot.send_sticker(chat_id=user_id, sticker=file_id)
+        await tg_app.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ Added to your pack:\n{set_url}",
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.warning("confirmation DM failed for u=%s: %s", user_id, e)
+
+    return {"sticker_file_id": file_id, "set_url": set_url,
+            "pack_name": pack["pack_name"]}
+
+
+async def build_and_publish(user_id: int, first_name: str | None, draft_id: int,
+                            body: "MakeStickerBody", *,
+                            progress: "Callable[[float], None] | None" = None) -> dict:
+    """Full encode → Telegram-publish pipeline for one sticker. Shared by the
+    synchronous /make fast-path (cheap static) and the background worker
+    (heavy video). Re-fetches the draft so the worker survives a restart.
+    `progress`, if given, is called with an absolute 0..100 percent. Raises
+    StickerBuildError on expected failure (the worker records it on the job;
+    the sync route maps it to an HTTPException)."""
     d = await _db.sticker_draft_get(draft_id, user_id)
     if not d:
-        raise HTTPException(status_code=404, detail="draft not found")
+        raise StickerBuildError("draft not found", status=404)
     src = Path(d["file_path"])
     if not src.exists():
-        raise HTTPException(status_code=410, detail="source file missing on disk")
+        raise StickerBuildError("source file missing on disk", status=410)
 
     # Validate the crop box if all four were sent. The frontend always sends
     # them together; missing → no crop, encode whole frame.
@@ -343,21 +443,10 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
                 int(body.crop_w), int(body.crop_h))
 
     await _db.sticker_draft_set_status(draft_id, "processing")
-    # Different kinds produce different output containers. Keep them on
-    # different on-disk filenames so a user re-making the same draft as
-    # video + static + emoji doesn't smash one over the other.
-    pack_kind = (body.pack_kind or "video").lower()
-    if pack_kind not in ("video", "static", "custom_emoji"):
-        pack_kind = "video"
-    out_ext = {"video": "webm", "static": "webp", "custom_emoji": "webm"}[pack_kind]
-    if pack_kind == "custom_emoji":
-        # Custom emoji can be either video or static; we treat single-frame
-        # image inputs as static, everything else as video. The source mime
-        # is the cheapest signal — it was recorded at upload time.
-        d_mime = (d.get("mime_type") or "").lower()
-        if d_mime.startswith("image/") and not d_mime.startswith("image/gif"):
-            out_ext = "webp"
+    pack_kind, out_ext = _resolve_kind_ext(body, d)
     dst = OUTPUT_DIR / str(user_id) / f"{draft_id}.{out_ext}"
+    if progress:
+        progress(10)
 
     if pack_kind == "video":
         # Shaped video. Two roads for the area OUTSIDE the shape:
@@ -376,31 +465,35 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
                 if not pts:
                     await _db.sticker_draft_set_status(
                         draft_id, "failed", "custom shape needs >=3 points")
-                    raise HTTPException(status_code=422,
-                                        detail="custom shape needs at least 3 points")
+                    raise StickerBuildError(
+                        "custom shape needs at least 3 points", status=422)
             mask_png = dst.with_name(f"{draft_id}_vmask.png")
             mres = _sp.build_shape_mask(v_shape, mask_png, points=pts,
                                         pad=(_SHAPE_PAD if body.padding else 0.0))
             if mres is None:
                 await _db.sticker_draft_set_status(
                     draft_id, "failed", f"unsupported shape: {v_shape}")
-                raise HTTPException(status_code=422, detail=f"unsupported shape: {v_shape}")
+                raise StickerBuildError(f"unsupported shape: {v_shape}", status=422)
             v_mask = mask_png
             v_tmp.append(mask_png)
         v_want_cutout = bool(body.cutout)
         try:
             if v_want_cutout:
                 # Per-frame background removal → transparent animated subject
-                # (optionally intersected with the chosen shape). CPU-bound
-                # (~6-8 s); the request waits on it like the other video paths.
+                # (optionally intersected with the chosen shape). The slowest
+                # path (~6-20 s); reports fine-grained progress (10→75%).
                 ok, err = await _sp.make_video_cutout_sticker(
                     src, dst,
                     start=float(body.trim_start or 0.0),
                     end=float(body.trim_end or 3.0),
                     crop=crop,
                     shape_mask=v_mask,
+                    progress_cb=((lambda f: progress(10.0 + f * 65.0))
+                                 if progress else None),
                 )
             elif v_mask is not None and v_fill == "transparent":
+                if progress:
+                    progress(40)
                 ok, err = await _sp.make_transparent_video_sticker(
                     src, v_mask, dst,
                     start=float(body.trim_start or 0.0),
@@ -408,6 +501,8 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
                     crop=crop,
                 )
             else:
+                if progress:
+                    progress(40)
                 ok, err = await _sp.make_video_sticker(
                     src, dst,
                     start=float(body.trim_start or 0.0),
@@ -442,13 +537,13 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
                 fok, ferr = await _sp.extract_frame(src, frame_png, seek_s=static_seek)
                 if not fok:
                     await _db.sticker_draft_set_status(draft_id, "failed", ferr)
-                    raise HTTPException(status_code=422, detail=ferr or "frame extract failed")
+                    raise StickerBuildError(ferr or "frame extract failed", status=422)
                 tmp_files.append(frame_png)
                 cut_png = dst.with_name(f"{draft_id}_cut.png")
                 cok, cerr = await _sp.bg_remove(frame_png, cut_png)
                 if not cok:
                     await _db.sticker_draft_set_status(draft_id, "failed", cerr)
-                    raise HTTPException(status_code=422, detail=cerr or "background removal failed")
+                    raise StickerBuildError(cerr or "background removal failed", status=422)
                 tmp_files.append(cut_png)
                 static_src = cut_png
                 static_seek = 0.0   # cut_png already holds the chosen frame
@@ -459,15 +554,15 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
                     if not pts:
                         await _db.sticker_draft_set_status(
                             draft_id, "failed", "custom shape needs >=3 points")
-                        raise HTTPException(status_code=422,
-                                            detail="custom shape needs at least 3 points")
+                        raise StickerBuildError(
+                            "custom shape needs at least 3 points", status=422)
                 mask_png = dst.with_name(f"{draft_id}_mask.png")
                 mres = _sp.build_shape_mask(shape, mask_png, points=pts,
                                             pad=(_SHAPE_PAD if body.padding else 0.0))
                 if mres is None:
                     await _db.sticker_draft_set_status(
                         draft_id, "failed", f"unsupported shape: {shape}")
-                    raise HTTPException(status_code=422, detail=f"unsupported shape: {shape}")
+                    raise StickerBuildError(f"unsupported shape: {shape}", status=422)
                 tmp_files.append(mask_png)
                 mask_path = mask_png
             ok, err = await _sp.make_static_sticker(
@@ -491,74 +586,83 @@ async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
         sticker_format = "video" if is_video else "static"
     if not ok:
         await _db.sticker_draft_set_status(draft_id, "failed", err)
-        raise HTTPException(status_code=422,
-                             detail=err or "ffmpeg failed")
+        raise StickerBuildError(err or "ffmpeg failed", status=422)
+    if progress:
+        progress(78)
 
-    # Resolve pack
-    from .bot import get_application
-    tg_app = get_application()
-    if tg_app is None:
-        await _db.sticker_draft_set_status(draft_id, "failed", "bot not running")
-        raise HTTPException(status_code=503, detail="bot not running")
+    return await _publish_sticker(
+        user_id, first_name, draft_id, dst,
+        emoji=body.emoji, pack_kind=pack_kind,
+        sticker_format=sticker_format, progress=progress)
 
-    pack = await _st.resolve_pack(tg_app.bot, user_id, first_name, kind=pack_kind)
+
+@router.post("/api/sticker_drafts/{draft_id}/make")
+async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
+    """Heavy video encodes are enqueued on the background worker (returns
+    {ok, job_id, async}); cheap single-frame static encodes run inline on the
+    fast-path (returns {ok, sticker_file_id, set_url, pack_name}). The editor
+    polls /api/sticker_jobs/{id} for the async path."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    first_name = (payload.get("user") or {}).get("first_name")
+
+    d = await _db.sticker_draft_get(draft_id, user_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="draft not found")
+    src = Path(d["file_path"])
+    if not src.exists():
+        raise HTTPException(status_code=410, detail="source file missing on disk")
+
+    pack_kind, out_ext = _resolve_kind_ext(body, d)
+    if _is_heavy_encode(pack_kind, out_ext):
+        # Label the job for the UI / logs.
+        if pack_kind == "video" and body.cutout:
+            kind = "video_cutout"
+        elif (pack_kind == "video"
+              and (body.shape or "").strip().lower() not in _SHAPE_NONE
+              and (body.fill or "").strip().lower() == "transparent"):
+            kind = "video_transparent"
+        else:
+            kind = pack_kind
+        params = body.model_dump()
+        params["_first_name"] = first_name
+        job_id = await _sj.enqueue(user_id=user_id, draft_id=draft_id,
+                                   kind=kind, params=params)
+        return {"ok": True, "job_id": job_id, "async": True}
+
+    # Cheap static / static custom-emoji — run inline on the fast-path.
     try:
-        file_id, set_url = await _st.upload_and_add(
-            tg_app.bot, user_id, dst,
-            emoji=(body.emoji or "🎬"),
-            pack_name=pack["pack_name"],
-            pack_title=pack["pack_title"],
-            sticker_format=sticker_format,
-            sticker_type=("custom_emoji" if pack_kind == "custom_emoji" else "regular"),
-        )
-    except TelegramError as e:
-        msg = str(e)
-        logger.warning("Telegram sticker API failed for u=%s d=%s: %s",
-                       user_id, draft_id, msg)
-        await _db.sticker_draft_set_status(draft_id, "failed", msg)
-        # PEER_ID_INVALID = user never DM'd the bot — surface that clearly.
-        if "PEER_ID_INVALID" in msg or "user not found" in msg.lower():
-            raise HTTPException(
-                status_code=400,
-                detail="Send /start to the bot first, then try again.",
-            )
-        raise HTTPException(status_code=502, detail=f"Telegram: {msg}")
+        result = await build_and_publish(user_id, first_name, draft_id, body)
+    except StickerBuildError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    return {"ok": True, **result}
 
-    # Persist pack + sticker rows
-    if not pack.get("exists_in_db"):
-        await _db.sticker_pack_create(
-            user_id, pack["pack_name"], pack["pack_title"], set_url,
-            kind=pack_kind,
-        )
-    await _db.sticker_record(
-        user_id=user_id,
-        pack_name=pack["pack_name"],
-        source_draft_id=draft_id,
-        emoji=body.emoji or "🎬",
-        telegram_file_id=file_id,
-        webm_path=str(dst),
-    )
-    # Reset to 'awaiting_edit' so the user can keep making variants from the
-    # same draft (different emoji, different trim, etc.). The draft will
-    # auto-purge on its 6h TTL — no need to lock it as 'done'.
-    await _db.sticker_draft_set_status(draft_id, "awaiting_edit")
 
-    # Confirmation sticker back to the user's DM
-    try:
-        await tg_app.bot.send_sticker(chat_id=user_id, sticker=file_id)
-        await tg_app.bot.send_message(
-            chat_id=user_id,
-            text=f"✅ Added to your pack:\n{set_url}",
-            disable_web_page_preview=True,
-        )
-    except Exception as e:
-        logger.warning("confirmation DM failed for u=%s: %s", user_id, e)
-
+@router.get("/api/sticker_jobs/{job_id}")
+async def sticker_job_status(job_id: int, request: Request):
+    """Poll a background sticker-encode job. Returns status / progress (0..100)
+    / error / result. Owner-scoped: a user only sees their own jobs."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    job = await _sj.get_job(job_id)
+    if not job or job.user_id != user_id:
+        raise HTTPException(status_code=404, detail="job not found")
+    result = None
+    if job.result_json:
+        try:
+            result = json.loads(job.result_json)
+        except Exception:
+            result = None
     return {
-        "ok":               True,
-        "sticker_file_id":  file_id,
-        "set_url":          set_url,
-        "pack_name":        pack["pack_name"],
+        "ok": True,
+        "job_id": job.id,
+        "status": job.status,
+        "progress": round(float(job.progress or 0.0), 1),
+        "kind": job.kind,
+        "error": job.error,
+        "result": result,
     }
 
 
@@ -624,41 +728,14 @@ async def compose_sticker(draft_id: int, body: ComposeBody, request: Request):
         await _db.sticker_draft_set_status(draft_id, "failed", err)
         raise HTTPException(status_code=422, detail=err or "encode failed")
 
-    from .bot import get_application
-    tg_app = get_application()
-    if tg_app is None:
-        await _db.sticker_draft_set_status(draft_id, "failed", "bot not running")
-        raise HTTPException(status_code=503, detail="bot not running")
-    pack = await _st.resolve_pack(tg_app.bot, user_id, first_name, kind="static")
+    # Static export is cheap — publish inline (shares the /make publish path).
     try:
-        file_id, set_url = await _st.upload_and_add(
-            tg_app.bot, user_id, dst, emoji=(body.emoji or "🎬"),
-            pack_name=pack["pack_name"], pack_title=pack["pack_title"],
-            sticker_format="static", sticker_type="regular")
-    except TelegramError as e:
-        msg = str(e)
-        await _db.sticker_draft_set_status(draft_id, "failed", msg)
-        if "PEER_ID_INVALID" in msg or "user not found" in msg.lower():
-            raise HTTPException(status_code=400,
-                                detail="Send /start to the bot first, then try again.")
-        raise HTTPException(status_code=502, detail=f"Telegram: {msg}")
-
-    if not pack.get("exists_in_db"):
-        await _db.sticker_pack_create(user_id, pack["pack_name"], pack["pack_title"],
-                                      set_url, kind="static")
-    await _db.sticker_record(user_id=user_id, pack_name=pack["pack_name"],
-                             source_draft_id=draft_id, emoji=body.emoji or "🎬",
-                             telegram_file_id=file_id, webm_path=str(dst))
-    await _db.sticker_draft_set_status(draft_id, "awaiting_edit")
-    try:
-        await tg_app.bot.send_sticker(chat_id=user_id, sticker=file_id)
-        await tg_app.bot.send_message(
-            chat_id=user_id, text=f"✅ Added to your pack:\n{set_url}",
-            disable_web_page_preview=True)
-    except Exception as e:
-        logger.warning("compose confirmation DM failed for u=%s: %s", user_id, e)
-    return {"ok": True, "sticker_file_id": file_id, "set_url": set_url,
-            "pack_name": pack["pack_name"]}
+        result = await _publish_sticker(
+            user_id, first_name, draft_id, dst,
+            emoji=body.emoji, pack_kind="static", sticker_format="static")
+    except StickerBuildError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    return {"ok": True, **result}
 
 
 class CutoutBody(BaseModel):
@@ -3126,6 +3203,42 @@ window.addEventListener('resize', () => {
   else _refreshShapePreview();
 });
 
+// ── Background-job progress (v2.7-B) ──────────────────────────────────────
+// Heavy video encodes return {job_id} and run on the server's worker; poll
+// the job for a live progress bar + Telegram push on completion. Cheap static
+// encodes still return the sticker inline (no job_id).
+function renderStickerBar(pct, label) {
+  pct = Math.max(0, Math.min(100, Math.round(pct || 0)));
+  progressEl.innerHTML = `<div style="font-size:13px;margin-bottom:6px">${label || 'Working…'} ${pct}%</div><div style="height:8px;background:#2a2a2e;border-radius:5px;overflow:hidden"><div style="height:100%;width:${pct}%;background:#5ac8fa;transition:width .35s"></div></div>`;
+}
+async function pollStickerJob(jobId) {
+  const labels = { queued: 'Queued…', running: 'Encoding…', done: 'Done', error: 'Failed' };
+  renderStickerBar(3, 'Queued…');
+  for (let i = 0; i < 200; i++) {
+    await new Promise(res => setTimeout(res, 1200));
+    let j;
+    try { j = await api(`/api/sticker_jobs/${jobId}`); }
+    catch (e) { continue; }   // transient blip — keep polling
+    renderStickerBar(j.progress, labels[j.status] || 'Working…');
+    if (j.status === 'done') return j.result || {};
+    if (j.status === 'error') throw new Error(j.error || 'encode failed');
+  }
+  throw new Error('timed out waiting for the encode');
+}
+function showStickerSuccess(r) {
+  r = r || {};
+  progressEl.innerHTML = `✅ Added! <a href="#" id="open-pack-link" style="color:#5ac8fa">Open your pack</a><br><span style="font-size:12px">You can make another variant — different emoji / trim / crop — or go back.</span>`;
+  const link = document.getElementById('open-pack-link');
+  if (link) link.addEventListener('click', ev => {
+    ev.preventDefault();
+    if (tg && tg.openTelegramLink) tg.openTelegramLink(r.set_url);
+    else window.open(r.set_url, '_blank');
+  });
+  if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+  makeBtn.disabled = false;
+  makeBtn.textContent = '✨ Make another';
+}
+
 makeBtn.addEventListener('click', async () => {
   // In a Studio tool the action button exports the canvas instead of /make.
   if (document.body.classList.contains('studio-active')) { studioExport(); return; }
@@ -3172,16 +3285,10 @@ makeBtn.addEventListener('click', async () => {
     const r = await api(`/api/sticker_drafts/${DRAFT_ID}/make`, {
       method: 'POST', body: JSON.stringify(body),
     });
-    progressEl.innerHTML = `✅ Added! <a href="#" id="open-pack-link" style="color:#5ac8fa">Open your pack</a><br><span style="font-size:12px">You can make another variant — different emoji / trim / crop — or go back.</span>`;
-    const link = document.getElementById('open-pack-link');
-    link.addEventListener('click', ev => {
-      ev.preventDefault();
-      if (tg && tg.openTelegramLink) tg.openTelegramLink(r.set_url);
-      else window.open(r.set_url, '_blank');
-    });
-    if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-    makeBtn.disabled = false;
-    makeBtn.textContent = '✨ Make another';
+    // Heavy encodes come back as {job_id} → poll for progress + completion.
+    // Cheap static encodes return the sticker inline (no job_id).
+    const result = r.job_id ? await pollStickerJob(r.job_id) : r;
+    showStickerSuccess(result);
   } catch (e) {
     progressEl.textContent = '❌ ' + e.message;
     makeBtn.disabled = false;

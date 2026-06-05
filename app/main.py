@@ -111,6 +111,17 @@ async def lifespan(app: FastAPI):
             await conn.commit()
     except Exception as _e:
         logger.warning("user-row self-heal failed: %s", _e)
+    # Sticker job queue (v2.7-B) — heavy encodes (per-frame cutout / transparent
+    # / plain video) run on a small background worker so /make returns instantly;
+    # the editor polls /api/sticker_jobs/{id} for progress + the user gets a
+    # Telegram push on completion. Re-queues interrupted jobs on boot.
+    try:
+        from . import sticker_jobs as _sj
+        await _sj.init_schema()
+        _sj.start_worker()
+        logger.info("Sticker job worker started (max_concurrent=%d)", _sj.MAX_CONCURRENT)
+    except Exception as _e:
+        logger.warning("Sticker job worker startup failed: %s", _e)
     asyncio.create_task(start_cleanup_loop())
     asyncio.create_task(start_sticker_cleanup_loop())
     asyncio.create_task(_warm_rembg())

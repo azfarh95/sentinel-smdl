@@ -420,11 +420,16 @@ CUTOUT_FEATHER   = 1.5   # px gaussian on each mask → soft edge, less flicker
 
 def _segment_frames_sync(frame_paths: list[Path], mask_dir: Path, *,
                          subsample: int, feather: float,
-                         shape_arr) -> int:
+                         shape_arr,
+                         progress_cb: "Callable[[float], None] | None" = None) -> int:
     """Segment a subset of frames, linearly interpolate the alpha for the
     skipped ones, feather, optionally intersect a static shape mask, and write
     mask_%05d.png (grayscale). CPU-bound — call inside an executor. Returns the
-    frame count written."""
+    frame count written.
+
+    `progress_cb`, if given, is called with a 0..1 fraction as the (dominant)
+    per-keyframe matting loop advances, so a background job can show a live
+    progress bar. Best-effort; exceptions in the callback are swallowed."""
     import bisect
     import numpy as np
     from PIL import Image, ImageFilter
@@ -441,12 +446,18 @@ def _segment_frames_sync(frame_paths: list[Path], mask_dir: Path, *,
     key_idx = list(range(0, n, step))
     if key_idx[-1] != n - 1:
         key_idx.append(n - 1)
+    nk = len(key_idx)
     keys: dict[int, "np.ndarray"] = {}
-    for i in key_idx:
+    for j, i in enumerate(key_idx):
         with Image.open(frame_paths[i]) as im:
             m = remove(im.convert("RGB"), session=sess,
                        only_mask=True, post_process_mask=False)
         keys[i] = np.asarray(m.convert("L"), dtype=np.float32)
+        if progress_cb:
+            try:
+                progress_cb((j + 1) / nk)
+            except Exception:
+                pass
 
     ks = sorted(keys.keys())
     mask_dir.mkdir(parents=True, exist_ok=True)
@@ -476,6 +487,7 @@ async def make_video_cutout_sticker(
     end: float | None = None,
     crop: tuple[int, int, int, int] | None = None,
     shape_mask: Path | None = None,
+    progress_cb: "Callable[[float], None] | None" = None,
 ) -> tuple[bool, str | None]:
     """Encode a VIDEO sticker whose background is removed per-frame → a real
     alpha channel that tracks the moving subject. Optionally intersect a static
@@ -483,7 +495,18 @@ async def make_video_cutout_sticker(
 
     Pipeline: ffmpeg → 512² PNG frames @ CUTOUT_FPS → rembg per-frame alpha
     (subsampled + interpolated) → colour y4m + alpha y4m → vpxenc ×2 → mux.
+
+    `progress_cb`, if given, is called with a 0..1 fraction of the *whole
+    encode* (segmentation dominates) so a background job can drive a live
+    progress bar. Best-effort; callback exceptions are swallowed.
     """
+    def _emit(frac: float) -> None:
+        if progress_cb:
+            try:
+                progress_cb(max(0.0, min(1.0, float(frac))))
+            except Exception:
+                pass
+
     if not src.exists():
         return False, f"source not found: {src}"
     if not shutil.which("ffmpeg"):
@@ -534,6 +557,7 @@ async def make_video_cutout_sticker(
         frame_paths = sorted(framedir.glob("frame_*.png"))
         if not frame_paths:
             return False, "no frames extracted"
+        _emit(0.10)
 
         # 2) optional static shape mask to intersect with the subject cutout.
         shape_arr = None
@@ -545,11 +569,15 @@ async def make_video_cutout_sticker(
                     sm.convert("L").resize((S, S)), dtype=_np.float32)
 
         # 3) per-frame segmentation (the heavy CPU step) → mask PNGs.
+        #    Map its 0..1 internal progress into the 0.10..0.70 band — this is
+        #    the long pole, so it carries most of the progress bar.
+        _seg_cb = (lambda f: _emit(0.10 + 0.60 * f)) if progress_cb else None
         n = await loop.run_in_executor(None, lambda: _segment_frames_sync(
             frame_paths, maskdir, subsample=CUTOUT_SUBSAMPLE,
-            feather=CUTOUT_FEATHER, shape_arr=shape_arr))
+            feather=CUTOUT_FEATHER, shape_arr=shape_arr, progress_cb=_seg_cb))
         if n <= 0:
             return False, "segmentation produced no masks"
+        _emit(0.70)
 
         # 4) colour y4m from the frames.
         rc, err = await loop.run_in_executor(None, lambda: _run([
@@ -566,6 +594,7 @@ async def make_video_cutout_sticker(
             str(alp_y4m)], 90))
         if rc != 0:
             return False, "alpha y4m failed: " + err.decode("utf-8", "replace")[-160:]
+        _emit(0.74)
 
         # 6) alpha is a SOFT, animated mask (not a flat shape) — lossless would
         #    blow the budget, so encode it VBR at a modest bitrate. Colour then
@@ -575,9 +604,12 @@ async def make_video_cutout_sticker(
              "-o", str(alp_ivf), str(alp_y4m)], 90))
         if rc != 0:
             return False, "alpha encode failed: " + err.decode("utf-8", "replace")[-160:]
+        _emit(0.80)
 
         last_size = 0
-        for cbr in ("200", "140", "90", "60"):
+        _ladder = ("200", "140", "90", "60")
+        for _i, cbr in enumerate(_ladder):
+            _emit(0.82 + _i * 0.04)
             rc, err = await loop.run_in_executor(None, lambda c=cbr: _run(
                 ["vpxenc", *_VP, "--end-usage=vbr", f"--target-bitrate={c}",
                  "-o", str(col_ivf), str(col_y4m)], 90))
@@ -591,6 +623,7 @@ async def make_video_cutout_sticker(
             if last_size <= STICKER_MAX_BYTES:
                 logger.info("cutout sticker ok: %s @ %s kbps, %d frames → %d bytes",
                             src.name, cbr, n, last_size)
+                _emit(1.0)
                 return True, None
             logger.info("cutout too big @ %s: %d > %d", cbr, last_size, STICKER_MAX_BYTES)
         return False, (f"Output >256KB even at lowest bitrate (last {last_size}). "

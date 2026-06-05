@@ -157,6 +157,10 @@ async def init_iptv_schema() -> None:
             # overrides applied last.
             "ALTER TABLE iptv_channels ADD COLUMN channel_id TEXT",
             "ALTER TABLE iptv_channels ADD COLUMN priority INTEGER NOT NULL DEFAULT 5",
+            # v3.6-B self-healing: consecutive-failure counter for auto-prune.
+            # Incremented by a dead probe / client report_failure, reset to 0 on
+            # a successful probe. Sources at/above PRUNE_STREAK sink in the pick.
+            "ALTER TABLE iptv_channels ADD COLUMN fail_streak INTEGER NOT NULL DEFAULT 0",
         ):
             try:
                 await conn.execute(sql)
@@ -1339,7 +1343,8 @@ _PROBE_UPDATE_SQL = (
     "UPDATE iptv_channels "
     "   SET status=?, last_check_at=?, last_error=?, alive=?, "
     "       probe_count = probe_count + 1, "
-    "       alive_count = alive_count + ? "
+    "       alive_count = alive_count + ?, "
+    "       fail_streak = CASE WHEN ? = 1 THEN 0 ELSE fail_streak + 1 END "
     " WHERE id=?"
 )
 
@@ -1458,7 +1463,7 @@ async def _probe_all_worker(
                     src_bucket["dead"] += 1
                 alive_inc = 1 if status == "alive" else 0
                 await write_queue.put(
-                    (status, _iso_now(), err, alive_inc, alive_inc, cid)
+                    (status, _iso_now(), err, alive_inc, alive_inc, alive_inc, cid)
                 )
 
         try:
@@ -1617,7 +1622,7 @@ async def probe_channel(channel_id: str, timeout_s: float = 7.0) -> IptvChannel:
     async with aiosqlite.connect(db.DB_PATH) as conn:
         await conn.execute(
             _PROBE_UPDATE_SQL,
-            (status, now, err, alive_inc, alive_inc, channel_id),
+            (status, now, err, alive_inc, alive_inc, alive_inc, channel_id),
         )
         await conn.commit()
     refreshed = await get_channel(channel_id)

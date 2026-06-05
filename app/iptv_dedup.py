@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -315,21 +316,40 @@ async def run_dedup() -> dict:
     return summary
 
 
+# v3.6-B: a source with this many consecutive failures is "pruned" — it sinks
+# to the bottom of the pick (still a last resort, never fully hidden, so a
+# channel never ends up with zero playable options).
+PRUNE_STREAK = int(os.environ.get("IPTV_PRUNE_STREAK", "3"))
+
+# Reliability-ranked ordering, shared by pick + list. NOT first-found / not
+# priority-first: alive sources lead, then unprobed over dead, then un-pruned
+# over pruned, then the historical reliability fraction (alive/probe), then the
+# source-family priority, then recency. So a dead high-priority source can no
+# longer outrank a healthy lower-priority one.
+_RANK_ORDER = (
+    " ORDER BY (status = 'alive') DESC, "
+    "          (status = 'dead') ASC, "
+    "          (fail_streak >= ?) ASC, "
+    "          CAST(alive_count AS REAL) / (probe_count + 1) DESC, "
+    "          priority DESC, "
+    "          COALESCE(last_check_at, '1970-01-01') DESC"
+)
+
+
 async def pick_best_source(channel_id: str) -> dict | None:
-    """Return {url, source_id, status, priority, alternates[]} for the
-    logical channel. Sort order: priority desc → alive first → most
-    recently checked first. Returns None if the channel has no sources."""
+    """Return {url, source_id, status, priority, alternates[]} for the logical
+    channel, reliability-ranked (see _RANK_ORDER) so failover/first-pick prefer
+    healthy sources. Returns None if the channel has no sources."""
     async with aiosqlite.connect(db.DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
-        cur = await conn.execute("""
-            SELECT id, name, source, url, status, last_check_at, priority,
-                   probe_count, alive_count
-              FROM iptv_channels
-             WHERE channel_id = ? AND url IS NOT NULL AND url != ''
-             ORDER BY priority DESC,
-                      (status = 'alive') DESC,
-                      COALESCE(last_check_at, '1970-01-01') DESC
-        """, (channel_id,))
+        cur = await conn.execute(
+            "SELECT id, name, source, url, status, last_check_at, priority, "
+            "       probe_count, alive_count, fail_streak "
+            "  FROM iptv_channels "
+            " WHERE channel_id = ? AND url IS NOT NULL AND url != ''"
+            + _RANK_ORDER,
+            (channel_id, PRUNE_STREAK),
+        )
         rows = await cur.fetchall()
     if not rows:
         return None
@@ -349,6 +369,7 @@ async def pick_best_source(channel_id: str) -> dict | None:
                 "priority":  r["priority"],
                 "probe_count": r["probe_count"],
                 "alive_count": r["alive_count"],
+                "fail_streak": r["fail_streak"],
             }
             for r in rows[1:]
         ],
@@ -356,17 +377,17 @@ async def pick_best_source(channel_id: str) -> dict | None:
 
 
 async def list_sources_for_channel(channel_id: str) -> list[dict]:
-    """All source rows for a logical channel, sorted by play-priority."""
+    """All source rows for a logical channel, reliability-ranked (see
+    _RANK_ORDER) — the client's failover list inherits this order."""
     async with aiosqlite.connect(db.DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
-        cur = await conn.execute("""
-            SELECT id, name, source, url, status, last_check_at, priority,
-                   probe_count, alive_count, logo
-              FROM iptv_channels
-             WHERE channel_id = ?
-             ORDER BY priority DESC,
-                      (status = 'alive') DESC,
-                      COALESCE(last_check_at, '1970-01-01') DESC
-        """, (channel_id,))
+        cur = await conn.execute(
+            "SELECT id, name, source, url, status, last_check_at, priority, "
+            "       probe_count, alive_count, fail_streak, logo "
+            "  FROM iptv_channels "
+            " WHERE channel_id = ?"
+            + _RANK_ORDER,
+            (channel_id, PRUNE_STREAK),
+        )
         rows = await cur.fetchall()
     return [dict(r) for r in rows]

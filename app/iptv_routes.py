@@ -427,6 +427,9 @@ async def iptv_v2_channels(
         # frontend; parse aliases JSON.
         d["alive_count"] = int(d.pop("alive_count_srcs") or 0)
         d["source_count"] = int(d.get("source_count") or 0)
+        # v3.6-B: flag channels with no currently-alive source so the grid can
+        # mark them degraded instead of presenting them as healthy.
+        d["zero_alive"] = (d["alive_count"] == 0 and d["source_count"] > 0)
         try:
             d["aliases"] = json.loads(d.get("aliases") or "[]")
         except Exception:
@@ -525,12 +528,26 @@ async def iptv_report_source_failure(source_id: str, request: Request):
     async with aiosqlite.connect(_db.DB_PATH) as conn:
         await conn.execute(
             "UPDATE iptv_channels SET status = 'dead', "
+            "fail_streak = fail_streak + 1, "
             "last_error = 'client-reported failure', last_check_at = ? "
             "WHERE id = ?",
             (_iptv._iso_now(), source_id),
         )
         await conn.commit()
-    return {"ok": True, "source_id": source_id, "status": "dead"}
+        # Surface whether the logical channel now has zero alive sources, so the
+        # client/grid can flag it instead of offering a dead channel as healthy.
+        cid_row = await (await conn.execute(
+            "SELECT channel_id FROM iptv_channels WHERE id = ?", (source_id,)
+        )).fetchone()
+        zero_alive = None
+        if cid_row and cid_row[0]:
+            ar = await (await conn.execute(
+                "SELECT SUM(CASE WHEN status='alive' THEN 1 ELSE 0 END) "
+                "FROM iptv_channels WHERE channel_id = ?", (cid_row[0],)
+            )).fetchone()
+            zero_alive = (int((ar[0] if ar else 0) or 0) == 0)
+    return {"ok": True, "source_id": source_id, "status": "dead",
+            "channel_zero_alive": zero_alive}
 
 
 class CurateBody(BaseModel):

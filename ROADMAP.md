@@ -133,6 +133,31 @@ Shipped B → A → C → D, each deployed + verified in-container.
 - Commits `d7bf729` (B), `fa82079` (A), `b38270f` (C), `d2417a1` (D). Branch
   `feat/trakt-sync`. Spec: [smdl-stickers-v27](https://docs.az-sentinel.xyz/planning/smdl-stickers-v27/).
 
+### v3.6 · Live TV depth — self-healing · actionable EPG · personal TV (2026-06-05)
+Took Live TV from "big catalogue that mostly plays" to "TV that works and knows
+me". Shipped **B → A → C**; **D parked** (see below). Each deployed + verified.
+
+- **B · Self-healing playback** — reliability-ranked source pick (alive-first +
+  reliability fraction + recency, *not* priority-first, so a dead high-priority
+  source no longer outranks a live one; `iptv_dedup._RANK_ORDER`); `fail_streak`
+  consecutive-failure counter → auto-prune (sinks chronically-dead sources);
+  `report_failure` hardening + a `zero_alive` grid flag (dead channels dimmed);
+  transparent failover across YouTube relay sources at resolve time.
+- **A · Actionable EPG** — cross-channel `/api/iptv/epg/search` ("what's on" box
+  on the grid); `iptv_reminders` + the scheduled-DVR tick pushes a Telegram
+  reminder at start−lead; record-this-program + series-link (`iptv_series_rules`
+  auto-schedules matching upcoming airings, dedup-safe). 🔔/⏺/📺 buttons on
+  search results.
+- **C · Personal TV** — server-side `iptv_favorites` (syncs across web/TWA;
+  localStorage mirrors + one-time migrates up); continue-watching already
+  existed; `/api/iptv/for_you` renders "More <country> TV" + a category row from
+  watch history.
+- **D · Catch-up / time-shift** — 🅿️ **parked** (heaviest: storage + ffmpeg
+  segment-ring). Design captured in the [media runbook](https://docs.az-sentinel.xyz/runbooks/media/#parked-v36-d-live-tv-catch-up-time-shift).
+- Commits `9772c43`+`e30ac55` (B), `f55f27d`+`e084db1` (A + UI), `60f44ce`
+  (A series-link + C). Branch `feat/trakt-sync`. Spec:
+  [smdl-livetv-v36](https://docs.az-sentinel.xyz/planning/smdl-livetv-v36/).
+
 ### v3.0 · IPTV browser (early May 2026 — late May 2026)
 - New `/iptv` Mini App page — Netflix-style channel grid
 - Initial sources: `iptv-org/iptv` global catalogue
@@ -216,31 +241,13 @@ Shipped B → A → C → D, each deployed + verified in-container.
 - ⚠️ Today the FAM/COM tier is an **unenforced label** — features are
   gated by the deployment `EDITION` flag, not the key. v9.1 wires them.
 
-**Current state of SMDL**: downloader **v1.6** · IPTV **v3.5** ·
+**Current state of SMDL**: downloader **v1.6** · IPTV **v3.6** ·
 stickers **v2.7** · distribution **v4.0** · monetization **v9.0**.
 
 ---
 
 ## Planned — what's next
 
-### v3.6 · Live TV depth — self-healing + actionable + personal + catch-up
-**Status**: planned · scope agreed 2026-06-05 (full plan, **B → A → C → D**)
-**Depends on**: v3.5 (shipped)
-**Spec**: [sentinel-docs/planning/smdl-livetv-v36.md](https://docs.az-sentinel.xyz/planning/smdl-livetv-v36/)
-
-Take Live TV from "big catalogue that mostly plays" to "TV that just works and
-knows me":
-- **B · Self-healing playback** *(foundational)* — reliability-ranked source pick +
-  auto-failover on mid-stream stall via the HLS relay (reuses `v_channels_with_status`
-  health + `report_failure`); auto-prune dead sources.
-- **A · Actionable EPG** — cross-channel "what's on" search, programme reminders
-  (Telegram push), record-this-program / record-every-episode (series-link) from
-  EPG (today's `iptv_scheduled` is time-window only).
-- **C · Personal TV** — favorites + custom lineups, continue/recently-watched rows,
-  For-You rows from `iptv_play_history` (the live analogue of Trakt continue-watch).
-- **D · Catch-up / time-shift** *(heaviest)* — pause/rewind/restart-program via
-  provider catch-up URLs + a rolling DVR segment-ring buffer for favorites (job
-  worker; shares the sticker v2.7-B pattern).
 
 ### v4.1 · Recording lifecycle controls (~1 day work)
 **Status**: planned

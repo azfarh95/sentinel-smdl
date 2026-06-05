@@ -421,21 +421,26 @@ CUTOUT_FEATHER   = 1.5   # px gaussian on each mask → soft edge, less flicker
 def _segment_frames_sync(frame_paths: list[Path], mask_dir: Path, *,
                          subsample: int, feather: float,
                          shape_arr, overlay_alpha=None,
+                         model: str = "u2netp", temporal: float = 0.0,
                          progress_cb: "Callable[[float], None] | None" = None) -> int:
     """Segment a subset of frames, linearly interpolate the alpha for the
-    skipped ones, feather, optionally intersect a static shape mask, and write
+    skipped ones, optionally damp flicker with a temporal EMA, feather,
+    optionally intersect a static shape mask + union an overlay alpha, and write
     mask_%05d.png (grayscale). CPU-bound — call inside an executor. Returns the
     frame count written.
 
-    `progress_cb`, if given, is called with a 0..1 fraction as the (dominant)
-    per-keyframe matting loop advances, so a background job can show a live
-    progress bar. Best-effort; exceptions in the callback are swallowed."""
+    model:    rembg model name ('u2netp' fast default, or a heavier HQ model).
+    temporal: symmetric EMA strength in [0,1) to steady the mask across frames
+              (v2.7-C de-flicker). 0 = off (behaviour unchanged).
+    Keyframe matting runs in a small thread pool (ONNX CPU Run is thread-safe).
+    `progress_cb`, if given, is called 0..1 as keyframes complete (best-effort)."""
     import bisect
     import numpy as np
     from PIL import Image, ImageFilter
     from rembg import remove
+    from concurrent.futures import ThreadPoolExecutor
 
-    sess = _rembg_session_get()
+    sess = _rembg_session_get(model)
     n = len(frame_paths)
     if n == 0:
         return 0
@@ -447,29 +452,62 @@ def _segment_frames_sync(frame_paths: list[Path], mask_dir: Path, *,
     if key_idx[-1] != n - 1:
         key_idx.append(n - 1)
     nk = len(key_idx)
-    keys: dict[int, "np.ndarray"] = {}
-    for j, i in enumerate(key_idx):
+
+    def _seg_one(i: int):
         with Image.open(frame_paths[i]) as im:
             m = remove(im.convert("RGB"), session=sess,
                        only_mask=True, post_process_mask=False)
-        keys[i] = np.asarray(m.convert("L"), dtype=np.float32)
-        if progress_cb:
-            try:
-                progress_cb((j + 1) / nk)
-            except Exception:
-                pass
+        return i, np.asarray(m.convert("L"), dtype=np.float32)
+
+    # Parallel keyframe matting — the dominant cost. ONNX CPU inference is
+    # thread-safe and matting parallelizes safely (ADR MED-003), so a small
+    # pool cuts wall-clock on multi-core boxes. Cap to cpu_count.
+    workers = max(1, min(int(CUTOUT_MATTE_WORKERS), (os.cpu_count() or 2)))
+    keys: dict[int, "np.ndarray"] = {}
+    done = 0
+    if workers > 1 and nk > 1:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for i, arr in ex.map(_seg_one, key_idx):
+                keys[i] = arr
+                done += 1
+                if progress_cb:
+                    try:
+                        progress_cb(done / nk)
+                    except Exception:
+                        pass
+    else:
+        for j, i in enumerate(key_idx):
+            _, keys[i] = _seg_one(i)
+            if progress_cb:
+                try:
+                    progress_cb((j + 1) / nk)
+                except Exception:
+                    pass
 
     ks = sorted(keys.keys())
-    mask_dir.mkdir(parents=True, exist_ok=True)
+    # Build the full interpolated alpha sequence.
+    seq: list = []
     for i in range(n):
         if i in keys:
-            arr = keys[i]
+            seq.append(keys[i])
         else:
             p = bisect.bisect_right(ks, i)
             lo, hi = ks[p - 1], ks[p]
             w = (i - lo) / (hi - lo)
-            arr = keys[lo] * (1.0 - w) + keys[hi] * w
-        img = Image.fromarray(np.clip(arr, 0, 255).astype("uint8"), "L")
+            seq.append(keys[lo] * (1.0 - w) + keys[hi] * w)
+
+    # Temporal de-flicker: two-pass (forward then backward) EMA keeps it
+    # phase-neutral so the subject doesn't lag its motion.
+    if temporal and temporal > 0.0 and n > 2:
+        a = float(min(0.9, max(0.0, temporal)))
+        for i in range(1, n):
+            seq[i] = a * seq[i - 1] + (1.0 - a) * seq[i]
+        for i in range(n - 2, -1, -1):
+            seq[i] = a * seq[i + 1] + (1.0 - a) * seq[i]
+
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        img = Image.fromarray(np.clip(seq[i], 0, 255).astype("uint8"), "L")
         if feather and feather > 0:
             img = img.filter(ImageFilter.GaussianBlur(float(feather)))
         if shape_arr is not None:
@@ -494,6 +532,7 @@ async def make_video_cutout_sticker(
     crop: tuple[int, int, int, int] | None = None,
     shape_mask: Path | None = None,
     overlay_png: Path | None = None,
+    hq: bool = False,
     progress_cb: "Callable[[float], None] | None" = None,
 ) -> tuple[bool, str | None]:
     """Encode a VIDEO sticker whose background is removed per-frame → a real
@@ -597,7 +636,10 @@ async def make_video_cutout_sticker(
         n = await loop.run_in_executor(None, lambda: _segment_frames_sync(
             frame_paths, maskdir, subsample=CUTOUT_SUBSAMPLE,
             feather=CUTOUT_FEATHER, shape_arr=shape_arr,
-            overlay_alpha=overlay_alpha, progress_cb=_seg_cb))
+            overlay_alpha=overlay_alpha,
+            model=(CUTOUT_HQ_MODEL if hq else "u2netp"),
+            temporal=(CUTOUT_HQ_TEMPORAL if hq else 0.0),
+            progress_cb=_seg_cb))
         if n <= 0:
             return False, "segmentation produced no masks"
         _emit(0.70)
@@ -680,6 +722,7 @@ async def make_video_overlay_sticker(
     end: float | None = None,
     crop: tuple[int, int, int, int] | None = None,
     cutout: bool = False,
+    hq: bool = False,
     progress_cb: "Callable[[float], None] | None" = None,
 ) -> tuple[bool, str | None]:
     """v2.7-A — composite a static 512² overlay PNG (the Studio's text / emoji /
@@ -711,7 +754,7 @@ async def make_video_overlay_sticker(
         # colour frames and unions its alpha into the subject mask.
         return await make_video_cutout_sticker(
             src, dst, start=start, end=end, crop=crop,
-            overlay_png=Path(overlay_png), progress_cb=progress_cb)
+            overlay_png=Path(overlay_png), hq=hq, progress_cb=progress_cb)
 
     duration = STICKER_MAX_DUR_S
     if end is not None and end > start:
@@ -839,24 +882,48 @@ def build_shape_mask(shape: str, out_path: Path, *, size_px: int = STICKER_FRAME
 
 
 # Background removal (subject isolation) for one-tap cutout stickers. Uses
-# rembg (onnxruntime + the small u2netp model). CPU-bound → run in an executor.
-# The model is baked at $U2NET_HOME so first use doesn't pay a download.
-_rembg_session = None
+# rembg (onnxruntime). CPU-bound → run in an executor. Both models are baked at
+# $U2NET_HOME so first use doesn't pay a download (see Dockerfile).
+#   u2netp            — fast default (~4 MB, ~180 ms/frame)
+#   isnet-general-use — "best quality" toggle (~170 MB, cleaner edges, slower)
+# v2.7-C: the heavier model is opt-in (hq=True) and runs as a background job.
+CUTOUT_HQ_MODEL    = os.environ.get("CUTOUT_HQ_MODEL", "isnet-general-use")
+# Symmetric temporal EMA strength applied to the per-frame masks in HQ mode to
+# damp residual flicker/boil between keyframes. 0 = off; ~0.5 = noticeably
+# steadier without motion lag (two-pass forward+backward keeps it phase-neutral).
+CUTOUT_HQ_TEMPORAL = float(os.environ.get("CUTOUT_HQ_TEMPORAL", "0.5"))
+# How many keyframes to matte in parallel (ONNX CPU Run is thread-safe; CPU
+# matting parallelizes safely per ADR MED-003). Capped to cpu_count.
+CUTOUT_MATTE_WORKERS = int(os.environ.get("CUTOUT_MATTE_WORKERS", "4"))
+
+_rembg_sessions: dict = {}
 
 
-def _rembg_session_get():
-    global _rembg_session
-    if _rembg_session is None:
-        from rembg import new_session
-        _rembg_session = new_session("u2netp")
-    return _rembg_session
+def _rembg_session_get(model: str = "u2netp"):
+    """Return a cached rembg session for `model`. Falls back to u2netp if the
+    requested (heavier) model can't be loaded — e.g. not baked + offline — so a
+    'best quality' request degrades gracefully instead of erroring."""
+    sess = _rembg_sessions.get(model)
+    if sess is not None:
+        return sess
+    from rembg import new_session
+    try:
+        sess = new_session(model)
+    except Exception as e:
+        if model != "u2netp":
+            logger.warning("rembg model %s unavailable (%s) — falling back to u2netp",
+                           model, e)
+            return _rembg_session_get("u2netp")
+        raise
+    _rembg_sessions[model] = sess
+    return sess
 
 
-def _bg_remove_sync(src: Path, dst: Path) -> None:
+def _bg_remove_sync(src: Path, dst: Path, model: str = "u2netp") -> None:
     from rembg import remove
     from PIL import Image
     with Image.open(src) as im:
-        out = remove(im.convert("RGBA"), session=_rembg_session_get())
+        out = remove(im.convert("RGBA"), session=_rembg_session_get(model))
     out.save(str(dst))
 
 
@@ -887,18 +954,20 @@ async def extract_frame(src: Path, dst: Path, *, seek_s: float = 0.0) -> tuple[b
     return (dst.exists(), None if dst.exists() else "no frame produced")
 
 
-async def bg_remove(src: Path, dst: Path) -> tuple[bool, str | None]:
+async def bg_remove(src: Path, dst: Path, *, hq: bool = False) -> tuple[bool, str | None]:
     """Strip the background → a transparent RGBA PNG at `dst`. Feed the result
     to make_static_sticker(keep_alpha=True) for a webp cutout sticker.
 
     `src` must be a still image (PNG/JPG/…); for video sources run
-    extract_frame first."""
+    extract_frame first. hq=True uses the heavier 'best quality' matte model
+    (v2.7-C), falling back to u2netp if it isn't available."""
     if not src.exists():
         return False, f"source not found: {src}"
     dst.parent.mkdir(parents=True, exist_ok=True)
+    model = CUTOUT_HQ_MODEL if hq else "u2netp"
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _bg_remove_sync, src, dst)
+        await loop.run_in_executor(None, _bg_remove_sync, src, dst, model)
     except Exception as e:
         logger.warning("bg_remove failed on %s: %s", src.name, e)
         return False, f"background removal failed: {e}"

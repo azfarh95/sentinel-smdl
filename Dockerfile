@@ -16,10 +16,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Bake the small u2netp segmentation model into the image so the first cutout
-# sticker doesn't pay a download. U2NET_HOME stays set for runtime too.
+# Bake the segmentation models into the image so the first cutout doesn't pay a
+# download. u2netp = fast default; isnet-general-use = v2.7-C "best quality"
+# matte. U2NET_HOME stays set for runtime too.
 ENV U2NET_HOME=/app/u2net_models
-RUN python -c "from rembg import new_session; new_session('u2netp')" \
+RUN python -c "from rembg import new_session; new_session('u2netp'); new_session('isnet-general-use')" \
     && chown -R smdl:smdl /app/u2net_models
 
 COPY app/ ./app/

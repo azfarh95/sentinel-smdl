@@ -98,6 +98,9 @@ class MakeStickerBody(BaseModel):
     # Inset the shape so it floats free of the frame edges (a breathing margin)
     # instead of being inscribed edge-to-edge. Applies to static + video shapes.
     padding: bool = False
+    # v2.7-C: "best quality" matte — heavier rembg model + temporal de-flicker.
+    # Only meaningful when cutout is on; ignored otherwise. Runs as a B job.
+    hq: bool = False
 
 
 def _coerce_points(raw) -> list[tuple[float, float]] | None:
@@ -488,6 +491,7 @@ async def build_and_publish(user_id: int, first_name: str | None, draft_id: int,
                     end=float(body.trim_end or 3.0),
                     crop=crop,
                     shape_mask=v_mask,
+                    hq=bool(body.hq),
                     progress_cb=((lambda f: progress(10.0 + f * 65.0))
                                  if progress else None),
                 )
@@ -540,7 +544,7 @@ async def build_and_publish(user_id: int, first_name: str | None, draft_id: int,
                     raise StickerBuildError(ferr or "frame extract failed", status=422)
                 tmp_files.append(frame_png)
                 cut_png = dst.with_name(f"{draft_id}_cut.png")
-                cok, cerr = await _sp.bg_remove(frame_png, cut_png)
+                cok, cerr = await _sp.bg_remove(frame_png, cut_png, hq=bool(body.hq))
                 if not cok:
                     await _db.sticker_draft_set_status(draft_id, "failed", cerr)
                     raise StickerBuildError(cerr or "background removal failed", status=422)
@@ -628,7 +632,7 @@ async def build_overlay_and_publish(user_id: int, first_name: str | None,
             src, dst, overlay_png,
             start=float(params.get("trim_start") or 0.0),
             end=float(params.get("trim_end") or 3.0),
-            crop=crop, cutout=bool(params.get("cutout")),
+            crop=crop, cutout=bool(params.get("cutout")), hq=bool(params.get("hq")),
             progress_cb=((lambda f: progress(10.0 + f * 65.0)) if progress else None),
         )
     finally:
@@ -848,6 +852,8 @@ class ComposeVideoBody(BaseModel):
     crop_h: int | None = None
     # Also matte the subject out per-frame (transparent subject + overlay on top).
     cutout: bool = False
+    # v2.7-C "best quality" matte (only meaningful with cutout).
+    hq: bool = False
 
 
 @router.post("/api/sticker_drafts/{draft_id}/compose_video")
@@ -888,7 +894,7 @@ async def compose_video_sticker(draft_id: int, body: ComposeVideoBody, request: 
         "trim_start": body.trim_start, "trim_end": body.trim_end,
         "crop_x": body.crop_x, "crop_y": body.crop_y,
         "crop_w": body.crop_w, "crop_h": body.crop_h,
-        "cutout": bool(body.cutout),
+        "cutout": bool(body.cutout), "hq": bool(body.hq),
         "_first_name": first_name,
     }
     job_id = await _sj.enqueue(user_id=user_id, draft_id=draft_id,
@@ -2438,6 +2444,7 @@ _EDIT_HTML = r"""<!doctype html>
     </div>
     <div class="row adv-only" style="margin-top:8px">
       <span class="pill" id="cutout-toggle">✂️ Remove background</span>
+      <span class="pill" id="hq-toggle" style="display:none" title="Heavier matte model + temporal de-flicker — cleaner edges, a little slower">✨ Best quality</span>
       <span class="pill" id="draw-clear" style="display:none">↺ Redraw</span>
     </div>
     <div class="row adv-only" id="fill-row" style="margin-top:8px;display:none">
@@ -2620,6 +2627,7 @@ function setTab(tab) {
   if (tab === 'cutout' && _editorPackKind === 'video') {
     cutout = true;
     if (cutoutToggle) cutoutToggle.classList.add('on');
+    if (hqToggle) hqToggle.style.display = '';   // expose "best quality"
   }
 }
 document.getElementById('tool-tabs').addEventListener('click', e => {
@@ -2985,6 +2993,7 @@ const _editorPackKind = (() => {
 const shapeSection = document.getElementById('shape-section');
 const shapeRow     = document.getElementById('shape-row');
 const cutoutToggle = document.getElementById('cutout-toggle');
+const hqToggle     = document.getElementById('hq-toggle');
 const shapeHint    = document.getElementById('shape-hint');
 const shapeLabel   = document.getElementById('shape-label');
 const drawCanvas   = document.getElementById('draw-canvas');
@@ -2997,6 +3006,7 @@ const padToggle    = document.getElementById('pad-toggle');
 const SHAPE_PAD = 0.07;       // matches backend _SHAPE_PAD (breathing margin)
 let chosenShape = 'square';   // square|circle|triangle|star|heart|diamond|custom
 let cutout = false;
+let hqMatte = false;          // v2.7-C "best quality" matte (only when cutout on)
 let chosenFill = 'blur';      // VIDEO corner fill: 'blur' | 'color' | 'transparent'
 let chosenPad = false;        // float the shape free of the frame edges
 let customPoints = [];        // normalised [[x,y],…] in output-square space
@@ -3078,6 +3088,16 @@ shapeRow.addEventListener('click', e => {
 cutoutToggle.addEventListener('click', () => {
   cutout = !cutout;
   cutoutToggle.classList.toggle('on', cutout);
+  // "Best quality" only applies to a cutout — reveal it with the cutout, and
+  // clear it when the cutout is turned off.
+  if (hqToggle) {
+    hqToggle.style.display = cutout ? '' : 'none';
+    if (!cutout) { hqMatte = false; hqToggle.classList.remove('on'); }
+  }
+});
+if (hqToggle) hqToggle.addEventListener('click', () => {
+  hqMatte = !hqMatte;
+  hqToggle.classList.toggle('on', hqMatte);
 });
 fillRow.addEventListener('click', e => {
   const pill = e.target.closest('[data-fill]');
@@ -3387,7 +3407,10 @@ makeBtn.addEventListener('click', async () => {
     }
     // cutout (background removal) → transparent. Static = webp alpha; video =
     // per-frame alpha (the subject is matted out of every frame).
-    if ((_editorPackKind === 'static' || _editorPackKind === 'video') && cutout) body.cutout = true;
+    if ((_editorPackKind === 'static' || _editorPackKind === 'video') && cutout) {
+      body.cutout = true;
+      if (hqMatte) body.hq = true;   // v2.7-C best-quality matte
+    }
     // corner fill → video only, non-square shape, when NOT cutting out (cutout
     // removes the whole background, so the corner-fill choice is moot).
     if (_editorPackKind === 'video' && chosenShape !== 'square' && !cutout) {
@@ -3660,7 +3683,8 @@ async function studioExport() {
     if (animated) {
       prog.textContent = 'Compositing overlay onto every frame…';
       const body = { overlay_b64: png, emoji: chosenEmoji,
-                     trim_start: trimStart, trim_end: trimEnd, cutout: !!cutout };
+                     trim_start: trimStart, trim_end: trimEnd,
+                     cutout: !!cutout, hq: !!hqMatte };
       const crop = cropToSourcePixels();
       if (crop) Object.assign(body, { crop_x: crop.x, crop_y: crop.y, crop_w: crop.w, crop_h: crop.h });
       const r = await api(`/api/sticker_drafts/${DRAFT_ID}/compose_video`, {

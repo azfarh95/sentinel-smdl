@@ -420,7 +420,7 @@ CUTOUT_FEATHER   = 1.5   # px gaussian on each mask → soft edge, less flicker
 
 def _segment_frames_sync(frame_paths: list[Path], mask_dir: Path, *,
                          subsample: int, feather: float,
-                         shape_arr,
+                         shape_arr, overlay_alpha=None,
                          progress_cb: "Callable[[float], None] | None" = None) -> int:
     """Segment a subset of frames, linearly interpolate the alpha for the
     skipped ones, feather, optionally intersect a static shape mask, and write
@@ -475,6 +475,12 @@ def _segment_frames_sync(frame_paths: list[Path], mask_dir: Path, *,
         if shape_arr is not None:
             a = np.asarray(img, dtype=np.float32) * (shape_arr / 255.0)
             img = Image.fromarray(np.clip(a, 0, 255).astype("uint8"), "L")
+        if overlay_alpha is not None:
+            # Union the overlay's own alpha into the subject mask (lighten/max)
+            # so a Studio text/emoji/image layer stays opaque even where it
+            # sits outside the cut-out subject.
+            a = np.maximum(np.asarray(img, dtype=np.float32), overlay_alpha)
+            img = Image.fromarray(np.clip(a, 0, 255).astype("uint8"), "L")
         img.save(mask_dir / f"mask_{i + 1:05d}.png")
     return n
 
@@ -487,11 +493,17 @@ async def make_video_cutout_sticker(
     end: float | None = None,
     crop: tuple[int, int, int, int] | None = None,
     shape_mask: Path | None = None,
+    overlay_png: Path | None = None,
     progress_cb: "Callable[[float], None] | None" = None,
 ) -> tuple[bool, str | None]:
     """Encode a VIDEO sticker whose background is removed per-frame → a real
     alpha channel that tracks the moving subject. Optionally intersect a static
     shape mask (cutout ∩ shape). Reuses the VP9-alpha muxer.
+
+    overlay_png: an optional static 512² RGBA overlay (Studio text/emoji/image
+    layers on a transparent canvas) composited onto every colour frame, with its
+    own alpha unioned into the subject mask so it rides on top of the cut-out
+    subject (v2.7-A). None → plain per-frame cutout (unchanged).
 
     Pipeline: ffmpeg → 512² PNG frames @ CUTOUT_FPS → rembg per-frame alpha
     (subsampled + interpolated) → colour y4m + alpha y4m → vpxenc ×2 → mux.
@@ -568,22 +580,45 @@ async def make_video_cutout_sticker(
                 shape_arr = _np.asarray(
                     sm.convert("L").resize((S, S)), dtype=_np.float32)
 
+        # 2b) optional Studio overlay (v2.7-A): its alpha is unioned into every
+        #     subject mask so the overlay stays opaque on top of the cut-out.
+        overlay_alpha = None
+        if overlay_png is not None and Path(overlay_png).exists():
+            import numpy as _np3
+            from PIL import Image as _I3
+            with _I3.open(overlay_png) as ov:
+                overlay_alpha = _np3.asarray(
+                    ov.convert("RGBA").resize((S, S)).split()[-1], dtype=_np3.float32)
+
         # 3) per-frame segmentation (the heavy CPU step) → mask PNGs.
         #    Map its 0..1 internal progress into the 0.10..0.70 band — this is
         #    the long pole, so it carries most of the progress bar.
         _seg_cb = (lambda f: _emit(0.10 + 0.60 * f)) if progress_cb else None
         n = await loop.run_in_executor(None, lambda: _segment_frames_sync(
             frame_paths, maskdir, subsample=CUTOUT_SUBSAMPLE,
-            feather=CUTOUT_FEATHER, shape_arr=shape_arr, progress_cb=_seg_cb))
+            feather=CUTOUT_FEATHER, shape_arr=shape_arr,
+            overlay_alpha=overlay_alpha, progress_cb=_seg_cb))
         if n <= 0:
             return False, "segmentation produced no masks"
         _emit(0.70)
 
-        # 4) colour y4m from the frames.
-        rc, err = await loop.run_in_executor(None, lambda: _run([
-            "ffmpeg", "-y", "-framerate", str(FPS),
-            "-i", str(framedir / "frame_%05d.png"),
-            "-vf", "format=yuv420p", "-f", "yuv4mpegpipe", str(col_y4m)], 90))
+        # 4) colour y4m from the frames (compositing the overlay on top if set).
+        #    A single-frame overlay input is held across the whole sequence by
+        #    overlay's default eof_action=repeat.
+        if overlay_alpha is not None:
+            col_cmd = [
+                "ffmpeg", "-y", "-framerate", str(FPS),
+                "-i", str(framedir / "frame_%05d.png"),
+                "-i", str(overlay_png),
+                "-filter_complex",
+                f"[1:v]scale={S}:{S}[ov];[0:v][ov]overlay=0:0,format=yuv420p[o]",
+                "-map", "[o]", "-f", "yuv4mpegpipe", str(col_y4m)]
+        else:
+            col_cmd = [
+                "ffmpeg", "-y", "-framerate", str(FPS),
+                "-i", str(framedir / "frame_%05d.png"),
+                "-vf", "format=yuv420p", "-f", "yuv4mpegpipe", str(col_y4m)]
+        rc, err = await loop.run_in_executor(None, lambda: _run(col_cmd, 90))
         if rc != 0:
             return False, "colour y4m failed: " + err.decode("utf-8", "replace")[-160:]
         # 5) alpha y4m from the masks (gray luma).
@@ -634,6 +669,104 @@ async def make_video_cutout_sticker(
             _sh.rmtree(workdir, ignore_errors=True)
         except Exception:
             pass
+
+
+async def make_video_overlay_sticker(
+    src: Path,
+    dst: Path,
+    overlay_png: Path,
+    *,
+    start: float = 0.0,
+    end: float | None = None,
+    crop: tuple[int, int, int, int] | None = None,
+    cutout: bool = False,
+    progress_cb: "Callable[[float], None] | None" = None,
+) -> tuple[bool, str | None]:
+    """v2.7-A — composite a static 512² overlay PNG (the Studio's text / emoji /
+    image layers rendered on a transparent canvas) onto EVERY frame of the
+    source video → an *animated* sticker, instead of flattening to one frame.
+
+    cutout=False → opaque video with the overlay burned on top (single ffmpeg
+                   pass; the overlay's transparent areas show the video).
+    cutout=True  → the subject is matted out per-frame (real alpha) and the
+                   overlay rides on top — delegated to make_video_cutout_sticker
+                   with overlay_png set.
+    """
+    def _emit(frac: float) -> None:
+        if progress_cb:
+            try:
+                progress_cb(max(0.0, min(1.0, float(frac))))
+            except Exception:
+                pass
+
+    if not src.exists():
+        return False, f"source not found: {src}"
+    if not Path(overlay_png).exists():
+        return False, "overlay image missing"
+    if not shutil.which("ffmpeg"):
+        return False, "ffmpeg not installed in container"
+
+    if cutout:
+        # Reuse the per-frame alpha pipeline; it composites the overlay onto the
+        # colour frames and unions its alpha into the subject mask.
+        return await make_video_cutout_sticker(
+            src, dst, start=start, end=end, crop=crop,
+            overlay_png=Path(overlay_png), progress_cb=progress_cb)
+
+    duration = STICKER_MAX_DUR_S
+    if end is not None and end > start:
+        duration = min(end - start, STICKER_MAX_DUR_S)
+    if duration <= 0:
+        return False, "trim window has zero duration"
+
+    S = STICKER_FRAME_PX
+    base_vf = _build_filter(crop)            # crop + cover-scale to 512² + fps cap
+    # Scale the overlay to 512² and burn it over every frame. A single-frame
+    # overlay input is held across the whole clip (overlay eof_action=repeat).
+    fc = (f"[0:v]{base_vf}[bg];"
+          f"[1:v]scale={S}:{S}[ov];"
+          f"[bg][ov]overlay=0:0[out]")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    loop = asyncio.get_running_loop()
+    last_size = 0
+    _emit(0.12)
+    for i, bitrate in enumerate(_BITRATE_LADDER):
+        _emit(0.2 + i * 0.18)
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{start:.3f}", "-i", str(src),
+            "-i", str(overlay_png),
+            "-t", f"{duration:.3f}",
+            "-filter_complex", fc,
+            "-map", "[out]",
+            "-c:v", "libvpx-vp9", "-b:v", bitrate, "-crf", "30", "-an",
+            "-pix_fmt", "yuv420p", "-deadline", "good", "-cpu-used", "2",
+            "-row-mt", "1",
+            str(dst),
+        ]
+        try:
+            rc, stderr = await loop.run_in_executor(None, lambda: _run(cmd, 90))
+        except Exception as e:
+            return False, f"ffmpeg crashed: {e!r}"
+        if rc != 0:
+            last_err = stderr.decode("utf-8", errors="replace")[-200:]
+            logger.warning("overlay encode rc=%s b=%s: %s", rc, bitrate, last_err[:160])
+            return False, f"ffmpeg failed: {last_err}"
+        try:
+            last_size = dst.stat().st_size
+        except FileNotFoundError:
+            return False, "ffmpeg ran but produced no output file"
+        if last_size <= STICKER_MAX_BYTES:
+            _emit(1.0)
+            logger.info("overlay sticker ok: %s @ %s → %d bytes",
+                        src.name, bitrate, last_size)
+            return True, None
+        logger.info("overlay too big @ %s: %d > %d, dropping bitrate",
+                    bitrate, last_size, STICKER_MAX_BYTES)
+
+    return False, (f"Output >256KB even at lowest bitrate (last {last_size} bytes). "
+                   "Try a shorter clip or fewer overlays.")
 
 
 # Built-in shape presets. Each is a function (size) -> list of polygon points,

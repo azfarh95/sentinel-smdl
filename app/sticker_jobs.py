@@ -212,10 +212,15 @@ async def _process_job(job: StickerJob) -> None:
             await _update(job.id, status="running", progress=5.0, error=None)
             params = json.loads(job.params_json or "{}")
             first_name = params.pop("_first_name", None)
-            body = _routes.MakeStickerBody(**params)
             setp = _make_progress_setter(job.id, loop)
-            result = await _routes.build_and_publish(
-                job.user_id, first_name, job.draft_id, body, progress=setp)
+            if job.kind == "video_overlay":
+                # v2.7-A — animated Studio overlay composited onto every frame.
+                result = await _routes.build_overlay_and_publish(
+                    job.user_id, first_name, job.draft_id, params, progress=setp)
+            else:
+                body = _routes.MakeStickerBody(**params)
+                result = await _routes.build_and_publish(
+                    job.user_id, first_name, job.draft_id, body, progress=setp)
             await _update(job.id, status="done", progress=100.0,
                           result_json=json.dumps(result), error=None)
             logger.info("sticker job %s done (u=%s d=%s)",

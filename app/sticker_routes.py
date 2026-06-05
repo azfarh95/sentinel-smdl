@@ -596,6 +596,57 @@ async def build_and_publish(user_id: int, first_name: str | None, draft_id: int,
         sticker_format=sticker_format, progress=progress)
 
 
+async def build_overlay_and_publish(user_id: int, first_name: str | None,
+                                    draft_id: int, params: dict, *,
+                                    progress: "Callable[[float], None] | None" = None) -> dict:
+    """v2.7-A — composite the Studio overlay (saved PNG, path in params) onto
+    every frame of the source video → animated webm, then publish. Runs on the
+    background worker (heavy). `params`: overlay_path, emoji, trim_start/end,
+    crop_x/y/w/h, cutout. Cleans up the overlay PNG afterward."""
+    d = await _db.sticker_draft_get(draft_id, user_id)
+    if not d:
+        raise StickerBuildError("draft not found", status=404)
+    src = Path(d["file_path"])
+    if not src.exists():
+        raise StickerBuildError("source file missing on disk", status=410)
+    overlay_png = Path(params.get("overlay_path") or "")
+    if not overlay_png.exists():
+        raise StickerBuildError("overlay image missing on disk", status=410)
+
+    crop = None
+    cx, cy, cw, ch = (params.get("crop_x"), params.get("crop_y"),
+                      params.get("crop_w"), params.get("crop_h"))
+    if None not in (cx, cy, cw, ch):
+        crop = (int(cx), int(cy), int(cw), int(ch))
+
+    await _db.sticker_draft_set_status(draft_id, "processing")
+    dst = OUTPUT_DIR / str(user_id) / f"{draft_id}.webm"
+    if progress:
+        progress(10)
+    try:
+        ok, err = await _sp.make_video_overlay_sticker(
+            src, dst, overlay_png,
+            start=float(params.get("trim_start") or 0.0),
+            end=float(params.get("trim_end") or 3.0),
+            crop=crop, cutout=bool(params.get("cutout")),
+            progress_cb=((lambda f: progress(10.0 + f * 65.0)) if progress else None),
+        )
+    finally:
+        try:
+            overlay_png.unlink(missing_ok=True)
+        except Exception:
+            pass
+    if not ok:
+        await _db.sticker_draft_set_status(draft_id, "failed", err)
+        raise StickerBuildError(err or "overlay encode failed", status=422)
+    if progress:
+        progress(78)
+    return await _publish_sticker(
+        user_id, first_name, draft_id, dst,
+        emoji=params.get("emoji") or "🎬", pack_kind="video",
+        sticker_format="video", progress=progress)
+
+
 @router.post("/api/sticker_drafts/{draft_id}/make")
 async def make_sticker(draft_id: int, body: MakeStickerBody, request: Request):
     """Heavy video encodes are enqueued on the background worker (returns
@@ -782,6 +833,67 @@ async def cutout_frame(draft_id: int, body: CutoutBody, request: Request):
                 pass
     b64 = base64.b64encode(data).decode("ascii")
     return {"ok": True, "png_b64": f"data:image/png;base64,{b64}"}
+
+
+class ComposeVideoBody(BaseModel):
+    # data-URL or raw base64 of the Studio's overlay layers (text/emoji/image)
+    # rendered on a TRANSPARENT 512² canvas — the base video frame is excluded.
+    overlay_b64: str
+    emoji: str = "🎬"
+    trim_start: float = 0.0
+    trim_end:   float = 3.0
+    crop_x: int | None = None
+    crop_y: int | None = None
+    crop_w: int | None = None
+    crop_h: int | None = None
+    # Also matte the subject out per-frame (transparent subject + overlay on top).
+    cutout: bool = False
+
+
+@router.post("/api/sticker_drafts/{draft_id}/compose_video")
+async def compose_video_sticker(draft_id: int, body: ComposeVideoBody, request: Request):
+    """Studio export for a VIDEO draft (v2.7-A). Takes the composited overlay
+    layers (transparent PNG) and enqueues a background job that composites them
+    onto every frame of the source video → an animated webm. Returns {job_id};
+    the editor polls /api/sticker_jobs/{id}. (Static drafts still use /compose.)"""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    first_name = (payload.get("user") or {}).get("first_name")
+
+    d = await _db.sticker_draft_get(draft_id, user_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="draft not found")
+    src = Path(d["file_path"])
+    if not src.exists():
+        raise HTTPException(status_code=410, detail="source file missing on disk")
+
+    import base64
+    raw = body.overlay_b64.split(",", 1)[-1] if body.overlay_b64.startswith("data:") else body.overlay_b64
+    try:
+        png_bytes = base64.b64decode(raw, validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid overlay_b64")
+    if not png_bytes or len(png_bytes) > 8_000_000:
+        raise HTTPException(status_code=400, detail="overlay PNG missing or too large")
+
+    out_dir = OUTPUT_DIR / str(user_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    overlay_png = out_dir / f"{draft_id}_overlay.png"
+    overlay_png.write_bytes(png_bytes)
+
+    params = {
+        "overlay_path": str(overlay_png),
+        "emoji": body.emoji,
+        "trim_start": body.trim_start, "trim_end": body.trim_end,
+        "crop_x": body.crop_x, "crop_y": body.crop_y,
+        "crop_w": body.crop_w, "crop_h": body.crop_h,
+        "cutout": bool(body.cutout),
+        "_first_name": first_name,
+    }
+    job_id = await _sj.enqueue(user_id=user_id, draft_id=draft_id,
+                               kind="video_overlay", params=params)
+    return {"ok": True, "job_id": job_id, "async": True}
 
 
 @router.post("/api/sticker_drafts/{draft_id}/delete")
@@ -2497,7 +2609,11 @@ function setTab(tab) {
               && !(tab === 'cutout' && _editorPackKind === 'video');
   document.body.classList.toggle('studio-active', studio);   // dock → canvas
   const mk = document.getElementById('make-btn');
-  if (mk) mk.textContent = studio ? '📤 Export sticker' : '✨ Make sticker';
+  // Video drafts export an ANIMATED sticker (overlay composited onto every
+  // frame, v2.7-A); static drafts a flat one. Badge the button accordingly.
+  if (mk) mk.textContent = studio
+    ? (_editorPackKind === 'video' ? '🎬 Export animated' : '📤 Export sticker')
+    : '✨ Make sticker';
   if (studio) { try { ensureStudio(); } catch (_) {} }       // build canvas once
   // On the Cutout tab for video, mirror the cutout flag so the main Make
   // button produces the same animated per-frame cutout as the in-panel button.
@@ -3522,32 +3638,48 @@ async function studioExport() {
   const prog = document.getElementById('progress');
   const btn = document.getElementById('make-btn');
   fcanvas.discardActiveObject(); fcanvas.renderAll();
+  const animated = (_editorPackKind === 'video');
+  // For a VIDEO draft, export ONLY the overlay layers on a transparent canvas
+  // (hide the base video frame) so the server composites them onto every frame
+  // → an animated sticker (v2.7-A). Static drafts export the flattened canvas.
+  const base = animated ? fcanvas.getObjects().find(o => o.studioRole === 'base') : null;
+  const baseVis = base ? (base.visible !== false) : false;
   let png;
   try {
+    if (base) { base.visible = false; fcanvas.renderAll(); }
     png = fcanvas.toDataURL({ format: 'png', multiplier: 512 / STUDIO_PX });
   } catch (e) {
+    if (base) { base.visible = baseVis; fcanvas.renderAll(); }
     prog.textContent = '❌ Export blocked (image security): ' + e.message;
     return;
   }
-  const body = { png_b64: png, emoji: chosenEmoji };
-  if (_outline) {
-    body.outline = true;
-    body.outline_color = document.getElementById('studio-outline-color').value;
-    body.outline_width = parseInt(document.getElementById('studio-outline-width').value, 10) || 12;
-  }
-  btn.disabled = true; prog.textContent = 'Encoding sticker… (5–15s)';
+  if (base) { base.visible = baseVis; fcanvas.renderAll(); }
+  btn.disabled = true;
   try {
-    const r = await api(`/api/sticker_drafts/${DRAFT_ID}/compose`, {
-      method: 'POST', body: JSON.stringify(body),
-    });
-    prog.innerHTML = '✅ Added! <a href="#" id="studio-pack-link" style="color:#5ac8fa">Open your pack</a>';
-    const link = document.getElementById('studio-pack-link');
-    link.addEventListener('click', ev => {
-      ev.preventDefault();
-      if (tg && tg.openTelegramLink) tg.openTelegramLink(r.set_url);
-      else window.open(r.set_url, '_blank');
-    });
-    if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+    let result;
+    if (animated) {
+      prog.textContent = 'Compositing overlay onto every frame…';
+      const body = { overlay_b64: png, emoji: chosenEmoji,
+                     trim_start: trimStart, trim_end: trimEnd, cutout: !!cutout };
+      const crop = cropToSourcePixels();
+      if (crop) Object.assign(body, { crop_x: crop.x, crop_y: crop.y, crop_w: crop.w, crop_h: crop.h });
+      const r = await api(`/api/sticker_drafts/${DRAFT_ID}/compose_video`, {
+        method: 'POST', body: JSON.stringify(body),
+      });
+      result = r.job_id ? await pollStickerJob(r.job_id) : r;
+    } else {
+      const body = { png_b64: png, emoji: chosenEmoji };
+      if (_outline) {
+        body.outline = true;
+        body.outline_color = document.getElementById('studio-outline-color').value;
+        body.outline_width = parseInt(document.getElementById('studio-outline-width').value, 10) || 12;
+      }
+      prog.textContent = 'Encoding sticker… (5–15s)';
+      result = await api(`/api/sticker_drafts/${DRAFT_ID}/compose`, {
+        method: 'POST', body: JSON.stringify(body),
+      });
+    }
+    showStickerSuccess(result);
   } catch (e) {
     prog.textContent = '❌ ' + e.message;
   } finally { btn.disabled = false; }

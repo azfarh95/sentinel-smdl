@@ -138,6 +138,12 @@ async def lifespan(app: FastAPI):
         await _iptv_routes.start_scheduler_loop()
     except Exception as _e:
         logger.warning("IPTV scheduled-DVR loop failed to start: %s", _e)
+    # v3.6-D rolling DVR buffer — wipe stale buffer dirs + start the idle GC.
+    try:
+        from . import iptv_dvr as _iptv_dvr
+        _iptv_dvr.start_gc_loop()
+    except Exception as _e:
+        logger.warning("IPTV DVR buffer GC failed to start: %s", _e)
 
     # Bot initialization runs in a background task with exponential backoff
     # so a transient network blip at startup (e.g. PIA VPN not yet up, DNS
@@ -171,6 +177,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # v3.6-D — tear down any running DVR buffers (kill ffmpeg + clean dirs).
+    try:
+        from . import iptv_dvr as _iptv_dvr
+        await _iptv_dvr.shutdown()
+    except Exception:
+        pass
     if init_task is not None:
         init_task.cancel()
     polling_task = state.get("polling_task")
@@ -286,6 +298,8 @@ from fastapi.requests import Request as _EdRequest  # noqa: E402
 _PRIVATE_PATH_PREFIXES = (
     "/api/miniapp/stremio/",     # torrent / Real-Debrid / Stremio pipeline
     "/iptv/hls/",                # same-origin HLS relay (community uses iframe)
+    "/iptv/dvr/",                # v3.6-D rolling DVR buffer (private only)
+    "/api/iptv/dvr/",            # …and its control routes
     "/api/iptv/refresh_country", # iptv-org per-country slices (aggregator)
 )
 

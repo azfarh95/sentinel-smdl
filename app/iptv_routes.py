@@ -59,6 +59,7 @@ from . import edition as _edition
 from . import profile as _profile
 from . import iptv as _iptv
 from . import iptv_dedup as _dedup
+from . import iptv_dvr as _dvr
 from . import miniapp as _mini   # reuse _verify + require_scope
 from . import entitlements as _entitlements
 from . import grant_transport as _grant_transport
@@ -1722,6 +1723,58 @@ async def iptv_for_you(request: Request):
                 if picks:
                     out.append({"title": f"Because you watched {cat}", "channels": picks})
     return {"ok": True, "rows": out}
+
+
+# ── v3.6-D rolling-HLS DVR buffer (pause / rewind live TV) ─────────────────────
+# The /api/iptv/dvr/* control routes are auth-gated; the /iptv/dvr/* media routes
+# are loaded by the player (no custom header) and are private-edition-gated by the
+# middleware prefix (see app/main.py).
+
+@router.post("/api/iptv/dvr/{channel_id}/start")
+async def iptv_dvr_start(channel_id: str, request: Request):
+    """Opt-in: start a rolling buffer so the player can pause/rewind this
+    channel. Returns buffer status incl. the playlist_url to load once ready."""
+    await _verify_iptv(request)
+    try:
+        st = await _dvr.start(channel_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("dvr start failed")
+        raise HTTPException(status_code=500, detail=f"dvr start failed: {e}")
+    return {"ok": True, **st}
+
+
+@router.post("/api/iptv/dvr/{channel_id}/stop")
+async def iptv_dvr_stop(channel_id: str, request: Request):
+    await _verify_iptv(request)
+    await _dvr.stop(channel_id)
+    return {"ok": True}
+
+
+@router.get("/api/iptv/dvr/{channel_id}/status")
+async def iptv_dvr_status(channel_id: str, request: Request):
+    await _verify_iptv(request)
+    return {"ok": True, **_dvr.status(channel_id)}
+
+
+@router.get("/iptv/dvr/{channel_id}/index.m3u8")
+async def iptv_dvr_playlist(channel_id: str):
+    p = _dvr.playlist_path(channel_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="buffer not ready")
+    _dvr.touch(channel_id)
+    return FileResponse(str(p), media_type="application/vnd.apple.mpegurl",
+                        headers={**_HLS_CORS, "Cache-Control": "no-cache, no-store"})
+
+
+@router.get("/iptv/dvr/{channel_id}/{seg_name}")
+async def iptv_dvr_segment(channel_id: str, seg_name: str):
+    p = _dvr.segment_path(channel_id, seg_name)
+    if not p:
+        raise HTTPException(status_code=404, detail="segment not found")
+    _dvr.touch(channel_id)
+    return FileResponse(str(p), media_type="video/mp2t", headers=_HLS_CORS)
 
 
 # ── Scheduled DVR ───────────────────────────────────────────────
@@ -3916,6 +3969,7 @@ _PLAY_HTML = r"""<!doctype html>
     <button class="ghost" id="play-vlc">📤 Open in VLC / external player</button>
     <button class="ghost" id="copy-url">📋 Copy stream URL</button>
     <button class="ghost" id="probe-btn">🩺 Probe stream health</button>
+    <button class="ghost" id="dvr-btn">⏪ Live rewind (DVR)</button>
     <button class="ghost" id="curate-btn" style="display:none">★ Curate this channel</button>
     <button class="warn" id="record-btn">⏺ Record 5 min</button>
     <button class="warn ghost" id="schedule-btn">📅 Schedule record…</button>
@@ -4618,6 +4672,45 @@ async function _playInlineCore(kind, v) {
 }
 
 document.getElementById('play-inline').addEventListener('click', playInline);
+
+// ── v3.6-D: DVR live-rewind — start a server-side rolling buffer, then point
+// the player at it so the native seek bar can scrub back across the window.
+let _dvrOn = false;
+async function toggleDvr() {
+  const btn = document.getElementById('dvr-btn');
+  const v = document.getElementById('inline-video');
+  if (_dvrOn) {
+    try { await api(`/api/iptv/dvr/${encodeURIComponent(CHANNEL_ID)}/stop`, { method: 'POST', body: '{}' }); } catch (e) {}
+    _dvrOn = false;
+    if (btn) btn.textContent = '⏪ Live rewind (DVR)';
+    toast('DVR off — back to live');
+    try { playInline(); } catch (e) {}
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting buffer…'; }
+  try {
+    await api(`/api/iptv/dvr/${encodeURIComponent(CHANNEL_ID)}/start`, { method: 'POST', body: '{}' });
+  } catch (e) {
+    toast('DVR unavailable: ' + e.message, 4000);
+    if (btn) { btn.disabled = false; btn.textContent = '⏪ Live rewind (DVR)'; }
+    return;
+  }
+  let ready = false;
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    let s; try { s = await api(`/api/iptv/dvr/${encodeURIComponent(CHANNEL_ID)}/status`); } catch (e) { continue; }
+    if (s.ready) { ready = true; break; }
+  }
+  if (btn) btn.disabled = false;
+  if (!ready) { toast('Buffer not ready yet — try again in a moment', 4000); if (btn) btn.textContent = '⏪ Live rewind (DVR)'; return; }
+  try { if (_activeHls) { _activeHls.destroy(); _activeHls = null; } } catch (e) {}
+  CHANNEL.url = `/iptv/dvr/${encodeURIComponent(CHANNEL_ID)}/index.m3u8`;
+  await _playInlineCore('hls', v);
+  _dvrOn = true;
+  if (btn) btn.textContent = '⏹ DVR on — back to live';
+  toast('⏪ DVR on — scrub back on the seek bar (≈30 min window)', 5000);
+}
+document.getElementById('dvr-btn')?.addEventListener('click', toggleDvr);
 
 document.getElementById('fullscreen-btn')?.addEventListener('click', () => {
   const stage = document.getElementById('player-stage');

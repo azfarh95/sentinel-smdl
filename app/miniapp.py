@@ -4134,6 +4134,15 @@ button.warn { background: #ff9500; color: #fff; }
       <div id=stickers-pack-grid>
         <div class=empty>Loading…</div>
       </div>
+      <h2 style="margin:16px 4px 8px;font-size:15px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:8px">
+        <span>🔎 Search your library</span>
+        <span style="flex:1"></span>
+        <button class=sec id=stk-trash-toggle onclick="stkLibToggleTrash()" title="Show trashed stickers" style="font-size:11px">🗑 Trash</button>
+      </h2>
+      <input type=text id=stk-search-input placeholder="Find across all packs — emoji or tag…"
+             oninput="stkLibSearchDebounced()"
+             style="width:100%;box-sizing:border-box;padding:8px 11px;border-radius:9px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:13px;margin:0 0 8px">
+      <div id=stk-search-results></div>
     </div>
 
     <div class=stk-sec data-section=add>
@@ -5254,6 +5263,96 @@ function stkSection(sec) {
   document.querySelectorAll('#stk-nav button').forEach(b =>
     b.classList.toggle('on', b.dataset.sec === sec));
   try { localStorage.setItem('smdl_stk_section', sec); } catch (e) {}
+}
+
+// ── v2.7-D — cross-pack library search + tag + trash/restore ────────────────
+let _stkLibShowTrash = false;
+let _stkLibTimer = null;
+function stkLibSearchDebounced() {
+  clearTimeout(_stkLibTimer);
+  _stkLibTimer = setTimeout(stkLibSearch, 250);
+}
+function stkLibToggleTrash() {
+  _stkLibShowTrash = !_stkLibShowTrash;
+  const b = document.getElementById('stk-trash-toggle');
+  if (b) b.classList.toggle('on', _stkLibShowTrash);
+  stkLibSearch();
+}
+async function stkLibSearch() {
+  const inp = document.getElementById('stk-search-input');
+  const box = document.getElementById('stk-search-results');
+  if (!box) return;
+  const q = inp ? inp.value.trim() : '';
+  if (!q && !_stkLibShowTrash) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class=empty>Searching…</div>';
+  let data;
+  try {
+    data = await api('/api/stickers/search?include_deleted=' +
+      (_stkLibShowTrash ? '1' : '0') + '&q=' + encodeURIComponent(q));
+  } catch (e) { box.innerHTML = ''; showErr(e); return; }
+  const rows = (data.stickers || []).filter(s => _stkLibShowTrash ? s.deleted : !s.deleted);
+  if (!rows.length) {
+    box.innerHTML = '<div class=empty>' +
+      (_stkLibShowTrash ? 'Trash is empty.' : 'No matches.') + '</div>';
+    return;
+  }
+  box.innerHTML = '';
+  const grid = document.createElement('div');
+  grid.id = 'stk-search-grid';
+  rows.forEach(s => grid.appendChild(_stkLibCard(s)));
+  box.appendChild(grid);
+}
+function _stkLibCard(s) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  const media = document.createElement(s.sticker_format === 'video' ? 'video' : 'img');
+  if (s.sticker_format === 'video') {
+    media.autoplay = true; media.loop = true; media.muted = true; media.playsInline = true;
+  }
+  media.style.width = '100%';
+  if (s.file_id) {
+    fetch('/api/sticker_pack/sticker_file/' + encodeURIComponent(s.file_id),
+          { headers: { 'X-Init-Data': initData } })
+      .then(r => r.ok ? r.blob() : null)
+      .then(b => { if (b) media.src = URL.createObjectURL(b); })
+      .catch(() => {});
+  }
+  card.appendChild(media);
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.style.cssText = 'font-size:11px;color:var(--muted);margin-top:3px';
+  meta.textContent = (s.emoji || '🎬') + ' · ' + (s.tags || 'no tags');
+  card.appendChild(meta);
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:4px;margin-top:4px;flex-wrap:wrap';
+  if (s.deleted) {
+    const r = document.createElement('button');
+    r.className = 'sec'; r.textContent = '♻ Restore'; r.style.fontSize = '11px';
+    r.onclick = () => stkLibAction(s.id, 'restore'); row.appendChild(r);
+  } else {
+    const t = document.createElement('button');
+    t.className = 'sec'; t.textContent = '🏷 Tag'; t.style.fontSize = '11px';
+    t.onclick = () => stkLibTag(s.id, s.tags || ''); row.appendChild(t);
+    const d = document.createElement('button');
+    d.className = 'sec'; d.textContent = '🗑 Trash'; d.style.fontSize = '11px';
+    d.onclick = () => stkLibAction(s.id, 'trash'); row.appendChild(d);
+  }
+  card.appendChild(row);
+  return card;
+}
+async function stkLibTag(id, cur) {
+  const v = prompt('Tags (space or comma separated):', cur);
+  if (v === null) return;
+  try {
+    await api('/api/stickers/' + id + '/tags', { method: 'POST', body: JSON.stringify({ tags: v }) });
+    showOk('Tagged'); stkLibSearch();
+  } catch (e) { showErr(e); }
+}
+async function stkLibAction(id, action) {
+  try {
+    await api('/api/stickers/' + id + '/' + action, { method: 'POST', body: '{}' });
+    showOk(action === 'trash' ? 'Moved to trash' : 'Restored'); stkLibSearch();
+  } catch (e) { showErr(e); }
 }
 
 // ── Pack picker (multiple named packs; the active one is where new stickers go) ──

@@ -400,7 +400,8 @@ async def _publish_sticker(user_id: int, first_name: str | None, draft_id: int,
             user_id, pack["pack_name"], pack["pack_title"], set_url, kind=pack_kind)
     await _db.sticker_record(
         user_id=user_id, pack_name=pack["pack_name"], source_draft_id=draft_id,
-        emoji=emoji or "🎬", telegram_file_id=file_id, webm_path=str(dst))
+        emoji=emoji or "🎬", telegram_file_id=file_id, webm_path=str(dst),
+        sticker_format=sticker_format)
     # Reset to 'awaiting_edit' so the user can keep making variants from the
     # same draft (different emoji / trim / crop). It auto-purges on its 6h TTL.
     await _db.sticker_draft_set_status(draft_id, "awaiting_edit")
@@ -719,6 +720,140 @@ async def sticker_job_status(job_id: int, request: Request):
         "error": job.error,
         "result": result,
     }
+
+
+# ── v2.7-D library depth: search · tags · trash/restore · use · presets ───────
+
+class _TagsBody(BaseModel):
+    tags: str = ""
+
+
+class _ReorderBody(BaseModel):
+    pack_name: str
+    ordered_ids: list[int] = []
+
+
+class _PresetBody(BaseModel):
+    name: str
+    recipe: dict = {}
+
+
+def _sticker_pub(r: dict) -> dict:
+    return {
+        "id": r["id"], "emoji": r.get("emoji"), "tags": r.get("tags") or "",
+        "pack_name": r.get("pack_name"), "file_id": r.get("telegram_file_id"),
+        "sticker_format": r.get("sticker_format"),
+        "use_count": r.get("use_count") or 0,
+        "deleted": bool(r.get("deleted_at")),
+    }
+
+
+@router.get("/api/stickers/search")
+async def stickers_search(request: Request, q: str = "", include_deleted: bool = False):
+    """Cross-pack search over the user's created stickers (emoji + tags + pack).
+    Empty q → the whole live library, most-used first. (v2.7-D)"""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    rows = await _db.sticker_search(user_id, q, include_deleted=bool(include_deleted))
+    return {"ok": True, "stickers": [_sticker_pub(r) for r in rows], "count": len(rows)}
+
+
+@router.post("/api/stickers/{sticker_id}/tags")
+async def stickers_set_tags(sticker_id: int, body: _TagsBody, request: Request):
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    if not await _db.sticker_set_tags(sticker_id, user_id, body.tags or ""):
+        raise HTTPException(status_code=404, detail="sticker not found")
+    return {"ok": True}
+
+
+@router.post("/api/stickers/{sticker_id}/trash")
+async def stickers_trash(sticker_id: int, request: Request):
+    """Soft-delete (recoverable) — hides from the library without removing the
+    sticker from the Telegram pack. See /restore."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    if not await _db.sticker_set_trashed(sticker_id, user_id, True):
+        raise HTTPException(status_code=404, detail="sticker not found")
+    return {"ok": True}
+
+
+@router.post("/api/stickers/{sticker_id}/restore")
+async def stickers_restore(sticker_id: int, request: Request):
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    if not await _db.sticker_set_trashed(sticker_id, user_id, False):
+        raise HTTPException(status_code=404, detail="sticker not found")
+    return {"ok": True}
+
+
+@router.post("/api/stickers/{sticker_id}/use")
+async def stickers_use(sticker_id: int, request: Request):
+    """Bump a sticker's use_count (drives most-used ranking in search)."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    await _db.sticker_increment_use(sticker_id, user_id)
+    return {"ok": True}
+
+
+@router.post("/api/stickers/reorder")
+async def stickers_reorder(body: _ReorderBody, request: Request):
+    """Persist a new in-pack order (sort_order). Telegram-position sync + a
+    drag UI are a follow-up; this stores the canonical order."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    n = await _db.sticker_reorder(user_id, body.pack_name,
+                                  [int(i) for i in (body.ordered_ids or [])])
+    return {"ok": True, "updated": n}
+
+
+# Editor recipes — save the current setup (shape/crop/emoji/fill/cutout/hq) and
+# re-apply it one-tap to a future draft.
+_PRESET_KEYS = {"shape", "points", "crop_x", "crop_y", "crop_w", "crop_h",
+                "emoji", "fill", "padding", "cutout", "hq", "pack_kind",
+                "trim_start", "trim_end"}
+
+
+@router.get("/api/sticker_presets")
+async def sticker_presets_list(request: Request):
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    out = []
+    for r in await _db.sticker_preset_list(user_id):
+        try:
+            recipe = json.loads(r["recipe_json"])
+        except Exception:
+            recipe = {}
+        out.append({"id": r["id"], "name": r["name"], "recipe": recipe})
+    return {"ok": True, "presets": out}
+
+
+@router.post("/api/sticker_presets")
+async def sticker_presets_create(body: _PresetBody, request: Request):
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    name = (body.name or "").strip()[:60] or "Preset"
+    recipe = {k: v for k, v in (body.recipe or {}).items() if k in _PRESET_KEYS}
+    pid = await _db.sticker_preset_create(user_id, name, json.dumps(recipe))
+    return {"ok": True, "id": pid}
+
+
+@router.post("/api/sticker_presets/{preset_id}/delete")
+async def sticker_presets_delete(preset_id: int, request: Request):
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    if not await _db.sticker_preset_delete(preset_id, user_id):
+        raise HTTPException(status_code=404, detail="preset not found")
+    return {"ok": True}
 
 
 class ComposeBody(BaseModel):

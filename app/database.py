@@ -276,6 +276,47 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS ix_stickers_user
             ON stickers(user_id)
         """)
+        # ── v2.7-D library depth — additive columns on `stickers` + presets ──
+        # tags: comma-separated free-text labels driving cross-pack search.
+        # sticker_format: 'video'|'static' (backfilled by webm_path extension).
+        # use_count / sort_order: ranking + per-pack ordering.
+        # deleted_at: soft-delete (trash → restore) without touching Telegram.
+        async with db.execute("PRAGMA table_info(stickers)") as cur:
+            _scols = {r[1] for r in await cur.fetchall()}
+        for _col, _ddl in (
+            ("tags",           "ALTER TABLE stickers ADD COLUMN tags TEXT"),
+            ("sticker_format", "ALTER TABLE stickers ADD COLUMN sticker_format TEXT"),
+            ("width",          "ALTER TABLE stickers ADD COLUMN width INTEGER"),
+            ("height",         "ALTER TABLE stickers ADD COLUMN height INTEGER"),
+            ("use_count",      "ALTER TABLE stickers ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"),
+            ("sort_order",     "ALTER TABLE stickers ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"),
+            ("deleted_at",     "ALTER TABLE stickers ADD COLUMN deleted_at TEXT"),
+        ):
+            if _col not in _scols:
+                await db.execute(_ddl)
+        # Backfill sticker_format from the stored output path extension.
+        if "sticker_format" not in _scols:
+            await db.execute(
+                "UPDATE stickers SET sticker_format = "
+                "CASE WHEN webm_path LIKE '%.webp' THEN 'static' ELSE 'video' END "
+                "WHERE sticker_format IS NULL")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS ix_stickers_user_live "
+            "ON stickers(user_id, deleted_at)")
+        # Saved editor recipes (crop + shape + emoji + fill + outline + cutout/hq)
+        # → one-tap apply in the editor.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sticker_presets (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                name        TEXT NOT NULL,
+                recipe_json TEXT NOT NULL,
+                created_at  TEXT NOT NULL
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS ix_sticker_presets_user "
+            "ON sticker_presets(user_id)")
         # ── License keys ─────────────────────────────────────────────────────
         # The operator (this private instance) is the issuing authority for
         # license keys that gate the distributed Community / Family APKs. The
@@ -1459,16 +1500,24 @@ async def sticker_pack_create(user_id: int, pack_name: str,
 
 async def sticker_record(user_id: int, pack_name: str, source_draft_id: int | None,
                           emoji: str, telegram_file_id: str | None,
-                          webm_path: str | None) -> int:
+                          webm_path: str | None,
+                          sticker_format: str | None = None) -> int:
     now = datetime.now(timezone.utc).isoformat()
+    fmt = sticker_format or ("static" if (webm_path or "").endswith(".webp") else "video")
     async with aiosqlite.connect(DB_PATH) as db:
+        # Append to the end of the pack's current order (v2.7-D).
+        async with db.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM stickers "
+            "WHERE user_id = ? AND pack_name = ?", (int(user_id), pack_name),
+        ) as c:
+            sort_order = (await c.fetchone())[0]
         cur = await db.execute("""
             INSERT INTO stickers
                 (user_id, pack_name, source_draft_id, emoji, telegram_file_id,
-                 webm_path, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 webm_path, created_at, sticker_format, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (int(user_id), pack_name, source_draft_id, emoji,
-              telegram_file_id, webm_path, now))
+              telegram_file_id, webm_path, now, fmt, sort_order))
         await db.commit()
         return cur.lastrowid or 0
 
@@ -1484,6 +1533,136 @@ async def sticker_list_for_user(user_id: int) -> list[dict]:
             async for row in cur:
                 out.append(dict(row))
     return out
+
+
+# ── v2.7-D sticker library: search · tags · trash/restore · use · presets ─────
+
+def _norm_tags(raw: str | None) -> str:
+    """Normalize free-text tags to a clean, de-duped, lowercase CSV."""
+    if not raw:
+        return ""
+    parts = [t.strip().lower() for t in str(raw).replace(",", " ").split()]
+    seen: list[str] = []
+    for t in parts:
+        if t and t not in seen:
+            seen.append(t)
+    return ",".join(seen[:24])   # cap to keep it sane
+
+
+async def sticker_get(sticker_id: int, user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM stickers WHERE id = ? AND user_id = ?",
+            (int(sticker_id), int(user_id)),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def sticker_search(user_id: int, q: str = "", *,
+                         include_deleted: bool = False,
+                         limit: int = 120) -> list[dict]:
+    """Cross-pack search over the user's created stickers by emoji + tags +
+    pack name. Empty q → the whole (live) library, most-used then newest."""
+    where = ["user_id = ?"]
+    params: list = [int(user_id)]
+    if not include_deleted:
+        where.append("deleted_at IS NULL")
+    q = (q or "").strip().lower()
+    if q:
+        like = f"%{q}%"
+        where.append("(LOWER(emoji) LIKE ? OR LOWER(COALESCE(tags,'')) LIKE ? "
+                     "OR LOWER(pack_name) LIKE ?)")
+        params += [like, like, like]
+    out: list[dict] = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT * FROM stickers WHERE {' AND '.join(where)} "
+            f"ORDER BY use_count DESC, created_at DESC LIMIT ?",
+            params + [int(limit)],
+        ) as cur:
+            async for row in cur:
+                out.append(dict(row))
+    return out
+
+
+async def sticker_set_tags(sticker_id: int, user_id: int, tags: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE stickers SET tags = ? WHERE id = ? AND user_id = ?",
+            (_norm_tags(tags), int(sticker_id), int(user_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def sticker_set_trashed(sticker_id: int, user_id: int, trashed: bool) -> bool:
+    """Soft-delete (trash) or restore — flips deleted_at without touching the
+    Telegram pack. Distinct from hard 'remove from pack'."""
+    val = datetime.now(timezone.utc).isoformat() if trashed else None
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE stickers SET deleted_at = ? WHERE id = ? AND user_id = ?",
+            (val, int(sticker_id), int(user_id)),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def sticker_increment_use(sticker_id: int, user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE stickers SET use_count = use_count + 1 "
+            "WHERE id = ? AND user_id = ?", (int(sticker_id), int(user_id)))
+        await db.commit()
+
+
+async def sticker_reorder(user_id: int, pack_name: str, ordered_ids: list[int]) -> int:
+    """Persist a new in-pack order (sort_order = position). Returns rows set."""
+    n = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        for pos, sid in enumerate(ordered_ids):
+            cur = await db.execute(
+                "UPDATE stickers SET sort_order = ? "
+                "WHERE id = ? AND user_id = ? AND pack_name = ?",
+                (pos, int(sid), int(user_id), pack_name))
+            n += cur.rowcount
+        await db.commit()
+    return n
+
+
+async def sticker_preset_create(user_id: int, name: str, recipe_json: str) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO sticker_presets (user_id, name, recipe_json, created_at) "
+            "VALUES (?, ?, ?, ?)", (int(user_id), name, recipe_json, now))
+        await db.commit()
+        return cur.lastrowid or 0
+
+
+async def sticker_preset_list(user_id: int) -> list[dict]:
+    out: list[dict] = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM sticker_presets WHERE user_id = ? ORDER BY created_at DESC",
+            (int(user_id),),
+        ) as cur:
+            async for row in cur:
+                out.append(dict(row))
+    return out
+
+
+async def sticker_preset_delete(preset_id: int, user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM sticker_presets WHERE id = ? AND user_id = ?",
+            (int(preset_id), int(user_id)))
+        await db.commit()
+        return cur.rowcount > 0
 
 
 # ── License keys ─────────────────────────────────────────────────────────────

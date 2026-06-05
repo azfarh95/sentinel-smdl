@@ -2412,6 +2412,17 @@ _BROWSE_HTML = r"""<!doctype html>
   <!-- Genre strip: one-tap browse by category (sets state.category) -->
   <div class="genre-strip" id="genre-strip"></div>
 
+  <!-- v3.6-A: cross-channel EPG "what's on" search → remind / record -->
+  <div id="epg-search" style="margin:10px 0">
+    <div style="display:flex;gap:6px;align-items:center">
+      <input type="text" id="epg-q" placeholder="🔎 What's on — search programmes (next 24h)…"
+             onkeydown="if(event.key==='Enter')epgSearch()"
+             style="flex:1;padding:8px 11px;border-radius:9px;border:1px solid var(--line,#333);background:var(--card,#1a1a1e);color:inherit;font-size:13px">
+      <button onclick="epgSearch()" style="background:var(--accent,#5ac8fa);border:0;color:#fff;border-radius:9px;padding:8px 13px;font-size:13px;cursor:pointer">Search</button>
+    </div>
+    <div id="epg-results" style="margin-top:8px"></div>
+  </div>
+
   <!-- "Last watched" pinned row, only rendered when state.tab==='all' -->
   <section class="recent-row" id="recent-row" style="display:none">
     <div class="section-h" style="margin-top:14px">Last watched</div>
@@ -2608,6 +2619,62 @@ function toast(msg, ms=2000) {
   t.textContent = msg;
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), ms);
+}
+
+// ── v3.6-A: actionable EPG — what's-on search + remind/record ──────────────
+let _epgResults = [];
+function _epgFmtTime(iso) {
+  try { return new Date(String(iso).replace(' ', 'T'))
+    .toLocaleString([], {weekday:'short', hour:'2-digit', minute:'2-digit'}); }
+  catch (e) { return iso; }
+}
+async function epgSearch() {
+  const q = (document.getElementById('epg-q').value || '').trim();
+  const box = document.getElementById('epg-results');
+  box.innerHTML = '<div class="loading">Searching…</div>';
+  let data;
+  try { data = await api('/api/iptv/epg/search?hours=24&q=' + encodeURIComponent(q)); }
+  catch (e) { box.innerHTML = '<div class="empty">' + escapeHtml(e.message) + '</div>'; return; }
+  _epgResults = (data.programmes || []).slice(0, 40);
+  if (!_epgResults.length) {
+    box.innerHTML = '<div class="empty">Nothing matching in the next 24h.</div>';
+    return;
+  }
+  const btn = (label, fn, i) => '<button onclick="' + fn + '(' + i + ')" '
+    + 'style="background:var(--card,#26262b);border:1px solid var(--line,#3a3a40);'
+    + 'color:inherit;border-radius:7px;padding:5px 9px;font-size:13px;cursor:pointer">'
+    + label + '</button>';
+  box.innerHTML = _epgResults.map((p, i) => {
+    const chan = escapeHtml(p.channel_name || p.channel_id || '?');
+    const acts = p.channel_id
+      ? '<div style="display:flex;gap:5px">' + btn('🔔', 'epgRemind', i) + btn('⏺', 'epgRecord', i) + '</div>'
+      : '<span style="font-size:11px;color:var(--muted,#999)">no channel</span>';
+    return '<div style="display:flex;gap:8px;align-items:center;padding:7px 4px;'
+      + 'border-bottom:1px solid var(--line,#2a2a2e)">'
+      + '<div style="flex:1;min-width:0">'
+      + '<div style="font-size:13px;font-weight:600;overflow:hidden;'
+      + 'text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(p.title || 'Programme') + '</div>'
+      + '<div style="font-size:11px;color:var(--muted,#999)">' + _epgFmtTime(p.start_utc)
+      + ' · ' + chan + (p.category ? ' · ' + escapeHtml(p.category) : '') + '</div>'
+      + '</div>' + acts + '</div>';
+  }).join('');
+}
+async function epgRemind(i) {
+  const p = _epgResults[i]; if (!p) return;
+  try {
+    await api('/api/iptv/reminders', { method: 'POST', body: JSON.stringify({
+      channel_id: p.channel_id, channel_name: p.channel_name,
+      programme: p.title, start_at: p.start_utc, lead_min: 5 }) });
+    toast('🔔 Reminder set');
+  } catch (e) { toast('Failed: ' + e.message, 3000); }
+}
+async function epgRecord(i) {
+  const p = _epgResults[i]; if (!p) return;
+  try {
+    const r = await api('/api/iptv/epg/record_programme', { method: 'POST',
+      body: JSON.stringify({ channel_id: p.channel_id, start_utc: p.start_utc }) });
+    toast('⏺ Recording scheduled (' + (r.duration_min || '?') + ' min)');
+  } catch (e) { toast('Failed: ' + e.message, 3000); }
 }
 
 function showLogin() {
@@ -2867,6 +2934,9 @@ async function loadChannels() {
     // resolves; on a re-render we reuse the cached status so it survives.
     const lb = liveBadgeHtml(ch.id);
     if (lb) badges.push(lb);
+    // v3.6-B: dim channels with no currently-alive source (zero_alive from the
+    // grid endpoint) so a dead channel reads as degraded, not healthy.
+    if ((ch.zero_alive || (aliveN === 0 && srcN > 0))) card.style.opacity = '0.62';
     card.innerHTML = `
       <button class="star-btn ${fav ? 'on' : ''}" aria-label="favorite">${fav ? '★' : '☆'}</button>
       <div class="logo-wrap skel">${logoHtml}</div>

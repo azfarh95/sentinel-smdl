@@ -312,6 +312,32 @@ async def init_iptv_schema() -> None:
             CREATE INDEX IF NOT EXISTS idx_iptv_reminders_pending
                 ON iptv_reminders(status, start_at)
         """)
+        # v3.6-A series-link — "record every episode of X". The scheduled-DVR
+        # tick scans upcoming EPG for title matches on the channel and
+        # auto-creates iptv_scheduled rows (deduped by channel+start).
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS iptv_series_rules (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id   TEXT NOT NULL,
+                channel_name TEXT,
+                title_match  TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'active',
+                padding_pre  INTEGER NOT NULL DEFAULT 1,
+                padding_post INTEGER NOT NULL DEFAULT 2,
+                created_at   TEXT NOT NULL,
+                last_scan_at TEXT
+            )
+        """)
+        # v3.6-C personal TV — server-side favorites (so they sync across the
+        # web / TWA surfaces, not just localStorage).
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS iptv_favorites (
+                channel_id   TEXT PRIMARY KEY,
+                channel_name TEXT,
+                sort_order   INTEGER NOT NULL DEFAULT 0,
+                created_at   TEXT NOT NULL
+            )
+        """)
         await conn.commit()
     logger.info("IPTV schema ready at %s", db.DB_PATH)
 

@@ -1183,6 +1183,62 @@ async def iptv_record_programme(body: RecordProgrammeBody, request: Request):
     return {"ok": True, "scheduled_id": sid, "duration_min": dur, "start_at": start_at}
 
 
+class SeriesRuleBody(BaseModel):
+    channel_id:   str
+    title:        str
+    channel_name: str | None = None
+
+
+@router.post("/api/iptv/series_rules")
+async def iptv_series_rule_create(body: SeriesRuleBody, request: Request):
+    """Series-link: record every upcoming episode whose EPG title matches on the
+    channel. Scans immediately so episodes appear scheduled right away."""
+    await _verify_iptv(request)
+    await _ensure_scheduled_table()
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="title required")
+    now = _iptv._iso_now()
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        cur = await conn.execute(
+            "INSERT INTO iptv_series_rules (channel_id, channel_name, title_match, "
+            "created_at) VALUES (?,?,?,?)",
+            (body.channel_id, body.channel_name, title, now))
+        await conn.commit()
+        rid = cur.lastrowid
+    try:
+        from datetime import datetime, timezone
+        await _scan_series_rules(datetime.now(timezone.utc))
+    except Exception:
+        logger.exception("initial series scan failed")
+    return {"ok": True, "id": rid}
+
+
+@router.get("/api/iptv/series_rules")
+async def iptv_series_rules_list(request: Request):
+    await _verify_iptv(request)
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        rows = await (await conn.execute(
+            "SELECT * FROM iptv_series_rules WHERE status='active' "
+            "ORDER BY created_at DESC")).fetchall()
+    return {"ok": True, "rules": [dict(r) for r in rows]}
+
+
+@router.post("/api/iptv/series_rules/{rule_id}/delete")
+async def iptv_series_rule_delete(rule_id: int, request: Request):
+    """Cancel a series rule (stops auto-scheduling; existing scheduled rows
+    stay)."""
+    await _verify_iptv(request)
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        cur = await conn.execute(
+            "UPDATE iptv_series_rules SET status='cancelled' WHERE id=?", (rule_id,))
+        await conn.commit()
+    if not cur.rowcount:
+        raise HTTPException(status_code=404, detail="rule not found")
+    return {"ok": True}
+
+
 @router.post("/api/iptv/channels/{channel_id}/probe")
 async def iptv_probe(channel_id: str, request: Request):
     await _verify_iptv(request)
@@ -1556,6 +1612,118 @@ async def iptv_last_watched(request: Request, limit: int = 8):
     return {"items": [dict(r) for r in rows], "count": len(rows)}
 
 
+# ── v3.6-C personal TV: server-side favorites + For-You ───────────────────────
+
+class FavoriteBody(BaseModel):
+    channel_id:   str
+    channel_name: str | None = None
+    on:           bool = True
+
+
+@router.get("/api/iptv/favorites")
+async def iptv_favorites_list(request: Request):
+    await _verify_iptv(request)
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        rows = await (await conn.execute(
+            "SELECT * FROM iptv_favorites ORDER BY sort_order ASC, created_at ASC")).fetchall()
+    return {"ok": True, "favorites": [dict(r) for r in rows]}
+
+
+@router.post("/api/iptv/favorites")
+async def iptv_favorite_set(body: FavoriteBody, request: Request):
+    """Add/remove a favorite server-side so it syncs across web / TWA."""
+    await _verify_iptv(request)
+    now = _iptv._iso_now()
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        if body.on:
+            so = (await (await conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM iptv_favorites")).fetchone())[0]
+            await conn.execute(
+                "INSERT INTO iptv_favorites (channel_id, channel_name, sort_order, "
+                "created_at) VALUES (?,?,?,?) ON CONFLICT(channel_id) DO UPDATE SET "
+                "channel_name=COALESCE(excluded.channel_name, iptv_favorites.channel_name)",
+                (body.channel_id, body.channel_name, so, now))
+        else:
+            await conn.execute("DELETE FROM iptv_favorites WHERE channel_id=?",
+                               (body.channel_id,))
+        await conn.commit()
+    return {"ok": True}
+
+
+class FavReorderBody(BaseModel):
+    ordered_ids: list[str] = []
+
+
+@router.post("/api/iptv/favorites/reorder")
+async def iptv_favorites_reorder(body: FavReorderBody, request: Request):
+    await _verify_iptv(request)
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        for pos, cid in enumerate(body.ordered_ids or []):
+            await conn.execute(
+                "UPDATE iptv_favorites SET sort_order=? WHERE channel_id=?", (pos, cid))
+        await conn.commit()
+    return {"ok": True}
+
+
+@router.get("/api/iptv/for_you")
+async def iptv_for_you(request: Request):
+    """Personalized rows from watch history: 'More <country> TV' + a category
+    row, suggesting alive channels the user hasn't watched recently. Empty until
+    there's some play history."""
+    await _verify_iptv(request)
+    await _ensure_play_history_table()
+    out: list[dict] = []
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        recent = [r[0] for r in await (await conn.execute(
+            "SELECT DISTINCT channel_id FROM iptv_play_history "
+            "ORDER BY played_at DESC LIMIT 40")).fetchall()]
+        if not recent:
+            return {"ok": True, "rows": []}
+        recent_set = set(recent)
+
+        def _pick(rows):
+            return [{"id": x["id"], "name": x["name"], "country": x["country"]}
+                    for x in rows if x["id"] not in recent_set][:10]
+
+        countries = await (await conn.execute(
+            "SELECT COALESCE(lc.country, ic.country) AS country, COUNT(*) AS n "
+            "FROM iptv_play_history ph "
+            "LEFT JOIN logical_channels lc ON lc.id=ph.channel_id "
+            "LEFT JOIN iptv_channels ic ON ic.id=ph.channel_id "
+            "GROUP BY COALESCE(lc.country, ic.country) "
+            "HAVING COALESCE(lc.country, ic.country) IS NOT NULL "
+            "   AND COALESCE(lc.country, ic.country) != '' "
+            "ORDER BY n DESC LIMIT 2")).fetchall()
+        for c in countries:
+            chans = await (await conn.execute(
+                "SELECT id, name, country FROM v_channels_with_status "
+                "WHERE country = ? AND alive_count_srcs > 0 "
+                "ORDER BY is_curated DESC, name ASC LIMIT 20", (c["country"],))).fetchall()
+            picks = _pick(chans)
+            if picks:
+                out.append({"title": f"More {c['country']} TV", "channels": picks})
+
+        catrow = await (await conn.execute(
+            "SELECT lc.categories AS cats FROM iptv_play_history ph "
+            "JOIN logical_channels lc ON lc.id=ph.channel_id "
+            "WHERE lc.categories IS NOT NULL AND lc.categories != '' "
+            "GROUP BY lc.id ORDER BY MAX(ph.played_at) DESC LIMIT 1")).fetchone()
+        if catrow and catrow["cats"]:
+            cat = (catrow["cats"].split(",")[0] or "").strip()
+            if cat:
+                chans = await (await conn.execute(
+                    "SELECT id, name, country FROM v_channels_with_status "
+                    "WHERE alive_count_srcs > 0 AND LOWER(categories) LIKE ? "
+                    "ORDER BY is_curated DESC, name ASC LIMIT 20",
+                    (f"%{cat.lower()}%",))).fetchall()
+                picks = _pick(chans)
+                if picks:
+                    out.append({"title": f"Because you watched {cat}", "channels": picks})
+    return {"ok": True, "rows": out}
+
+
 # ── Scheduled DVR ───────────────────────────────────────────────
 
 
@@ -1717,11 +1885,16 @@ async def _scheduler_tick_once():
             )
             await conn.commit()
 
-    # v3.6-A: the same tick fires due programme reminders (Telegram push).
+    # v3.6-A: the same tick fires due programme reminders (Telegram push) and
+    # auto-schedules upcoming episodes for any series-link rule.
     try:
         await _fire_due_reminders(now_dt)
     except Exception:
         logger.exception("reminder firing failed")
+    try:
+        await _scan_series_rules(now_dt)
+    except Exception:
+        logger.exception("series scan failed")
 
 
 async def _push_reminder(r) -> bool:
@@ -1776,6 +1949,54 @@ async def _fire_due_reminders(now_dt):
             continue
         await _push_reminder(r)
         await _mark_reminder(r["id"], "notified", now_s)
+
+
+async def _scan_series_rules(now_dt):
+    """For each active series-link rule, auto-schedule upcoming EPG airings whose
+    title matches on the channel, deduped against existing iptv_scheduled rows."""
+    from datetime import datetime, timezone
+    now_iso = now_dt.isoformat()
+    horizon_iso = datetime.fromtimestamp(
+        now_dt.timestamp() + 7 * 86400, tz=timezone.utc).isoformat()
+    now_s = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        rules = await (await conn.execute(
+            "SELECT * FROM iptv_series_rules WHERE status='active'")).fetchall()
+    for rule in rules:
+        ch_id = rule["channel_id"]
+        tvg = ch_id.split(":", 1)[-1] if ":" in ch_id else ch_id
+        like = f"%{(rule['title_match'] or '').strip().lower()}%"
+        async with aiosqlite.connect(_db.DB_PATH) as conn:
+            conn.row_factory = aiosqlite.Row
+            progs = await (await conn.execute(
+                "SELECT start_utc, end_utc, title FROM iptv_programmes "
+                "WHERE (tvg_id = ? OR tvg_id = ?) AND start_utc >= ? AND start_utc <= ? "
+                "AND LOWER(title) LIKE ? ORDER BY start_utc ASC LIMIT 40",
+                (tvg, ch_id, now_iso, horizon_iso, like))).fetchall()
+            for p in progs:
+                try:
+                    s = _parse_iso_utc(p["start_utc"])
+                    e = _parse_iso_utc(p["end_utc"])
+                    dur = max(1, int((e.timestamp() - s.timestamp()) / 60))
+                    start_at = s.strftime("%Y-%m-%dT%H:%M:%SZ")
+                except Exception:
+                    continue
+                exists = await (await conn.execute(
+                    "SELECT 1 FROM iptv_scheduled WHERE channel_id=? AND start_at=?",
+                    (ch_id, start_at))).fetchone()
+                if exists:
+                    continue
+                await conn.execute(
+                    "INSERT INTO iptv_scheduled (channel_id, start_at, duration_min, "
+                    "padding_pre, padding_post, programme, created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (ch_id, start_at, dur, rule["padding_pre"] or 0,
+                     rule["padding_post"] or 0, p["title"], now_s))
+            await conn.execute(
+                "UPDATE iptv_series_rules SET last_scan_at=? WHERE id=?",
+                (now_s, rule["id"]))
+            await conn.commit()
 
 
 async def _scheduler_loop():
@@ -2429,6 +2650,9 @@ _BROWSE_HTML = r"""<!doctype html>
     <div class="recent-grid" id="recent-grid"></div>
   </section>
 
+  <!-- v3.6-C: For-You — personalized rows from watch history -->
+  <section id="foryou-row" style="display:none"></section>
+
   <div class="section-h result-h" id="result-h">Channels</div>
   <div class="grid" id="grid"><div class="loading">Loading…</div></div>
 
@@ -2530,9 +2754,55 @@ function _saveFavorites() {
 }
 function isFavorite(cid) { return _favorites.has(cid); }
 function toggleFavorite(cid) {
-  if (_favorites.has(cid)) _favorites.delete(cid);
-  else _favorites.add(cid);
+  const on = !_favorites.has(cid);
+  if (on) _favorites.add(cid); else _favorites.delete(cid);
   _saveFavorites();
+  // v3.6-C: mirror to the server so favorites follow you across surfaces.
+  try { api('/api/iptv/favorites', {method:'POST', body: JSON.stringify({channel_id: cid, on: on})}).catch(function(){}); } catch (e) {}
+}
+// v3.6-C: pull server favorites into the local set (cross-device), and one-time
+// migrate localStorage-only favorites up to the server.
+async function _syncFavorites() {
+  try {
+    const r = await api('/api/iptv/favorites');
+    let changed = false;
+    (r.favorites || []).forEach(function(f) {
+      if (f.channel_id && !_favorites.has(f.channel_id)) { _favorites.add(f.channel_id); changed = true; }
+    });
+    if (changed) _saveFavorites();
+  } catch (e) {}
+  try {
+    if (!localStorage.getItem('smdl_iptv_fav_migrated')) {
+      _favorites.forEach(function(cid) {
+        api('/api/iptv/favorites', {method:'POST', body: JSON.stringify({channel_id: cid, on: true})}).catch(function(){});
+      });
+      localStorage.setItem('smdl_iptv_fav_migrated', '1');
+    }
+  } catch (e) {}
+}
+_syncFavorites();
+// v3.6-C: For-You — personalized rows from watch history (country + category).
+async function loadForYou() {
+  const host = document.getElementById('foryou-row');
+  if (!host) return;
+  if (state.tab !== 'all') { host.style.display = 'none'; return; }
+  let data;
+  try { data = await api('/api/iptv/for_you'); } catch (e) { host.style.display = 'none'; return; }
+  const rows = data.rows || [];
+  if (!rows.length) { host.style.display = 'none'; return; }
+  host.innerHTML = rows.map(function(row) {
+    const cards = (row.channels || []).map(function(ch) {
+      return `<a href="/iptv/play/${encodeURIComponent(ch.id)}" style="flex:0 0 auto;width:94px;text-decoration:none;color:inherit">
+        <div style="width:94px;height:58px;border-radius:8px;background:var(--card,#1c1c20);display:flex;align-items:center;justify-content:center;overflow:hidden">
+          <img src="/iptv/logo/${encodeURIComponent(ch.id)}" alt="" loading="lazy" style="max-width:82%;max-height:82%" onerror="this.style.visibility='hidden'">
+        </div>
+        <div style="font-size:11px;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(ch.name || '')}</div>
+      </a>`;
+    }).join('');
+    return `<div style="margin:14px 0 2px"><div class="section-h" style="margin-bottom:6px">${escapeHtml(row.title)}</div>
+      <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px">${cards}</div></div>`;
+  }).join('');
+  host.style.display = '';
 }
 // Hydrate from localStorage so filters survive across page reloads
 // (e.g. tap a channel → land on /iptv/play/... → hit Back → drawer
@@ -2647,7 +2917,8 @@ async function epgSearch() {
   box.innerHTML = _epgResults.map((p, i) => {
     const chan = escapeHtml(p.channel_name || p.channel_id || '?');
     const acts = p.channel_id
-      ? '<div style="display:flex;gap:5px">' + btn('🔔', 'epgRemind', i) + btn('⏺', 'epgRecord', i) + '</div>'
+      ? '<div style="display:flex;gap:5px">' + btn('🔔', 'epgRemind', i)
+        + btn('⏺', 'epgRecord', i) + btn('📺', 'epgSeries', i) + '</div>'
       : '<span style="font-size:11px;color:var(--muted,#999)">no channel</span>';
     return '<div style="display:flex;gap:8px;align-items:center;padding:7px 4px;'
       + 'border-bottom:1px solid var(--line,#2a2a2e)">'
@@ -2674,6 +2945,14 @@ async function epgRecord(i) {
     const r = await api('/api/iptv/epg/record_programme', { method: 'POST',
       body: JSON.stringify({ channel_id: p.channel_id, start_utc: p.start_utc }) });
     toast('⏺ Recording scheduled (' + (r.duration_min || '?') + ' min)');
+  } catch (e) { toast('Failed: ' + e.message, 3000); }
+}
+async function epgSeries(i) {
+  const p = _epgResults[i]; if (!p) return;
+  try {
+    await api('/api/iptv/series_rules', { method: 'POST', body: JSON.stringify({
+      channel_id: p.channel_id, channel_name: p.channel_name, title: p.title }) });
+    toast('📺 Series-link set — recording every episode');
   } catch (e) { toast('Failed: ' + e.message, 3000); }
 }
 
@@ -2870,6 +3149,7 @@ async function loadChannels() {
   // if either fails.
   loadNowPlaying();
   loadLastWatched();
+  loadForYou();
   loadLiveStatus();
   // Alive-only filter happens client-side — the v2 endpoint doesn't
   // have a status= param (logical channels don't have a status — only

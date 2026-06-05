@@ -133,9 +133,9 @@ Shipped B → A → C → D, each deployed + verified in-container.
 - Commits `d7bf729` (B), `fa82079` (A), `b38270f` (C), `d2417a1` (D). Branch
   `feat/trakt-sync`. Spec: [smdl-stickers-v27](https://docs.az-sentinel.xyz/planning/smdl-stickers-v27/).
 
-### v3.6 · Live TV depth — self-healing · actionable EPG · personal TV (2026-06-05)
+### v3.6 · Live TV depth — self-healing · actionable EPG · personal TV · DVR (2026-06-05)
 Took Live TV from "big catalogue that mostly plays" to "TV that works and knows
-me". Shipped **B → A → C**; **D parked** (see below). Each deployed + verified.
+me". Shipped **B → A → C → D**. Each deployed + verified.
 
 - **B · Self-healing playback** — reliability-ranked source pick (alive-first +
   reliability fraction + recency, *not* priority-first, so a dead high-priority
@@ -152,10 +152,14 @@ me". Shipped **B → A → C**; **D parked** (see below). Each deployed + verifi
   localStorage mirrors + one-time migrates up); continue-watching already
   existed; `/api/iptv/for_you` renders "More <country> TV" + a category row from
   watch history.
-- **D · Catch-up / time-shift** — 🅿️ **parked** (heaviest: storage + ffmpeg
-  segment-ring). Design captured in the [media runbook](https://docs.az-sentinel.xyz/runbooks/media/#parked-v36-d-live-tv-catch-up-time-shift).
+- **D · Catch-up / time-shift** — **pause/rewind live TV** via a per-channel
+  ffmpeg **rolling-HLS DVR buffer** (`app/iptv_dvr.py`, ~30-min window,
+  `delete_segments` GC, `MAX_DVR_BUFFERS` cap + LRU + idle GC, opt-in,
+  private-gated). "⏪ Live rewind" on the play page points hls.js at the buffer
+  so the seek bar scrubs back. *Deferred:* provider catchup-source (path 1) +
+  restart-snapped-to-EPG. See the [media runbook](https://docs.az-sentinel.xyz/runbooks/media/#v36-d-live-tv-catch-up-time-shift-dvr-buffer-shipped).
 - Commits `9772c43`+`e30ac55` (B), `f55f27d`+`e084db1` (A + UI), `60f44ce`
-  (A series-link + C). Branch `feat/trakt-sync`. Spec:
+  (A series-link + C), `552531d` (D DVR buffer). Branch `feat/trakt-sync`. Spec:
   [smdl-livetv-v36](https://docs.az-sentinel.xyz/planning/smdl-livetv-v36/).
 
 ### v3.0 · IPTV browser (early May 2026 — late May 2026)

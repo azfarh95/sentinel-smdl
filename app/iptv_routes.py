@@ -852,20 +852,66 @@ async def _hls_youtube_source_url(channel_id: str) -> str | None:
     return row["url"] if row else None
 
 
+async def _hls_youtube_sources(channel_id: str) -> list[dict]:
+    """All youtube-live source rows for the channel (accepts a source-row id or
+    a logical id), reliability-ranked (v3.6-B) so the relay can fail over across
+    them. Returns [{id, url}] — the head is the healthiest source."""
+    out: list[dict] = []
+    ch = await _iptv.get_channel(channel_id)
+    cid = channel_id
+    if ch and ch.url and ch.source == "youtube-live":
+        out.append({"id": ch.id, "url": ch.url})
+        cid = ch.channel_id or channel_id
+    if cid:
+        async with aiosqlite.connect(_db.DB_PATH) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                "SELECT id, url FROM iptv_channels "
+                " WHERE channel_id = ? AND source = 'youtube-live' "
+                "   AND url IS NOT NULL AND url != ''"
+                + _dedup._RANK_ORDER,
+                (cid, _dedup.PRUNE_STREAK),
+            )
+            for r in await cur.fetchall():
+                if not any(o["id"] == r["id"] for o in out):
+                    out.append({"id": r["id"], "url": r["url"]})
+    return out
+
+
 @router.get("/iptv/hls/{channel_id}/index.m3u8")
 async def iptv_hls_index(channel_id: str, request: Request):
-    """Entry point the in-app player loads for a youtube-live channel:
-    resolve the current googlevideo manifest server-side and relay it."""
-    page_url = await _hls_youtube_source_url(channel_id)
-    if not page_url:
+    """Entry point the in-app player loads for a youtube-live channel: resolve
+    the current googlevideo manifest server-side and relay it. v3.6-B: if a
+    source's live URL won't resolve, transparently fail over to the next-best
+    youtube-live source for the channel, demoting (fail_streak++ → dead) each
+    one that fails, before giving up."""
+    cands = await _hls_youtube_sources(channel_id)
+    if not cands:
         raise HTTPException(status_code=404, detail="channel not found")
     from . import iptv_youtube
-    try:
-        target = await iptv_youtube.resolve_live_url(page_url)
-    except Exception as exc:
-        logger.warning("hls index resolve %s failed: %s", channel_id, exc)
-        raise HTTPException(status_code=502, detail=f"resolve failed: {exc}")
-    return await _hls_relay(target)
+    last_exc: Exception | None = None
+    for cand in cands:
+        try:
+            target = await iptv_youtube.resolve_live_url(cand["url"])
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("hls index resolve %s (src %s) failed: %s — trying next",
+                           channel_id, cand["id"], exc)
+            try:
+                async with aiosqlite.connect(_db.DB_PATH) as conn:
+                    await conn.execute(
+                        "UPDATE iptv_channels SET status='dead', "
+                        "fail_streak = fail_streak + 1, last_error = ?, "
+                        "last_check_at = ? WHERE id = ?",
+                        (f"relay resolve failed: {str(exc)[:120]}",
+                         _iptv._iso_now(), cand["id"]),
+                    )
+                    await conn.commit()
+            except Exception:
+                pass
+            continue
+        return await _hls_relay(target)
+    raise HTTPException(status_code=502, detail=f"all sources failed: {last_exc}")
 
 
 @router.get("/api/iptv/channels/{channel_id}/embed")

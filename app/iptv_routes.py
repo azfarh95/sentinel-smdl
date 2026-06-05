@@ -1075,6 +1075,114 @@ async def iptv_epg_refresh(body: EpgRefreshBody, request: Request):
     return {"ok": True, "summaries": summaries}
 
 
+# ── v3.6-A actionable EPG: search · reminders · record-this-program ───────────
+
+def _parse_iso_utc(s: str):
+    """Tolerant ISO-8601 → aware UTC datetime (accepts trailing Z, offset, or
+    naive). Raises ValueError on garbage."""
+    from datetime import datetime, timezone
+    dt = datetime.fromisoformat((s or "").strip().replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+@router.get("/api/iptv/epg/search")
+async def iptv_epg_search(request: Request, q: str = "",
+                          category: str | None = None, hours: int = 24):
+    """Cross-channel 'what's on' search over the EPG (v3.6-A)."""
+    await _verify_iptv(request)
+    progs = await _iptv.epg_search(
+        q, category=category, hours=max(1, min(int(hours or 24), 168)))
+    return {"ok": True, "programmes": progs, "count": len(progs)}
+
+
+class ReminderBody(BaseModel):
+    channel_id:   str
+    start_at:     str             # ISO-8601 (the programme's start)
+    programme:    str | None = None
+    channel_name: str | None = None
+    lead_min:     int = 5         # push this many minutes before start
+
+
+@router.post("/api/iptv/reminders")
+async def iptv_reminder_create(body: ReminderBody, request: Request):
+    """Set a programme reminder — the scheduled-DVR tick pushes a Telegram
+    message at start − lead_min."""
+    await _verify_iptv(request)
+    now = _iptv._iso_now()
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        cur = await conn.execute(
+            "INSERT INTO iptv_reminders (channel_id, channel_name, programme, "
+            "start_at, lead_min, created_at) VALUES (?,?,?,?,?,?)",
+            (body.channel_id, body.channel_name, body.programme, body.start_at,
+             max(0, min(int(body.lead_min or 5), 1440)), now),
+        )
+        await conn.commit()
+        rid = cur.lastrowid
+    return {"ok": True, "id": rid}
+
+
+@router.get("/api/iptv/reminders")
+async def iptv_reminders_list(request: Request):
+    await _verify_iptv(request)
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        rows = await (await conn.execute(
+            "SELECT * FROM iptv_reminders WHERE status IN ('pending','notified') "
+            "ORDER BY start_at ASC LIMIT 200")).fetchall()
+    return {"ok": True, "reminders": [dict(r) for r in rows]}
+
+
+@router.post("/api/iptv/reminders/{reminder_id}/cancel")
+async def iptv_reminder_cancel(reminder_id: int, request: Request):
+    await _verify_iptv(request)
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        cur = await conn.execute(
+            "UPDATE iptv_reminders SET status='cancelled' WHERE id = ?",
+            (reminder_id,))
+        await conn.commit()
+    if not cur.rowcount:
+        raise HTTPException(status_code=404, detail="reminder not found")
+    return {"ok": True}
+
+
+class RecordProgrammeBody(BaseModel):
+    channel_id:   str
+    start_utc:    str             # the EPG programme's start_utc (its key)
+    padding_pre:  int = 1
+    padding_post: int = 2
+
+
+@router.post("/api/iptv/epg/record_programme")
+async def iptv_record_programme(body: RecordProgrammeBody, request: Request):
+    """Record-this-program: create an iptv_scheduled row from an EPG entry, with
+    start + duration derived from the programme (v3.6-A). Reuses the DVR tick."""
+    await _verify_iptv(request)
+    await _ensure_scheduled_table()
+    tvg = body.channel_id.split(":", 1)[-1] if ":" in body.channel_id else body.channel_id
+    prog = (await _iptv.get_programme(tvg, body.start_utc)
+            or await _iptv.get_programme(body.channel_id, body.start_utc))
+    if prog is None:
+        raise HTTPException(status_code=404, detail="programme not found in EPG")
+    try:
+        s = _parse_iso_utc(prog["start_utc"])
+        e = _parse_iso_utc(prog["end_utc"])
+        dur = max(1, int((e.timestamp() - s.timestamp()) / 60))
+        start_at = s.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        raise HTTPException(status_code=422, detail="programme has invalid times")
+    now = _iptv._iso_now()
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        cur = await conn.execute(
+            "INSERT INTO iptv_scheduled (channel_id, start_at, duration_min, "
+            "padding_pre, padding_post, programme, created_at) VALUES (?,?,?,?,?,?,?)",
+            (body.channel_id, start_at, dur, int(body.padding_pre or 0),
+             int(body.padding_post or 0), prog.get("title"), now),
+        )
+        await conn.commit()
+        sid = cur.lastrowid
+    return {"ok": True, "scheduled_id": sid, "duration_min": dur, "start_at": start_at}
+
+
 @router.post("/api/iptv/channels/{channel_id}/probe")
 async def iptv_probe(channel_id: str, request: Request):
     await _verify_iptv(request)
@@ -1608,6 +1716,66 @@ async def _scheduler_tick_once():
                 (now_s, str(job_id) if job_id else None, r["id"]),
             )
             await conn.commit()
+
+    # v3.6-A: the same tick fires due programme reminders (Telegram push).
+    try:
+        await _fire_due_reminders(now_dt)
+    except Exception:
+        logger.exception("reminder firing failed")
+
+
+async def _push_reminder(r) -> bool:
+    """Send a reminder as a Telegram DM to the owner (best-effort)."""
+    try:
+        from .bot import get_application
+        from .config import OWNER_CHAT_ID
+        tg = get_application()
+        if tg is None or OWNER_CHAT_ID is None:
+            return False
+        prog = r["programme"] or "Your programme"
+        chan = r["channel_name"] or r["channel_id"]
+        lead = r["lead_min"] or 5
+        await tg.bot.send_message(
+            chat_id=int(OWNER_CHAT_ID),
+            text=f"📺 Reminder: {prog} starts in ~{lead} min on {chan}.",
+            disable_web_page_preview=True,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("reminder push failed: %s", exc)
+        return False
+
+
+async def _mark_reminder(rid: int, status: str, when: str) -> None:
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE iptv_reminders SET status=?, notified_at=? WHERE id=?",
+            (status, when, rid))
+        await conn.commit()
+
+
+async def _fire_due_reminders(now_dt):
+    """Push any pending reminder whose start − lead_min has passed. Marks fired
+    ones 'notified'; drops stale ones (start > 1h ago) as 'missed' so they stop
+    being re-checked."""
+    now_s = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        rows = await (await conn.execute(
+            "SELECT * FROM iptv_reminders WHERE status='pending'")).fetchall()
+    for r in rows:
+        try:
+            start_dt = _parse_iso_utc(r["start_at"])
+        except Exception:
+            await _mark_reminder(r["id"], "missed", now_s)
+            continue
+        if now_dt.timestamp() < start_dt.timestamp() - (r["lead_min"] or 5) * 60:
+            continue   # not due yet
+        if now_dt.timestamp() > start_dt.timestamp() + 3600:
+            await _mark_reminder(r["id"], "missed", now_s)   # too stale to bother
+            continue
+        await _push_reminder(r)
+        await _mark_reminder(r["id"], "notified", now_s)
 
 
 async def _scheduler_loop():

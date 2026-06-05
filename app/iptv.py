@@ -293,6 +293,25 @@ async def init_iptv_schema() -> None:
                 error         TEXT
             )
         """)
+        # v3.6-A actionable EPG — programme reminders. The scheduled-DVR tick
+        # also fires these: a Telegram push at start − lead_min.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS iptv_reminders (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id   TEXT NOT NULL,
+                channel_name TEXT,
+                programme    TEXT,
+                start_at     TEXT NOT NULL,
+                lead_min     INTEGER NOT NULL DEFAULT 5,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                notified_at  TEXT,
+                created_at   TEXT NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_iptv_reminders_pending
+                ON iptv_reminders(status, start_at)
+        """)
         await conn.commit()
     logger.info("IPTV schema ready at %s", db.DB_PATH)
 
@@ -1054,6 +1073,58 @@ async def get_now_next(tvg_id: str, lookahead_count: int = 3) -> list[dict]:
             if rows:
                 return [dict(r) for r in rows]
     return []
+
+
+async def epg_search(q: str = "", *, category: str | None = None,
+                     hours: int = 24, limit: int = 60) -> list[dict]:
+    """v3.6-A cross-channel EPG search: programmes airing now or within the next
+    `hours`, matching q (title / subtitle / description) and optional category.
+    Each result is enriched with its logical channel id + name so the UI can
+    deep-link to play / remind / record."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    until_iso = (now + timedelta(hours=max(1, min(int(hours), 168)))).isoformat()
+    where = ["end_utc >= ?", "start_utc <= ?"]
+    params: list = [now_iso, until_iso]
+    q = (q or "").strip().lower()
+    if q:
+        like = f"%{q}%"
+        where.append("(LOWER(title) LIKE ? OR LOWER(COALESCE(subtitle,'')) LIKE ? "
+                     "OR LOWER(COALESCE(description,'')) LIKE ?)")
+        params += [like, like, like]
+    if category:
+        where.append("LOWER(COALESCE(category,'')) LIKE ?")
+        params.append(f"%{category.strip().lower()}%")
+    out: list[dict] = []
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT tvg_id, start_utc, end_utc, title, subtitle, category "
+            "FROM iptv_programmes WHERE " + " AND ".join(where) +
+            " ORDER BY start_utc ASC LIMIT ?", params + [int(limit)])
+        rows = await cur.fetchall()
+        for r in rows:
+            d = dict(r)
+            crow = await (await conn.execute(
+                "SELECT channel_id, name FROM iptv_channels "
+                "WHERE id = ? OR id LIKE '%:' || ? LIMIT 1",
+                (d["tvg_id"], d["tvg_id"]))).fetchone()
+            d["channel_id"] = crow["channel_id"] if crow else None
+            d["channel_name"] = crow["name"] if crow else None
+            out.append(d)
+    return out
+
+
+async def get_programme(tvg_id: str, start_utc: str) -> dict | None:
+    """Fetch one EPG programme by (tvg_id, start_utc) — used by
+    record-this-program to derive the recording window."""
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        row = await (await conn.execute(
+            "SELECT * FROM iptv_programmes WHERE tvg_id = ? AND start_utc = ?",
+            (tvg_id, start_utc))).fetchone()
+        return dict(row) if row else None
 
 
 # ── Scheduled auto-probe ──────────────────────────────────────────

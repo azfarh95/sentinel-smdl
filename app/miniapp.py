@@ -265,18 +265,43 @@ def _parse_session_cookie(val: str) -> dict | None:
     return payload
 
 
-def _owner_payload_from_cookie(session: dict | None = None) -> dict:
-    """Synthesise the FastAPI-route payload that downstream guards expect.
-    Mirrors the shape of a real initData payload (user.id) and additionally
-    embeds the parsed session (auth_v2) at payload['session'] so per-route
-    require_scope() checks can read it without re-parsing the cookie."""
-    owner = _cfg_get("owner_chat_id")
-    if owner is None:
-        owner = os.environ.get("OWNER_CHAT_ID", "")
-    out: dict = {"user": {"id": int(owner)} if owner else {}}
+def _payload_from_cookie(session: dict | None = None) -> dict:
+    """Synthesise the FastAPI-route payload from a parsed session cookie,
+    resolving to the cookie's REAL identity. A genuine OWNER session (v1
+    cookie, user_id 'owner', or wildcard '*' scope) maps to OWNER_CHAT_ID; a
+    scoped v2 cookie maps to its OWN telegram id. A scoped cookie must NEVER be
+    silently promoted to the owner — that leaked owner data (sticker packs,
+    downloads, …) to any holder of a valid cookie. Embeds the parsed session at
+    payload['session'] so per-route require_scope() can read it."""
+    sess = session or {}
+    uid_raw = str(sess.get("user_id") or "")
+    is_owner_session = (
+        sess.get("version") == "v1"
+        or uid_raw == "owner"
+        or "*" in (sess.get("scopes") or [])
+    )
+    user_id: int | None = None
+    if is_owner_session:
+        owner = _cfg_get("owner_chat_id")
+        if owner is None:
+            owner = os.environ.get("OWNER_CHAT_ID", "")
+        if owner:
+            user_id = int(owner)
+    else:
+        # Non-owner scoped cookie → its own telegram id (tg:<n> or numeric).
+        s = uid_raw.split(":", 1)[1] if uid_raw.startswith("tg:") else uid_raw
+        if s.isdigit():
+            user_id = int(s)
+        # google:<sub> / beta-slug carry no telegram id → leave None so the
+        # caller falls through rather than impersonating anyone.
+    out: dict = {"user": {"id": user_id} if user_id is not None else {}}
     if session is not None:
         out["session"] = session
     return out
+
+
+# Back-compat alias — historical name used elsewhere (grant_transport etc.).
+_owner_payload_from_cookie = _payload_from_cookie
 
 
 async def _verify(request: Request) -> dict:
@@ -284,66 +309,77 @@ async def _verify(request: Request) -> dict:
     routes must call _require_owner(payload) themselves on top of this.
 
     Auth precedence:
-      1. Cookie `sentinel_apk_session` (v1 owner or v2 scoped) — APK path
-      2. `X-Init-Data` header (Telegram WebApp) — Mini App path
+      1. `X-Init-Data` header (Telegram WebApp) — the ACTIVE Telegram account
+      2. Cookie `sentinel_apk_session` (v1 owner or v2 scoped) — APK / web
 
-    Returns a payload dict with `user.id` plus (for cookie-auth paths) a
-    `session` field carrying the parsed v1/v2 cookie — used by
-    require_scope() to enforce per-route permissions."""
-    # Path 1 — session cookie (v1 owner OR v2 scoped beta user).
-    cookie_val = request.cookies.get(COOKIE_NAME, "")
-    session = _parse_session_cookie(cookie_val)
-    if session is not None:
-        payload = _owner_payload_from_cookie(session)
-        if payload["user"].get("id"):
-            return payload
-        # If owner_chat_id isn't configured we can't synthesise the
-        # Telegram-style user.id — fall through to initData path.
+    initData is checked FIRST and on purpose: the Telegram in-app WebView shares
+    ONE cookie jar across accounts, so an ambient `sentinel_apk_session` cookie
+    left while signed in as the owner would otherwise authenticate a DIFFERENT
+    active account as the owner (cross-account leak — a second account seeing
+    the owner's data). The per-request, Telegram-signed initData reflects who is
+    ACTUALLY active, so it must win.
 
-    # Path 2 — Telegram initData (Mini App opened from inside Telegram).
-    # bot.py reads SMDL_BOT_TOKEN — keep this in sync. Fall back to the
-    # generic names for cross-deployment portability.
+    Returns a payload dict with `user.id` plus a `session` field carrying the
+    parsed cookie/synthetic session — used by require_scope() to enforce
+    per-route permissions."""
+    # bot.py reads SMDL_BOT_TOKEN — keep this in sync. Fall back to the generic
+    # names for cross-deployment portability.
     bot_token = (
         os.environ.get("SMDL_BOT_TOKEN")
         or os.environ.get("BOT_TOKEN")
         or os.environ.get("TELEGRAM_BOT_TOKEN")
         or ""
     )
-    if not bot_token:
-        raise HTTPException(status_code=503, detail="bot token not configured")
     # Canonical header is X-Init-Data (used across all SMDL surfaces). The
     # Stremio sub-app historically sent X-Telegram-Init-Data, so accept both.
     init_data = (request.headers.get("x-init-data")
                  or request.headers.get("x-telegram-init-data") or "")
-    payload = _validate_init_data(init_data, bot_token)
-    await _check_access(payload)
-    # Synthesise a session for require_scope(). The OWNER gets a wildcard so
-    # everything passes. A non-owner is only reachable here on the community
-    # build (where _check_access opens the gate to all Telegram users); they
-    # get the user-facing surface scopes only — never the owner-sensitive ones
-    # — so owner-only routes still 403. Paid caps are gated by entitlements.
-    uid = (payload.get("user") or {}).get("id")
-    is_owner_user = bool(uid) and _is_owner(int(uid))
-    if is_owner_user:
-        scopes: list[str] = ["*"]
-        user_id_str = "owner"
-    else:
-        # Merge any live (redeemed, non-revoked, non-expired) beta-key extras
-        # into the community user surface. Keeps initData callers in sync with
-        # cookie callers: a TG user who redeemed a beta key gets that scope
-        # without re-login, because every request rebuilds the synthetic
-        # session here.
-        user_id_str = str(uid)
-        from . import beta_keys as _bk
-        extras = await _bk.live_extra_scopes_for(user_id_str)
-        scopes = sorted(set(COMMUNITY_USER_SCOPES) | set(extras))
-    payload["session"] = {
-        "version": "initdata",
-        "user_id": user_id_str,
-        "scopes": scopes,
-        "jti": "", "iat": 0, "expired": False,
-    }
-    return payload
+
+    # Path 1 (PREFERRED) — Telegram initData (Mini App). The authoritative
+    # identity of the active account; wins over any ambient session cookie.
+    if init_data:
+        if not bot_token:
+            raise HTTPException(status_code=503, detail="bot token not configured")
+        payload = _validate_init_data(init_data, bot_token)
+        await _check_access(payload)
+        # Synthesise a session for require_scope(). The OWNER gets a wildcard so
+        # everything passes. A non-owner is only reachable here on the community
+        # build (where _check_access opens the gate to all Telegram users); they
+        # get the user-facing surface scopes only — never owner-sensitive ones —
+        # so owner-only routes still 403. Paid caps are gated by entitlements.
+        uid = (payload.get("user") or {}).get("id")
+        is_owner_user = bool(uid) and _is_owner(int(uid))
+        if is_owner_user:
+            scopes: list[str] = ["*"]
+            user_id_str = "owner"
+        else:
+            # Merge any live (redeemed, non-revoked, non-expired) beta-key extras
+            # into the community surface — a TG user who redeemed a beta key gets
+            # that scope without re-login (every request rebuilds this session).
+            user_id_str = str(uid)
+            from . import beta_keys as _bk
+            extras = await _bk.live_extra_scopes_for(user_id_str)
+            scopes = sorted(set(COMMUNITY_USER_SCOPES) | set(extras))
+        payload["session"] = {
+            "version": "initdata",
+            "user_id": user_id_str,
+            "scopes": scopes,
+            "jti": "", "iat": 0, "expired": False,
+        }
+        return payload
+
+    # Path 2 — session cookie (APK / web login; no initData present). Resolves
+    # to the cookie's OWN identity (a scoped cookie never becomes the owner).
+    cookie_val = request.cookies.get(COOKIE_NAME, "")
+    session = _parse_session_cookie(cookie_val)
+    if session is not None:
+        payload = _payload_from_cookie(session)
+        if payload["user"].get("id"):
+            return payload
+
+    if not bot_token:
+        raise HTTPException(status_code=503, detail="bot token not configured")
+    raise HTTPException(status_code=401, detail="authentication required")
 
 
 def require_scope(payload: dict, scope: str) -> None:

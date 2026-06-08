@@ -4030,6 +4030,17 @@ button.warn { background: #ff9500; color: #fff; }
     </div>
   </div>
 
+  <!-- Cluster sub-hub: a second screen of tiles (one per sub-page) reached
+       by tapping a home cluster-tile. Populated by _renderClusterHub().
+       Gives a tap-through alternative to the sidebar flyout sub-nav. -->
+  <div class=page id=page-cluster>
+    <div class=page-header>
+      <h1 id=cluster-title>Section</h1>
+      <button class="small sec" onclick="clusterHubBack()" title="Back to home">← Home</button>
+    </div>
+    <div class=home-clusters id=cluster-tiles></div>
+  </div>
+
   <div class=page id=page-downloads>
     <div class=page-header>
       <h1>Recent Downloads</h1>
@@ -4533,29 +4544,33 @@ function duration(s) { if (s<60) return s+'s'; const m = Math.floor(s/60); const
 // cluster's pages. The same key feeds both: order pages by most-likely
 // default-of-cluster so clusterEnter lands on the right thing.
 
+// Each page entry: [pageId, label, emoji, description, ownerOnly?]. The
+// emoji + description drive the sub-hub tiles; pageId + label still drive
+// the sidebar flyout (_renderSubsidebar) and _PAGE_TO_CLUSTER, which only
+// read [0] and [1], so the extra fields are backward-compatible.
 const _CLUSTERS = {
   watch: { label: '🎬 Watch', pages: [
-    ['iptv',      'IPTV'],
-    ['theater',   'Theater'],
-    ['watchlist', 'Streams'],
+    ['iptv',      'IPTV',      '📺', 'Live TV channels · EPG · DVR'],
+    ['theater',   'Theater',   '🍿', 'Movies & shows via Stremio'],
+    ['watchlist', 'Streams',   '📡', 'Track streamers & recordings'],
   ]},
   get:   { label: '📥 Get', pages: [
-    ['downloads', 'Downloads'],
-    ['search',    'Search'],
-    ['library',   'Library'],
-    ['files',     'Files'],
+    ['downloads', 'Downloads', '⬇️', 'Paste a URL to download'],
+    ['search',    'Search',    '🔎', 'Find across everything'],
+    ['library',   'Library',   '📚', 'Your downloaded media', 'owner'],
+    ['files',     'Files',     '📁', 'Browse the file store', 'owner'],
   ]},
   make:  { label: '🎨 Make', pages: [
-    ['stickers',  'Stickers'],
-    ['streamer',  'Streamer'],
+    ['stickers',  'Stickers',  '🎨', 'Build your sticker packs'],
+    ['streamer',  'Streamer',  '🎙️', 'Twitch opt-in console'],
   ]},
   inbox: { label: '🔔 Inbox', pages: [
-    ['notifications', 'Activity'],
+    ['notifications', 'Activity', '🔔', 'Downloads · recordings · approvals'],
   ]},
   admin: { label: '⚙️ Admin', pages: [
-    ['admin',     'Server'],
-    ['scraper',   'Scraper'],
-    ['settings',  'Settings'],
+    ['admin',     'Server',    '🖥️', 'Status & server controls', 'owner'],
+    ['scraper',   'Scraper',   '🕷️', 'Profile scrape jobs',      'owner'],
+    ['settings',  'Settings',  '⚙️', 'Preferences & config',     'owner'],
   ]},
 };
 
@@ -4578,14 +4593,51 @@ function _clusterNavigate(pageId) {
   goto(pageId);
 }
 
+let _clusterHubKey = null;   // which cluster the sub-hub page is showing
+
 function clusterEnter(key) {
-  // From a home cluster-tile click: navigate to the cluster's first
-  // sub-page. The sub-sidebar stays closed — user explicitly opens it
-  // from the sidebar later if they want to switch siblings.
+  // From a home cluster-tile click: open the cluster's SUB-HUB page — a
+  // second screen of tiles, one per sub-page — so the whole app is
+  // reachable by tapping through the main page. The sidebar flyout
+  // (clusterOpen) stays as the quick alternative sub-nav. A cluster with
+  // only ONE sub-page skips the hub and goes straight there.
   const c = _CLUSTERS[key];
   if (!c || !c.pages.length) return;
   clusterClose();
-  _clusterNavigate(c.pages[0][0]);
+  if (c.pages.length === 1) { _clusterNavigate(c.pages[0][0]); return; }
+  _renderClusterHub(key);
+  goto('cluster');
+}
+
+function _renderClusterHub(key) {
+  const c = _CLUSTERS[key];
+  if (!c) return;
+  _clusterHubKey = key;
+  const titleEl = document.getElementById('cluster-title');
+  if (titleEl) titleEl.textContent = c.label;
+  const root = document.getElementById('cluster-tiles');
+  if (!root) return;
+  let html = '';
+  for (const entry of c.pages) {
+    // Owner-only sub-pages (Library/Files, the Admin cluster) are hidden
+    // from non-owner community users — same gate as the home tiles.
+    if (entry[4] === 'owner' && !isOwner) continue;
+    const pageId = entry[0], label = entry[1];
+    const emoji = entry[2] || '▸', desc = entry[3] || '';
+    html += '<div class=home-cluster-tile onclick="clusterNav(\\'' + pageId + '\\')">' +
+              '<div class=ico style="font-size:26px">' + emoji + '</div>' +
+              '<div class=meta><div class=name>' + esc(label) + '</div>' +
+              (desc ? '<div class=desc>' + esc(desc) + '</div>' : '') +
+            '</div></div>';
+  }
+  root.innerHTML = html || '<div class=empty>Nothing here for your account.</div>';
+}
+
+function clusterHubBack() {
+  // Prefer the history stack (avoids a redundant push); fall back to Home
+  // for web/desktop where the Telegram BackButton + stack may be absent.
+  if (_pageHistory.length) popHistory();
+  else goto('home');
 }
 
 function clusterNavHome() {
@@ -4655,7 +4707,9 @@ function goto(page) {
   // _PAGE_TO_CLUSTER is built once from _CLUSTERS above.
   const targetId = page === 'home'
     ? 'nav-home'
-    : ('nav-cluster-' + (_PAGE_TO_CLUSTER[page] || ''));
+    : page === 'cluster'
+      ? ('nav-cluster-' + (_clusterHubKey || ''))
+      : ('nav-cluster-' + (_PAGE_TO_CLUSTER[page] || ''));
   document.querySelectorAll('.sidebar-item').forEach(el =>
     el.classList.toggle('active', el.id === targetId));
   // If the sub-sidebar flyout is open while we navigate, refresh its

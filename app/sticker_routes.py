@@ -2638,11 +2638,15 @@ _EDIT_HTML = r"""<!doctype html>
   <div class="section tool-panel" data-panel="crop" data-tier="std">
     <label>Crop</label>
     <div class="row">
-      <span class="pill" id="crop-mode-toggle">Center fill</span>
-      <span class="pill on" id="aspect-lock-toggle">🔒 1 : 1</span>
-      <span class="meta">Toggle "Pick region" to drag a box on the video.</span>
+      <span class="pill" id="crop-mode-toggle">Fixed</span>
+      <span class="pill on" id="aspect-lock-toggle">🔒 Square</span>
+      <span class="meta">Toggle "Unfixed" to move &amp; resize a box on the video.</span>
     </div>
-    <div class="meta" id="crop-mode-hint" style="margin-top:6px">Center fill: the middle of the video is cropped square into the sticker.</div>
+    <div class="row" id="crop-size-row" style="display:none;margin-top:8px;align-items:center;gap:8px">
+      <span class="meta" style="min-width:34px">Size</span>
+      <input type="range" id="crop-size" min="20" max="100" value="60" style="flex:1;accent-color:var(--accent)">
+    </div>
+    <div class="meta" id="crop-mode-hint" style="margin-top:6px">Fixed: the centre of the video is auto-cropped square into the sticker.</div>
   </div>
 
   <div class="section tool-panel" data-panel="shape" id="shape-section">
@@ -3057,6 +3061,8 @@ const cropBox     = document.getElementById('crop-box');
 const cropModeToggle = document.getElementById('crop-mode-toggle');
 const aspectLockToggle = document.getElementById('aspect-lock-toggle');
 const cropHint    = document.getElementById('crop-mode-hint');
+const cropSizeRow = document.getElementById('crop-size-row');
+const cropSize    = document.getElementById('crop-size');
 
 let cropMode = false;     // false = center-fill (no client crop), true = pick region
 let aspectLock = true;    // 1:1 default
@@ -3066,13 +3072,14 @@ let cropX = 0, cropY = 0, cropW = 0, cropH = 0;
 function refreshCropOverlay() {
   cropOverlay.classList.toggle('on', cropMode);
   cropBox.style.display = cropMode ? '' : 'none';
+  if (cropSizeRow) cropSizeRow.style.display = cropMode ? 'flex' : 'none';
   if (!cropMode) {
-    cropHint.textContent = 'Center fill: the middle of the video is cropped square into the sticker.';
+    cropHint.textContent = 'Fixed: the centre of the video is auto-cropped square into the sticker.';
     return;
   }
   cropHint.textContent = aspectLock
-    ? 'Pick region (1:1): drag the box to position the square sticker frame.'
-    : 'Pick region (free): drag the box or its corners.';
+    ? 'Unfixed (square): drag to move, use the Size bar to resize.'
+    : 'Unfixed (free): drag to move, Size bar (or corners) to resize.';
   // First-time positioning: center the box at 60% of the SHORTER displayed dim.
   if (cropW === 0 || cropH === 0) {
     const vr = vid.getBoundingClientRect();
@@ -3084,8 +3091,39 @@ function refreshCropOverlay() {
     cropX = (vr.width  - cropW) / 2 + (vr.left - wr.left);
     cropY = (vr.height - cropH) / 2 + (vr.top  - wr.top);
   }
+  syncCropSizeSlider();
   drawCropBox();
 }
+
+// Keep the external "Size" bar in sync with the box's current size.
+function syncCropSizeSlider() {
+  if (!cropSize) return;
+  const vr = vid.getBoundingClientRect();
+  if (!vr.width || !vr.height) return;
+  const ref   = aspectLock ? Math.min(cropW, cropH) : cropW;
+  const denom = aspectLock ? Math.min(vr.width, vr.height) : vr.width;
+  if (denom) cropSize.value = Math.round(Math.max(20, Math.min(100, (ref / denom) * 100)));
+}
+
+// External "Size" bar — resize the crop box around its centre (the easy,
+// touch-friendly alternative to grabbing the corner handles on the image).
+function _applyCropSize() {
+  if (!cropMode || !cropSize) return;
+  const vr = vid.getBoundingClientRect();
+  if (!vr.width || !vr.height) return;
+  const cx = cropX + cropW / 2, cy = cropY + cropH / 2;
+  const frac = (parseFloat(cropSize.value) || 60) / 100;
+  if (aspectLock) {
+    const s = Math.max(40, Math.min(vr.width, vr.height) * frac);
+    cropW = s; cropH = s;
+  } else {
+    cropW = Math.max(40, vr.width  * frac);
+    cropH = Math.max(40, vr.height * frac);
+  }
+  cropX = cx - cropW / 2; cropY = cy - cropH / 2;
+  clampCropToVideo(); drawCropBox(); _refreshShapePreview();
+}
+if (cropSize) cropSize.addEventListener('input', _applyCropSize);
 function drawCropBox() {
   cropBox.style.left   = cropX + 'px';
   cropBox.style.top    = cropY + 'px';
@@ -3105,14 +3143,14 @@ function clampCropToVideo() {
 cropModeToggle.addEventListener('click', () => {
   cropMode = !cropMode;
   cropModeToggle.classList.toggle('on', cropMode);
-  cropModeToggle.textContent = cropMode ? 'Pick region' : 'Center fill';
+  cropModeToggle.textContent = cropMode ? 'Unfixed' : 'Fixed';
   refreshCropOverlay();
   _refreshShapePreview();   // output square moved (box ⇄ centred-video)
 });
 aspectLockToggle.addEventListener('click', () => {
   aspectLock = !aspectLock;
   aspectLockToggle.classList.toggle('on', aspectLock);
-  aspectLockToggle.textContent = aspectLock ? '🔒 1 : 1' : 'Free';
+  aspectLockToggle.textContent = aspectLock ? '🔒 Square' : '↔ Free';
   if (cropMode && aspectLock) {
     const m = Math.min(cropW, cropH);
     cropW = m; cropH = m;
@@ -3162,7 +3200,7 @@ window.addEventListener('pointermove', e => {
 });
 window.addEventListener('pointerup', () => {
   if (_boxDrag) { _boxDrag = null; cropBox.classList.remove('dragging'); }
-  _handleDrag = null;
+  if (_handleDrag) { _handleDrag = null; syncCropSizeSlider(); }
 });
 
 // Resize via corner handles.

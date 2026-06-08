@@ -44,6 +44,22 @@ def _slug(s: str) -> str:
     return s[:32] or "user"
 
 
+def _uid_tok(user_id: int) -> str:
+    """Short, stable, lowercase per-user token (base36 of the id). Folded into
+    generated pack names so two users NEVER collide onto the same Telegram
+    sticker set — even when their display names slugify identically (emoji /
+    stylised / non-Latin names all collapse to the 'u' fallback above)."""
+    n = abs(int(user_id))
+    if n == 0:
+        return "0"
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = []
+    while n:
+        n, r = divmod(n, 36)
+        out.append(digits[r])
+    return "".join(reversed(out))
+
+
 # Per-kind naming + title suffix so the three packs are obviously distinct
 # both as URLs and in Telegram's UI.
 # A 'regular' pack mixes video + static (Telegram allows it). It reuses the old
@@ -77,9 +93,16 @@ async def resolve_pack(bot: Bot, user_id: int, first_name: str | None,
         return {**existing, "pack_kind": k, "exists_in_db": True}
 
     bot_username = await get_bot_username(bot)
-    slug = _slug(first_name or f"u{user_id}")
     suffix, title_suffix = _KIND_SUFFIX[k]
-    pack_name  = f"{slug}_{suffix}_by_{bot_username}"
+    # The pack name MUST be unique per user. Deriving it from the display name
+    # alone let any two users whose names slugify the same (emoji / stylised /
+    # non-Latin → 'u') generate the SAME set name and share one pack. Fold in a
+    # per-user token so that can never happen. (Cap the name part so the full
+    # `..._by_<bot>` stays within Telegram's 64-char limit.)
+    base = _slug(first_name or "")[:16].strip("_")
+    tok = _uid_tok(user_id)
+    name_part = f"{base}_{tok}" if (base and base != "u") else f"u{tok}"
+    pack_name  = f"{name_part}_{suffix}_by_{bot_username}"
     pack_title = f"{(first_name or 'My').strip()}'s {title_suffix}"
     telegram_url = f"https://t.me/addstickers/{pack_name}"
     return {
@@ -98,7 +121,10 @@ async def create_named_pack(bot: Bot, user_id: int, first_name: str | None,
     Returns the same shape as resolve_pack (exists_in_db=True)."""
     k = _canon_kind(kind)
     bot_username = await get_bot_username(bot)
-    user_slug = _slug(first_name or f"u{user_id}")
+    # Per-user token prefix so two users never collide onto one set name (the
+    # while-loop below also guards, but this makes uniqueness structural).
+    _nm = _slug(first_name or "")[:12].strip("_")
+    user_slug = f"{(_nm if _nm and _nm != 'u' else 'u')}_{_uid_tok(user_id)}"
     title = (title or "").strip()[:64] or "My Stickers"
     tslug = _slug(title)
     suffix, _ts = _KIND_SUFFIX[k]

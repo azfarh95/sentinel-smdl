@@ -26,11 +26,12 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from . import auth_v2, beta_keys, entitlements, premium
+from . import auth_v2, beta_keys, entitlements, grant_transport, premium, profile
 from .auth_google import (
     COMMUNITY_USER_SCOPES, _SESSION_COOKIE, _SESSION_COOKIE_DOMAIN,
     _SESSION_COOKIE_TTL_SEC, _signing_secret,
 )
+from .grant_transport import VIEW_AS_COOKIE
 from .miniapp import _require_owner, _verify
 
 
@@ -110,6 +111,65 @@ async def admin_premium_remove(request: Request,
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "removed": removed}
+
+
+# ── Owner: "preview as <plan>" simulation + capability catalog ───────────────
+
+
+class ViewAsBody(BaseModel):
+    tier: str   # free | registered | plus | family | owner (owner = clear)
+
+
+@router.get("/api/admin/view_as")
+async def admin_view_as_get(request: Request):
+    p = await _verify(request)
+    _require_owner(p)
+    raw = (request.cookies.get(VIEW_AS_COOKIE) or "").strip().lower()
+    tier = raw if raw in entitlements.PLANS else "owner"
+    return {"tier": tier, "plans": list(entitlements.PLANS.keys())}
+
+
+@router.post("/api/admin/view_as")
+async def admin_view_as_set(body: ViewAsBody, request: Request, response: Response):
+    """Owner-only. Set (or clear) the preview-as plan cookie. 'owner' or any
+    unknown value clears it → back to the full owner grant. Downgrade-only: the
+    grant layer honours the cookie solely for the owner identity, so it can
+    never escalate anyone."""
+    p = await _verify(request)
+    _require_owner(p)
+    tier = (body.tier or "owner").strip().lower()
+    if tier == "owner" or tier not in entitlements.PLANS:
+        response.delete_cookie(VIEW_AS_COOKIE, domain=_SESSION_COOKIE_DOMAIN, path="/")
+        return {"ok": True, "tier": "owner"}
+    response.set_cookie(
+        VIEW_AS_COOKIE, tier,
+        max_age=_SESSION_COOKIE_TTL_SEC,
+        httponly=False, secure=True, samesite="lax",
+        domain=_SESSION_COOKIE_DOMAIN, path="/",
+    )
+    return {"ok": True, "tier": tier}
+
+
+@router.get("/api/entitlements/catalog")
+async def entitlements_catalog(request: Request):
+    """Capability catalog overlaid with the caller's CURRENT (possibly
+    simulated) grant: which caps are unlocked, the plan needed for the rest,
+    whether enforcement is active, and the purchase rail. Any signed-in caller
+    (not owner-only) — drives the lock badges + upsell sheet."""
+    await _verify(request)   # 401/403 for anonymous; valid session required
+    grant = await grant_transport.resolve_grant(request)
+    caps = [
+        {**item, "unlocked": entitlements.has_entitlement(grant, item["cap"])}
+        for item in entitlements.catalog()
+    ]
+    simulating = grant.get("source") == "owner_simulation"
+    return {
+        "plan": grant.get("plan", "free"),
+        "simulating": simulating,
+        "enforced": grant_transport.enforcement_active() or simulating,
+        "rail": profile.billing_rail(),
+        "caps": caps,
+    }
 
 
 # ── Owner CRUD — beta keys ──────────────────────────────────────────────────

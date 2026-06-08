@@ -52,10 +52,19 @@ from urllib.parse import parse_qsl
 from fastapi import HTTPException, Request
 
 from . import auth_v2, edition, entitlements, licensing, premium
+from .config import OWNER_CHAT_ID
 
 
 GRANT_HEADER = "X-Sentinel-Grant"
 _COOKIE_NAME = "sentinel_apk_session"
+
+# Owner "preview as <plan>" simulation cookie. Carries a plan name. It is
+# DOWNGRADE-ONLY and honoured exclusively when the request is the owner (see
+# `_view_as_tier`), so a non-owner who forges it gets nothing — never an
+# upgrade. Non-httponly on purpose: the front-end reads it to show the
+# "previewing" banner. The cookie is NOT a credential; all trust is the
+# server-side owner check.
+VIEW_AS_COOKIE = "smdl_view_as"
 
 
 def _anon_grant() -> dict:
@@ -210,10 +219,47 @@ async def _grant_from_session(request: Request) -> dict | None:
     return premium.build_grant(plan)
 
 
+def _is_owner_request(request: Request) -> bool:
+    """True if the request is authenticated as the owner — via the v1 owner
+    cookie OR an initData/v2 telegram identity matching OWNER_CHAT_ID. Used to
+    gate the preview-as simulation so only the owner can downgrade themselves."""
+    ident = _identity_from_cookie(request) or _identity_from_initdata(request)
+    if ident is None:
+        return False
+    itype, ivalue = ident
+    if itype == "owner":
+        return True
+    if itype == "telegram" and OWNER_CHAT_ID is not None:
+        try:
+            return int(ivalue) == int(OWNER_CHAT_ID)
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def _view_as_tier(request: Request) -> str | None:
+    """The owner's active 'preview as' plan, or None. Honoured ONLY for the
+    owner and only for a known plan, so it can never escalate a non-owner."""
+    raw = (request.cookies.get(VIEW_AS_COOKIE) or "").strip().lower()
+    if not raw or raw == "owner" or raw not in entitlements.PLANS:
+        return None
+    if not _is_owner_request(request):
+        return None
+    return raw
+
+
 async def resolve_grant(request: Request) -> dict:
-    """Full grant resolution — header → owner-cookie → session-identity →
-    anonymous. Never raises; routes gate on the returned entitlements, not on
-    the presence of a grant."""
+    """Full grant resolution — owner simulation → header → owner-cookie →
+    session-identity → anonymous. Never raises; routes gate on the returned
+    entitlements, not on the presence of a grant."""
+    # Owner "preview as <plan>" takes precedence: it replaces the owner's full
+    # grant with a simulated community plan so the gates fire on the owner's
+    # own (private) box. Tagged so `requires()` forces enforcement for it.
+    sim = _view_as_tier(request)
+    if sim is not None:
+        g = premium.build_grant(sim)
+        g["source"] = "owner_simulation"
+        return g
     g = _header_grant(request)
     if g is not None:
         return g
@@ -242,7 +288,9 @@ def requires(cap: str):
 
     async def _dep(request: Request) -> dict:
         grant = await resolve_grant(request)
-        if enforcement_active():
+        # Enforce on distributed builds, OR whenever the owner is previewing a
+        # community plan on their own box (the simulated grant opts itself in).
+        if enforcement_active() or grant.get("source") == "owner_simulation":
             entitlements.require_entitlement(grant, cap)
         return grant
 

@@ -4025,6 +4025,23 @@ _PLAY_HTML = r"""<!doctype html>
 
 <div class="toast" id="toast"></div>
 
+<!-- Owner "preview as <plan>" banner (mirrors the Mini App) -->
+<div id="viewas-banner" style="display:none;position:fixed;left:0;right:0;top:0;z-index:9999;background:#8a5200;color:#fff;padding:6px 12px;font-size:12px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,.45)">
+  <span id="viewas-banner-text"></span>
+  <button onclick="exitViewAs()" style="margin-left:10px;background:rgba(255,255,255,.2);border:0;color:#fff;border-radius:6px;padding:2px 9px;cursor:pointer;font-size:11px">Exit preview</button>
+</div>
+
+<!-- Paywall upgrade sheet — pops on a structured 402 from a gated route -->
+<div id="upgrade-modal" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.62);align-items:center;justify-content:center" onclick="if(event.target===this)closeUpgrade()">
+  <div style="background:#171b22;border:1px solid #232a33;border-radius:14px;max-width:330px;width:90%;padding:22px;box-shadow:0 12px 44px rgba(0,0,0,.5);color:#e6e9ef">
+    <div style="font-size:34px;text-align:center;line-height:1">🔒</div>
+    <div id="upgrade-title" style="font-size:17px;font-weight:600;text-align:center;margin:8px 0 4px"></div>
+    <div id="upgrade-body" style="font-size:13px;text-align:center;color:#9aa3ad;margin-bottom:16px"></div>
+    <button id="upgrade-cta" style="width:100%;background:#2563eb;color:#fff;border:0;padding:10px;border-radius:8px;cursor:pointer;font-size:14px" onclick="upgradeCta()"></button>
+    <button style="width:100%;margin-top:8px;background:#232a33;color:#e6e9ef;border:0;padding:9px;border-radius:8px;cursor:pointer;font-size:13px" onclick="closeUpgrade()">Not now</button>
+  </div>
+</div>
+
 <script>
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
@@ -4043,6 +4060,12 @@ async function api(path, opts = {}) {
     const text = await r.text();
     let detail = text;
     try { detail = JSON.parse(text).detail || detail; } catch (e) {}
+    // Structured entitlement 402 → pop the paywall sheet, throw a sentinel.
+    if (r.status === 402 && detail && typeof detail === 'object' && detail.error === 'entitlement_required') {
+      try { showUpgradeSheet(detail); } catch (e) {}
+      const err = new Error('upgrade_required'); err.upgrade = true; throw err;
+    }
+    if (detail && typeof detail === 'object') detail = JSON.stringify(detail);
     throw new Error(`${r.status}: ${detail}`);
   }
   return await r.json();
@@ -4054,6 +4077,54 @@ function toast(msg, ms=2000) {
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), ms);
 }
+
+// ── Entitlement preview ("view as") + paywall upgrade sheet ───────────────
+function _viewAsCookie() {
+  const m = document.cookie.match(/(?:^|;\\s*)smdl_view_as=([^;]+)/);
+  return m ? decodeURIComponent(m[1]).trim().toLowerCase() : '';
+}
+function renderViewAsBanner() {
+  const b = document.getElementById('viewas-banner');
+  if (!b) return;
+  const tier = _viewAsCookie();
+  if (tier && tier !== 'owner') {
+    const t = document.getElementById('viewas-banner-text');
+    if (t) t.textContent = '👁 Previewing as ' + tier.toUpperCase() +
+      ' — paid features lock as a community ' + tier + ' user sees them.';
+    b.style.display = 'block';
+  } else { b.style.display = 'none'; }
+}
+async function exitViewAs() {
+  try { await api('/api/admin/view_as', { method: 'POST', body: JSON.stringify({ tier: 'owner' }) }); } catch (e) {}
+  location.reload();
+}
+function showUpgradeSheet(ent) {
+  ent = ent || {};
+  const plan = ent.required_plan || 'plus';
+  const planTitle = plan.charAt(0).toUpperCase() + plan.slice(1);
+  const rail = ent.rail || 'license';
+  const title = document.getElementById('upgrade-title');
+  const body = document.getElementById('upgrade-body');
+  const cta = document.getElementById('upgrade-cta');
+  if (title) title.textContent = ent.label || 'Premium feature';
+  if (body) {
+    let msg = 'This needs the ' + planTitle + ' plan.';
+    const sim = _viewAsCookie();
+    if (sim && sim !== 'owner') msg += ' You\\'re previewing as ' + sim.toUpperCase() + '.';
+    body.textContent = msg;
+  }
+  if (cta) { cta.textContent = (rail === 'play') ? '⭐ Upgrade with Google Play' : '⭐ Upgrade to ' + planTitle; cta.dataset.rail = rail; }
+  const m = document.getElementById('upgrade-modal');
+  if (m) m.style.display = 'flex';
+}
+function closeUpgrade() { const m = document.getElementById('upgrade-modal'); if (m) m.style.display = 'none'; }
+function upgradeCta() {
+  closeUpgrade();
+  const sim = _viewAsCookie();
+  if (sim && sim !== 'owner') { exitViewAs(); return; }   // owner preview → drop it = "unlock"
+  toast('Upgrade flow — wiring pending', 2500);
+}
+renderViewAsBanner();
 
 function flag(code) {
   if (!code || code.length !== 2) return '🏳️';
@@ -4804,6 +4875,7 @@ document.getElementById('record-btn').addEventListener('click', async () => {
     });
     toast(`⏺ Recording ${r.duration_min}m → ${r.output_path.split('/').pop()}`, 6000);
   } catch (e) {
+    if (e && e.upgrade) return;   // paywall sheet already shown
     toast('Record failed: ' + e.message, 3500);
   }
 });

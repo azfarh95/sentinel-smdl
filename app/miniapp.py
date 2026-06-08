@@ -4260,7 +4260,41 @@ button.warn { background: #ff9500; color: #fff; }
 
   <div class=page id=page-admin>
     <h1>Server <span class=meta style="font-weight:400;font-size:13px;color:var(--muted);margin-left:8px">(owner-only · server-wide controls)</span></h1>
+    <div class=card id=viewas-card style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-weight:600">👁 Preview as</span>
+        <span class=meta style="font-size:11px;color:var(--muted);flex:1;min-width:140px">Simulate a community plan to see the paywall gates fire on your own box. Owner-only · downgrade-only · reversible.</span>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center">
+        <select id=viewas-select style="padding:6px 8px;border-radius:8px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:13px">
+          <option value=owner>Owner — full access (no gating)</option>
+          <option value=free>Free</option>
+          <option value=registered>Registered</option>
+          <option value=plus>Plus</option>
+          <option value=family>Family</option>
+        </select>
+        <button onclick=applyViewAs()>Apply</button>
+        <span id=viewas-status class=meta style="font-size:11px;color:var(--muted)"></span>
+      </div>
+    </div>
     <div id=admin-content><div class=empty><span class=spin></span> Loading…</div></div>
+  </div>
+</div>
+
+<!-- Owner "preview as <plan>" banner — shown whenever a simulation cookie is set. -->
+<div id=viewas-banner style="display:none;position:fixed;left:0;right:0;top:0;z-index:9999;background:#8a5200;color:#fff;padding:6px 12px;font-size:12px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,.45)">
+  <span id=viewas-banner-text></span>
+  <button onclick=exitViewAs() style="margin-left:10px;background:rgba(255,255,255,.2);border:0;color:#fff;border-radius:6px;padding:2px 9px;cursor:pointer;font-size:11px">Exit preview</button>
+</div>
+
+<!-- Paywall upgrade sheet — pops on a structured 402 from any gated route. -->
+<div id=upgrade-modal style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.62);align-items:center;justify-content:center" onclick="if(event.target===this)closeUpgrade()">
+  <div style="background:var(--surface);border:1px solid var(--separator);border-radius:14px;max-width:330px;width:90%;padding:22px;box-shadow:0 12px 44px rgba(0,0,0,.5)">
+    <div style="font-size:34px;text-align:center;line-height:1">🔒</div>
+    <div id=upgrade-title style="font-size:17px;font-weight:600;text-align:center;margin:8px 0 4px"></div>
+    <div id=upgrade-body class=meta style="font-size:13px;text-align:center;color:var(--muted);margin-bottom:16px"></div>
+    <button id=upgrade-cta style="width:100%" onclick=upgradeCta()></button>
+    <button class=sec style="width:100%;margin-top:8px" onclick=closeUpgrade()>Not now</button>
   </div>
 </div>
 
@@ -4513,7 +4547,15 @@ function api(path, opts = {}) {
     let msg = 'HTTP ' + r.status;
     try {
       const j = JSON.parse(txt);
-      msg = j.detail || j.error || msg;
+      const d = j.detail;
+      // Structured entitlement 402 (object detail) → pop the paywall sheet and
+      // reject with a sentinel so callers can choose to stay silent.
+      if (r.status === 402 && d && typeof d === 'object' && d.error === 'entitlement_required') {
+        try { showUpgradeSheet(d); } catch (e) {}
+        return Promise.reject('upgrade_required');
+      }
+      msg = (typeof d === 'object' ? (d && (d.detail || d.error)) : d) || j.error || msg;
+      if (typeof msg === 'object') msg = JSON.stringify(msg);
     } catch {
       if (txt) msg += ': ' + txt.slice(0, 120).replace(/\s+/g, ' ').trim();
     }
@@ -4523,6 +4565,79 @@ function api(path, opts = {}) {
 
 function showOk(t) { const m = document.getElementById('msg'); m.className = 'msg ok'; m.textContent = t; setTimeout(()=>m.className='', 3500); }
 function showErr(t) { const m = document.getElementById('msg'); m.className = 'msg err'; m.textContent = String(t); setTimeout(()=>m.className='', 5500); }
+
+// ── Entitlement preview ("view as") + paywall upgrade sheet ───────────────
+// The owner can simulate a community plan to watch the paywall gates fire on
+// their own box. The banner reads the cookie directly — it's not a secret; the
+// server only honours it for the owner identity. The upgrade sheet pops on any
+// structured 402 (see api() below).
+function _viewAsCookie() {
+  const m = document.cookie.match(/(?:^|;\\s*)smdl_view_as=([^;]+)/);
+  return m ? decodeURIComponent(m[1]).trim().toLowerCase() : '';
+}
+function renderViewAsBanner() {
+  const b = document.getElementById('viewas-banner');
+  if (!b) return;
+  const tier = _viewAsCookie();
+  if (tier && tier !== 'owner') {
+    const t = document.getElementById('viewas-banner-text');
+    if (t) t.textContent = '👁 Previewing as ' + tier.toUpperCase() +
+      ' — paid features lock exactly as a community ' + tier + ' user sees them.';
+    b.style.display = 'block';
+  } else {
+    b.style.display = 'none';
+  }
+}
+function initViewAsControl() {
+  const sel = document.getElementById('viewas-select');
+  if (sel) sel.value = _viewAsCookie() || 'owner';
+}
+async function applyViewAs() {
+  const sel = document.getElementById('viewas-select');
+  const st = document.getElementById('viewas-status');
+  if (!sel) return;
+  try {
+    await api('/api/admin/view_as', { method: 'POST', body: JSON.stringify({ tier: sel.value }) });
+    if (st) st.textContent = 'Applied — reloading…';
+    location.reload();
+  } catch (e) { if (st) st.textContent = 'Failed: ' + e; }
+}
+async function exitViewAs() {
+  try { await api('/api/admin/view_as', { method: 'POST', body: JSON.stringify({ tier: 'owner' }) }); } catch (e) {}
+  location.reload();
+}
+function showUpgradeSheet(ent) {
+  ent = ent || {};
+  const plan = ent.required_plan || 'plus';
+  const planTitle = plan.charAt(0).toUpperCase() + plan.slice(1);
+  const rail = ent.rail || 'license';
+  const title = document.getElementById('upgrade-title');
+  const body = document.getElementById('upgrade-body');
+  const cta = document.getElementById('upgrade-cta');
+  if (title) title.textContent = ent.label || 'Premium feature';
+  if (body) {
+    let msg = 'This needs the ' + planTitle + ' plan.';
+    const sim = _viewAsCookie();
+    if (sim && sim !== 'owner') msg += ' You\\'re previewing as ' + sim.toUpperCase() + '.';
+    body.textContent = msg;
+  }
+  if (cta) {
+    cta.textContent = (rail === 'play') ? '⭐ Upgrade with Google Play' : '⭐ Upgrade to ' + planTitle;
+    cta.dataset.rail = rail;
+  }
+  const m = document.getElementById('upgrade-modal');
+  if (m) m.style.display = 'flex';
+}
+function closeUpgrade() { const m = document.getElementById('upgrade-modal'); if (m) m.style.display = 'none'; }
+function upgradeCta() {
+  closeUpgrade();
+  const sim = _viewAsCookie();
+  // While the owner is previewing, "unlock" = drop the preview back to full.
+  if (sim && sim !== 'owner') { exitViewAs(); return; }
+  const cta = document.getElementById('upgrade-cta');
+  const rail = cta ? cta.dataset.rail : 'license';
+  showOk(rail === 'play' ? 'Google Play Billing flow — wiring pending' : 'Upgrade flow — wiring pending');
+}
 
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function timeago(iso) {
@@ -8260,6 +8375,10 @@ async function restartService() {
 
 // Surface the Admin tab if we're owner. Best-effort — failures stay silent.
 bootstrapWhoami();
+// Show the "previewing as <plan>" banner + sync the Admin selector if the
+// owner has a simulation cookie set.
+renderViewAsBanner();
+initViewAsControl();
 // Apply the custom app logo to the home header if one is set (#74).
 applyBrandLogo();
 // Apply the saved home-tile order + wire up drag-to-reorder (#41).

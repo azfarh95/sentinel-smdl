@@ -126,6 +126,56 @@ def entitlements_for(plan: str) -> list[str]:
     return sorted(PLANS.get(plan, PLANS[_DEFAULT_PLAN]))
 
 
+# --- Capability catalog (UI-facing metadata) ------------------------------
+# Plans low→high, so min_plan_for() reports the cheapest tier that unlocks a
+# cap. Keep aligned with PLANS above.
+_PLAN_ORDER = ("free", "registered", "plus", "family")
+
+# cap → (human label, area). Drives the lock badges + upsell copy in the UI.
+CAP_META: dict[str, tuple[str, str]] = {
+    CAP_TV_BROWSE:      ("Browse the TV guide", "tv"),
+    CAP_TV_PLAY:        ("Play a channel", "tv"),
+    CAP_TV_EPG:         ("Rich EPG / now-next", "tv"),
+    CAP_TV_FAVORITES:   ("Save favourite channels", "tv"),
+    CAP_TV_RECORDER:    ("Record live TV", "tv"),
+    CAP_TV_MULTIVIEW:   ("Watch multiple streams at once", "tv"),
+    CAP_LIBRARY_BROWSE: ("Browse the library", "library"),
+    CAP_DOWNLOAD:       ("Download a link", "downloader"),
+    CAP_DOWNLOAD_HD:    ("HD / batch downloads", "downloader"),
+    CAP_STICKERS:       ("Make stickers", "stickers"),
+    CAP_WATCHLIST:      ("Stream watchlist", "watchlist"),
+    CAP_SYNC:           ("Cross-device sync", "watchlist"),
+}
+
+
+def min_plan_for(cap: str) -> str | None:
+    """The cheapest plan that unlocks `cap`, or None if no plan grants it.
+
+    >>> min_plan_for("smdl.tv.play")
+    'free'
+    >>> min_plan_for("smdl.tv.recorder")
+    'plus'
+    >>> min_plan_for("smdl.tv.favorites")
+    'registered'
+    >>> min_plan_for("smdl.nope") is None
+    True
+    """
+    for plan in _PLAN_ORDER:
+        if cap in PLANS[plan]:
+            return plan
+    return None
+
+
+def catalog() -> list[dict]:
+    """Static capability catalog: every known cap with its label, area, and the
+    minimum plan that unlocks it. The UI overlays the caller's grant on top to
+    decide what to badge as locked / show an upsell for."""
+    return [
+        {"cap": cap, "label": label, "area": area, "min_plan": min_plan_for(cap)}
+        for cap, (label, area) in CAP_META.items()
+    ]
+
+
 def enrich(row: dict) -> dict:
     """Build the entitlement block to merge into a validate grant.
 
@@ -172,6 +222,17 @@ def require_entitlement(grant: dict, cap: str) -> None:
 
     402 (Payment Required) is the sellable signal — distinct from the
     legal-boundary rail's 404 (capability does not exist on this deployment).
+
+    The detail is a STRUCTURED object so the client can render a paywall sheet
+    without string-parsing: {error, cap, required_plan}. `required_plan` is the
+    cheapest plan that unlocks the cap (the upsell target).
     """
     if not has_entitlement(grant, cap):
-        raise HTTPException(status_code=402, detail=f"entitlement_required:{cap}")
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "entitlement_required",
+                "cap": cap,
+                "required_plan": min_plan_for(cap),
+            },
+        )

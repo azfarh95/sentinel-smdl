@@ -1929,6 +1929,85 @@ async def pack_sticker_file(file_id: str, request: Request):
         JSONResponse({"detail": "proxy cache miss"}, status_code=500)
 
 
+class StickerToDraftBody(BaseModel):
+    file_id: str
+
+
+@router.post("/api/sticker_pack/sticker/to_draft")
+async def pack_sticker_to_draft(body: StickerToDraftBody, request: Request) -> dict:
+    """Re-import a published pack sticker's bytes into a fresh editable DRAFT so
+    the Studio editor (/stickers/{id}/edit) can re-crop / re-trim / re-emoji /
+    cut-out it. Telegram can't mutate a published sticker's bytes in place, so
+    this opens an editable COPY — re-making it appends a new variant to the pack
+    (the user can remove the original afterwards). Returns
+    {id, mime_type, is_video, duration_s, width, height}."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+    file_id = (body.file_id or "").strip()
+    if not file_id:
+        raise HTTPException(400, "file_id required")
+    tg_app = _require_bot()
+    try:
+        f = await tg_app.bot.get_file(file_id)
+        data = bytes(await f.download_as_bytearray())
+    except TelegramError as e:
+        raise HTTPException(502, f"Telegram file fetch failed: {e}")
+    if not data:
+        raise HTTPException(502, "empty sticker file")
+    # Detect container from magic bytes — the same formats pack_sticker_file
+    # handles (webm / webp / gif / png).
+    if data[:4] == b"\x1aE\xdf\xa3":              # EBML / Matroska / WebM
+        mime, ext = "video/webm", ".webm"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        mime, ext = "image/webp", ".webp"
+    elif data[:6] in (b"GIF87a", b"GIF89a"):
+        mime, ext = "image/gif", ".gif"
+    elif data[:8] == b"\x89PNG\r\n\x1a\n":
+        mime, ext = "image/png", ".png"
+    else:
+        mime, ext = "application/octet-stream", ".bin"
+    # Insert the row first to learn the canonical id, then write the file into
+    # the <id>.<ext> slot draft_path() predicts (mirrors upload_draft()).
+    (DRAFTS_DIR / str(user_id)).mkdir(parents=True, exist_ok=True)
+    draft_id = await _db.sticker_draft_insert(
+        user_id=user_id,
+        telegram_file_id=_WEB_UPLOAD_SENTINEL,
+        file_path="",
+        mime_type=mime,
+        duration_s=None, width=None, height=None,
+    )
+    final_path = draft_path(user_id, draft_id, ext)
+    try:
+        final_path.write_bytes(data)
+    except Exception as e:
+        logger.warning("to_draft persist failed u=%s d=%s: %s", user_id, draft_id, e)
+        raise HTTPException(500, "draft persist failed")
+    # Best-effort probe now the source is on disk (the editor falls back to
+    # client-side decode for dims/duration if this misses).
+    meta = await _sp.probe(final_path)
+    import aiosqlite
+    async with aiosqlite.connect(_db.DB_PATH) as dbh:
+        await dbh.execute(
+            "UPDATE sticker_drafts SET file_path = ?, duration_s = ?, "
+            "width = ?, height = ? WHERE id = ?",
+            (str(final_path), meta.get("duration_s"), meta.get("width"),
+             meta.get("height"), draft_id),
+        )
+        await dbh.commit()
+    is_video = mime.startswith("video/") or mime == "image/gif"
+    logger.info("pack sticker → draft u=%s d=%s mime=%s bytes=%d",
+                user_id, draft_id, mime, len(data))
+    return {
+        "id":         draft_id,
+        "mime_type":  mime,
+        "is_video":   is_video,
+        "duration_s": meta.get("duration_s"),
+        "width":      meta.get("width"),
+        "height":     meta.get("height"),
+    }
+
+
 @router.post("/api/sticker_pack/sticker/delete")
 async def pack_sticker_delete(body: StickerByIdBody, request: Request,
                               kind: str | None = "video") -> dict:

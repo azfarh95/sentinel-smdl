@@ -1563,15 +1563,13 @@ async def build() -> Application:
                             disable_web_page_preview=True,
                         )
                     instant_ok = True
-                    # Video: drop the draft. Static: KEEP it (6h TTL) so the
-                    # cut-out / shape buttons can re-make from the same source.
-                    if kind != "static":
-                        try:
-                            path_str = await _stickers_db.sticker_draft_delete(draft_id, user.id)
-                            if path_str:
-                                _Path(path_str).unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                    # Keep the draft (6h TTL) for BOTH video + static so every
+                    # clip / photo / video-note you send the bot — and that it
+                    # auto-made into a sticker — also shows up in the Mini App
+                    # "Drafts" list, ready to re-crop / re-trim / cut-out in the
+                    # editor. (Previously the video draft was deleted here, so
+                    # sent videos & video-notes never appeared in Drafts.) The
+                    # 6h TTL sweep + "Delete all my drafts" still clean them up.
         except Exception as e:
             logger.warning("bot instant-make crashed for u=%s d=%s: %s",
                            user.id, draft_id, e)

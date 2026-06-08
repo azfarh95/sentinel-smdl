@@ -5735,6 +5735,7 @@ function _renderPackSticker(s, idx, packType) {
   const actions = document.createElement('div');
   actions.style.cssText = 'display:none;flex-wrap:wrap;gap:4px;margin-top:2px';
   actions.innerHTML =
+    '<button class=sec style="font-size:11px;padding:4px 6px" title="Open in the editor — re-crop, trim, shape, cut-out" onclick="stickersEditInEditor(this)">✂️ Edit</button>' +
     '<button class=sec style="font-size:11px;padding:4px 6px" title="Change emoji" onclick="stickersEditEmoji(this)">✎</button>' +
     '<button class=sec style="font-size:11px;padding:4px 6px" title="Keywords" onclick="stickersEditKeywords(this)">🔑</button>' +
     '<button class=sec style="font-size:11px;padding:4px 6px" title="Set as cover" onclick="stickersSetCover(this)">⭐</button>' +
@@ -5803,6 +5804,22 @@ async function stickersRemoveFromPack(btn) {
     showOk('Removed from pack');
     stickersLoadPackContents();
   } catch (e) { showErr('Remove failed: ' + e); }
+}
+
+// Open a published pack sticker in the Studio editor. Telegram can't edit a
+// sticker's bytes in place, so the backend re-imports its bytes into a fresh
+// draft and we jump to the editor on that draft. Re-making there appends a new
+// variant to the pack (use 🗑 to drop the original if you don't want both).
+async function stickersEditInEditor(btn) {
+  const file_id = _packCardFileId(btn);
+  if (!file_id) return;
+  showOk('Opening in editor…');
+  try {
+    const r = await api('/api/sticker_pack/sticker/to_draft', { method: 'POST',
+      body: JSON.stringify({ file_id }) });
+    const kind = r.is_video ? 'video' : 'static';
+    location.href = '/stickers/' + r.id + '/edit?kind=' + kind;
+  } catch (e) { showErr('Couldn\\'t open editor: ' + e); }
 }
 
 // ── Look-up + clone for packs not created by our bot ─────────────────────

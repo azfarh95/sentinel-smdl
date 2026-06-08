@@ -2429,12 +2429,14 @@ _EDIT_HTML = r"""<!doctype html>
               box-sizing:border-box;cursor:move;
               transition:border-color .12s;}
     .crop-box.dragging{border-color:var(--accent);}
-    .crop-handle{position:absolute;width:14px;height:14px;background:#fff;
-                 border-radius:3px;border:1px solid #333;}
-    .crop-handle.nw{left:-8px;top:-8px;cursor:nw-resize;}
-    .crop-handle.ne{right:-8px;top:-8px;cursor:ne-resize;}
-    .crop-handle.sw{left:-8px;bottom:-8px;cursor:sw-resize;}
-    .crop-handle.se{right:-8px;bottom:-8px;cursor:se-resize;}
+    .crop-handle{position:absolute;width:18px;height:18px;background:#fff;
+                 border-radius:4px;border:1px solid #333;touch-action:none;}
+    /* Invisible enlarged hit-area so corners are easy to grab on touch. */
+    .crop-handle::after{content:'';position:absolute;inset:-13px;}
+    .crop-handle.nw{left:-9px;top:-9px;cursor:nw-resize;}
+    .crop-handle.ne{right:-9px;top:-9px;cursor:ne-resize;}
+    .crop-handle.sw{left:-9px;bottom:-9px;cursor:sw-resize;}
+    .crop-handle.se{right:-9px;bottom:-9px;cursor:se-resize;}
     .draw-canvas{position:absolute;inset:0;display:none;
                  touch-action:none;cursor:crosshair;}
     .draw-canvas.on{display:block;}
@@ -2786,6 +2788,17 @@ _EDIT_HTML = r"""<!doctype html>
 <script>
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
+// Telegram BackButton — one Android system-back press returns to the Stickers
+// tab instead of TG minimising the whole Mini App from this editor sub-page.
+if (tg && tg.BackButton) {
+  try {
+    tg.BackButton.show();
+    tg.BackButton.onClick(function () {
+      if (window.history.length > 1) window.history.back();
+      else location.href = '/app?tab=stickers';
+    });
+  } catch (e) {}
+}
 const initData = tg?.initData || '';
 
 const DRAFT_ID = {{DRAFT_ID}};
@@ -3134,10 +3147,17 @@ function clampCropToVideo() {
   const vr = vid.getBoundingClientRect();
   const wr = wrap.getBoundingClientRect();
   const vL = vr.left - wr.left, vT = vr.top - wr.top;
-  cropX = Math.max(vL, Math.min(cropX, vL + vr.width  - cropW));
-  cropY = Math.max(vT, Math.min(cropY, vT + vr.height - cropH));
   cropW = Math.min(cropW, vr.width);
   cropH = Math.min(cropH, vr.height);
+  cropX = Math.max(vL, Math.min(cropX, vL + vr.width  - cropW));
+  cropY = Math.max(vT, Math.min(cropY, vT + vr.height - cropH));
+  // Snap flush to an edge when within a few px — makes reaching the exact
+  // edge / corner effortless on touch (no "can't quite get there" gap).
+  const SNAP = 9;
+  if (cropX - vL <= SNAP) cropX = vL;
+  else if ((vL + vr.width) - (cropX + cropW) <= SNAP) cropX = vL + vr.width - cropW;
+  if (cropY - vT <= SNAP) cropY = vT;
+  else if ((vT + vr.height) - (cropY + cropH) <= SNAP) cropY = vT + vr.height - cropH;
 }
 
 cropModeToggle.addEventListener('click', () => {

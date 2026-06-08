@@ -152,6 +152,20 @@ body.smdl-iptv-nav-hidden .smdl-iptv-topnav-host .reveal-pill { display: inline-
   apply(saved);
   if (nav)  nav.addEventListener('contextmenu', cycle);
   if (pill) pill.addEventListener('contextmenu', cycle);
+  // Telegram BackButton: make one Android system-back press go back ONE page
+  // (e.g. play → channels → app). Without this, TG's default minimises the
+  // whole Mini App from these full-page IPTV screens (the "clanky back").
+  var _tg = window.Telegram && window.Telegram.WebApp;
+  if (_tg && _tg.BackButton) {
+    try { _tg.ready && _tg.ready(); } catch(_){}
+    try {
+      _tg.BackButton.show();
+      _tg.BackButton.onClick(function(){
+        if (window.history.length > 1) window.history.back();
+        else location.href = (window._SMDL_BACK_URL || '/app');
+      });
+    } catch(_){}
+  }
 })();
 </script>
 """

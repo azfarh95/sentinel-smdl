@@ -29,7 +29,9 @@ import os
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
@@ -51,6 +53,16 @@ DRAFTS_DIR    = Path(os.environ.get("STICKER_DRAFTS_DIR",
                                      "/data/sticker_drafts"))
 OUTPUT_DIR    = Path(os.environ.get("STICKER_OUTPUT_DIR",
                                      "/data/stickers"))
+
+# ── GIF library sources (Giphy / Tenor) → sticker ──────────────────────────
+# Keys come from the environment (WCM-sourced via .env.local). Giphy falls
+# back to its long-standing public *beta* key so the feature works out of the
+# box; set a real GIPHY_API_KEY for production rate limits + ToS compliance.
+# Tenor (Google) has no public demo key — it stays dark until TENOR_API_KEY
+# is set. The from_url importer SSRF-guards downloads to these hosts only.
+GIPHY_API_KEY = os.environ.get("GIPHY_API_KEY", "").strip() or "dc6zaTOxFJmzC"
+TENOR_API_KEY = os.environ.get("TENOR_API_KEY", "").strip()
+_GIF_FETCH_HOSTS = (".giphy.com", ".tenor.com", ".tenorapi.com", ".googleapis.com")
 
 
 def draft_path(user_id: int, draft_id: int, ext: str) -> Path:
@@ -190,6 +202,13 @@ class FromDownloadBody(BaseModel):
     # DOWNLOADS_DIR before opening anything, so a manipulated payload can't
     # exfiltrate arbitrary files.
     file_path: str
+
+
+class FromUrlBody(BaseModel):
+    # A Giphy/Tenor media URL the user picked from the in-app GIF search. The
+    # importer re-checks the host against _GIF_FETCH_HOSTS before fetching, so
+    # a hand-crafted payload can't turn this into an SSRF.
+    url: str
 
 
 # Web-upload limits. Mirrors what Telegram itself accepts at the bot path
@@ -1713,6 +1732,163 @@ async def draft_from_download(body: FromDownloadBody, request: Request) -> dict:
         "width":      meta.get("width"),
         "height":     meta.get("height"),
         "source":     p.name,
+    }
+
+
+# ── GIF library search (Giphy / Tenor) ─────────────────────────────────────
+
+
+@router.get("/api/stickers/gif_search")
+async def gif_search(request: Request, q: str = "", source: str = "giphy",
+                     limit: int = 24) -> dict:
+    """Proxy a Giphy/Tenor search (or trending when q is empty) and return a
+    normalised list of {id, preview, url, is_mp4, title}. `url` prefers the
+    MP4 form (smaller, cleaner alpha-free encode for the sticker pipeline),
+    falling back to the GIF. The browser never sees the API key."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    q = (q or "").strip()
+    src = (source or "giphy").lower()
+    limit = max(1, min(int(limit or 24), 50))
+    items: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            if src == "giphy":
+                ep = "search" if q else "trending"
+                params = {"api_key": GIPHY_API_KEY, "limit": limit, "rating": "pg-13"}
+                if q:
+                    params["q"] = q
+                r = await client.get(f"https://api.giphy.com/v1/gifs/{ep}", params=params)
+                r.raise_for_status()
+                for g in (r.json().get("data") or []):
+                    imgs = g.get("images") or {}
+                    prev = ((imgs.get("fixed_width_small") or imgs.get("fixed_width")
+                             or imgs.get("preview_gif") or {}).get("url"))
+                    mp4 = ((imgs.get("original_mp4") or imgs.get("original") or {}).get("mp4"))
+                    gif = ((imgs.get("original") or {}).get("url"))
+                    items.append({"id": g.get("id"), "preview": prev,
+                                  "url": mp4 or gif, "is_mp4": bool(mp4),
+                                  "title": g.get("title") or ""})
+            elif src == "tenor":
+                if not TENOR_API_KEY:
+                    raise HTTPException(503, "Tenor not configured — set TENOR_API_KEY")
+                ep = "search" if q else "featured"
+                params = {"key": TENOR_API_KEY, "limit": limit, "client_key": "smdl",
+                          "media_filter": "tinygif,mp4,gif", "contentfilter": "medium"}
+                if q:
+                    params["q"] = q
+                r = await client.get(f"https://tenor.googleapis.com/v2/{ep}", params=params)
+                r.raise_for_status()
+                for g in (r.json().get("results") or []):
+                    mf = g.get("media_formats") or {}
+                    prev = ((mf.get("tinygif") or mf.get("nanogif")
+                             or mf.get("gifpreview") or {}).get("url"))
+                    mp4 = (mf.get("mp4") or {}).get("url")
+                    gif = (mf.get("gif") or {}).get("url")
+                    items.append({"id": g.get("id"), "preview": prev,
+                                  "url": mp4 or gif, "is_mp4": bool(mp4),
+                                  "title": g.get("content_description") or ""})
+            else:
+                raise HTTPException(400, f"unknown source: {src}")
+    except HTTPException:
+        raise
+    except httpx.HTTPError as e:
+        logger.warning("gif_search %s failed: %s", src, e)
+        raise HTTPException(502, f"{src} search failed")
+    return {"ok": True, "source": src,
+            "items": [i for i in items if i.get("url") and i.get("preview")]}
+
+
+@router.post("/api/sticker_drafts/from_url")
+async def draft_from_url(body: FromUrlBody, request: Request) -> dict:
+    """Fetch a Giphy/Tenor media URL (chosen from the in-app GIF search) into
+    DRAFTS_DIR and create a draft row — same shape as a direct upload, so the
+    normal make-sticker flow takes over. SSRF-guarded to _GIF_FETCH_HOSTS."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    user_id = int(payload["user"]["id"])
+
+    url = (body.url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "url must be http(s)")
+    host = (urlparse(url).hostname or "").lower()
+    if not any(host == h.lstrip(".") or host.endswith(h) for h in _GIF_FETCH_HOSTS):
+        raise HTTPException(403, "url host not allowed (Giphy/Tenor only)")
+
+    user_dir = DRAFTS_DIR / str(user_id)
+    user_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = user_dir / f"_gif_{uuid.uuid4().hex}.bin"
+    written = 0
+    mime = ""
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                mime = (resp.headers.get("content-type") or "").split(";")[0].lower()
+                with open(tmp_path, "wb") as out:
+                    async for chunk in resp.aiter_bytes(64 * 1024):
+                        written += len(chunk)
+                        if written > _UPLOAD_MAX_BYTES:
+                            raise HTTPException(413, "remote file too large (max 50 MB)")
+                        out.write(chunk)
+    except HTTPException:
+        try: tmp_path.unlink(missing_ok=True)
+        except Exception: pass
+        raise
+    except httpx.HTTPError as e:
+        try: tmp_path.unlink(missing_ok=True)
+        except Exception: pass
+        logger.warning("from_url fetch failed u=%s: %s", user_id, e)
+        raise HTTPException(502, "could not fetch the GIF")
+
+    if written == 0:
+        try: tmp_path.unlink(missing_ok=True)
+        except Exception: pass
+        raise HTTPException(400, "empty download")
+
+    # Normalise mime: CDNs serve image/gif or video/mp4; fall back to the URL
+    # suffix, then to mp4 (Giphy/Tenor's mp4 form is what we usually request).
+    if not (mime.startswith("video/") or mime == "image/gif"):
+        low = url.lower().split("?")[0]
+        if low.endswith(".mp4"):    mime = "video/mp4"
+        elif low.endswith(".gif"):  mime = "image/gif"
+        elif low.endswith(".webm"): mime = "video/webm"
+        else:                       mime = "video/mp4"
+    ext = _MIME_EXT.get(mime, ".mp4")
+
+    meta = await _sp.probe(tmp_path)
+    draft_id = await _db.sticker_draft_insert(
+        user_id=user_id,
+        telegram_file_id=_WEB_UPLOAD_SENTINEL,
+        file_path="",
+        mime_type=mime,
+        duration_s=meta.get("duration_s"),
+        width=meta.get("width"),
+        height=meta.get("height"),
+    )
+    final_path = draft_path(user_id, draft_id, ext)
+    try:
+        tmp_path.rename(final_path)
+    except Exception as e:
+        try: tmp_path.unlink(missing_ok=True)
+        except Exception: pass
+        logger.warning("from_url rename failed u=%s d=%s: %s", user_id, draft_id, e)
+        raise HTTPException(500, "draft persist failed")
+    import aiosqlite
+    async with aiosqlite.connect(_db.DB_PATH) as dbh:
+        await dbh.execute(
+            "UPDATE sticker_drafts SET file_path = ? WHERE id = ?",
+            (str(final_path), draft_id),
+        )
+        await dbh.commit()
+
+    logger.info("from_url OK u=%s d=%s mime=%s bytes=%d", user_id, draft_id, mime, written)
+    return {
+        "id":         draft_id,
+        "mime_type":  mime,
+        "duration_s": meta.get("duration_s"),
+        "width":      meta.get("width"),
+        "height":     meta.get("height"),
     }
 
 

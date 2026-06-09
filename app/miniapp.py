@@ -4251,9 +4251,9 @@ button.warn { background: #ff9500; color: #fff; }
   <div class=page id=page-stickers>
     <h1>Sticker Maker</h1>
     <div class=stk-nav id=stk-nav>
-      <button data-sec=stickers onclick="stkSection('stickers')">🎞 Stickers</button>
-      <button data-sec=add onclick="stkSection('add')">＋ Add</button>
       <button data-sec=pack onclick="stkSection('pack')">📦 Pack</button>
+      <button data-sec=add onclick="stkSection('add')">＋ Add</button>
+      <button data-sec=stickers onclick="stkSection('stickers')">🎞 Stickers</button>
     </div>
 
     <div class="stk-sec active" data-section=stickers>
@@ -4317,6 +4317,20 @@ button.warn { background: #ff9500; color: #fff; }
           </div>
           <div id=stickers-upload-status class=meta style="margin-top:4px;font-size:12px"></div>
         </div>
+      </div>
+      <div class=card style="margin-top:10px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <span style="font-weight:600">From a GIF library</span>
+          <span style="flex:1"></span>
+          <span class=pill data-gifsrc=giphy onclick="stkGifSource('giphy')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">GIPHY</span>
+          <span class=pill data-gifsrc=tenor onclick="stkGifSource('tenor')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">Tenor</span>
+        </div>
+        <input type=text id=stk-gif-q placeholder="Search GIFs — or leave blank for trending…"
+               oninput="stkGifSearchDebounced()" onkeydown="if(event.key==='Enter')stkGifSearch()"
+               style="width:100%;box-sizing:border-box;padding:8px 11px;border-radius:9px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:13px">
+        <div id=stk-gif-results style="display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:6px;margin-top:8px"></div>
+        <div id=stk-gif-status class=meta style="font-size:11px;margin-top:6px;color:var(--muted)"></div>
+        <div class=meta style="font-size:10px;margin-top:4px;color:var(--muted)">Tap a GIF to turn it into a sticker. Powered by GIPHY &amp; Tenor.</div>
       </div>
       <h2 style="margin:16px 4px 8px;font-size:15px;color:var(--muted);font-weight:600">Drafts</h2>
       <div id=stickers-drafts>
@@ -5686,6 +5700,80 @@ function stkSection(sec) {
   document.querySelectorAll('#stk-nav button').forEach(b =>
     b.classList.toggle('on', b.dataset.sec === sec));
   try { localStorage.setItem('smdl_stk_section', sec); } catch (e) {}
+  // Lazy-load trending GIFs the first time the Add section is opened.
+  if (sec === 'add' && !_stkGifInit) { _stkGifInit = true; _stkGifSyncPills(); stkGifSearch(); }
+}
+
+// ── GIF library (Giphy / Tenor) → sticker ────────────────────────────────
+// Search a provider, tap a result, and from_url fetches it into a draft that
+// flows through the normal make pipeline (Instant mode auto-makes + DMs).
+let _stkGifSource = 'giphy';
+let _stkGifTimer = null;
+let _stkGifInit = false;
+function _stkGifSyncPills() {
+  document.querySelectorAll('#page-stickers .pill[data-gifsrc]').forEach(el => {
+    const on = el.dataset.gifsrc === _stkGifSource;
+    el.style.background = on ? '#284' : '#222';
+    el.style.borderColor = on ? '#284' : '#333';
+    el.style.color = on ? '#dfd' : '#bbb';
+  });
+}
+function stkGifSource(s) {
+  _stkGifSource = (s === 'tenor') ? 'tenor' : 'giphy';
+  _stkGifSyncPills();
+  stkGifSearch();
+}
+function stkGifSearchDebounced() {
+  clearTimeout(_stkGifTimer);
+  _stkGifTimer = setTimeout(stkGifSearch, 350);
+}
+async function stkGifSearch() {
+  const qEl = document.getElementById('stk-gif-q');
+  const res = document.getElementById('stk-gif-results');
+  const st  = document.getElementById('stk-gif-status');
+  if (!res || !st) return;
+  const q = (qEl && qEl.value || '').trim();
+  const label = _stkGifSource === 'giphy' ? 'GIPHY' : 'Tenor';
+  st.textContent = 'Searching ' + label + '…';
+  res.innerHTML = '';
+  try {
+    const d = await api('/api/stickers/gif_search?source=' + _stkGifSource + '&q=' + encodeURIComponent(q));
+    const items = d.items || [];
+    if (!items.length) { st.textContent = 'No GIFs found — try another search.'; return; }
+    st.textContent = label + ' · tap a GIF to add it';
+    res.innerHTML = items.map(it =>
+      '<div class=stk-gif-cell data-url="' + esc(it.url) + '" title="' + esc(it.title || '') + '" ' +
+      'style="aspect-ratio:1/1;border-radius:8px;cursor:pointer;background:#0d0f14 center/cover no-repeat;' +
+      "background-image:url('" + esc(it.preview) + "');border:1px solid var(--separator)\"></div>").join('');
+    res.querySelectorAll('.stk-gif-cell').forEach(el =>
+      el.addEventListener('click', () => stkGifImport(el.dataset.url, el)));
+  } catch (e) {
+    const msg = ('' + e);
+    st.textContent = msg.includes('not configured')
+      ? '⚠ Tenor needs an API key (set TENOR_API_KEY). GIPHY works now.'
+      : 'Search failed: ' + msg;
+  }
+}
+async function stkGifImport(url, el) {
+  const st = document.getElementById('stk-gif-status');
+  if (el) el.style.opacity = '.45';
+  try {
+    if (st) st.textContent = 'Importing GIF…';
+    const d = await api('/api/sticker_drafts/from_url', { method: 'POST', body: JSON.stringify({ url }) });
+    if (_stickersMode === 'instant') {
+      if (st) st.textContent = '⚡ Converting & sending…';
+      await _stickersInstantMake(d.id);
+      try { await api('/api/sticker_drafts/' + d.id + '/delete', { method: 'POST', body: '{}' }); } catch (e) {}
+      if (st) st.textContent = '✓ Added to your ' + _stickersKind + ' pack';
+    } else {
+      if (st) st.innerHTML = '✓ Draft added — see <b>Drafts</b> below to refine.';
+      try { loadStickers(); } catch (e) {}
+    }
+  } catch (e) {
+    if (st) st.textContent = '❌ ' + e;
+  } finally {
+    if (el) el.style.opacity = '';
+  }
 }
 
 // ── v2.7-D — cross-pack library search + tag + trash/restore ────────────────

@@ -3498,6 +3498,30 @@ body.sidebar-collapsed { padding-left: 28px; }
            transition: width 0.2s ease; overflow: hidden; }
 body.sidebar-collapsed .sidebar { width: 28px; }
 .sidebar-spacer { flex: 1; }
+
+/* ── Bottom tab bar (replaces the left rail). Home becomes a content feed
+      (the cluster tiles are now the tabs, so #home-tiles is hidden). The
+      rail + its flyout are removed; bottom tabs drive clusterEnter(), which
+      already opens each cluster's sub-hub. 2026-06-09 nav revamp. ── */
+.sidebar, .subsidebar, .sidebar-toggle, #home-tiles { display: none !important; }
+body, body.sidebar-collapsed { padding-left: 0 !important;
+  padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px)) !important; }
+.bottom-nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  display: flex; background: var(--surface); border-top: 1px solid var(--separator);
+  box-shadow: 0 -2px 16px rgba(0,0,0,0.4);
+  padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px)); }
+.bottom-nav .bn-item { flex: 1; display: flex; flex-direction: column; align-items: center;
+  gap: 2px; padding: 4px 0; cursor: pointer; color: var(--text-muted); font-size: 10px;
+  font-weight: 600; border: 0; background: none; transition: color .12s ease; }
+.bottom-nav .bn-ico { font-size: 21px; line-height: 1; }
+.bottom-nav .bn-item.active { color: var(--accent, #5ac8fa); }
+.bottom-nav .bn-item:active { transform: scale(.9); }
+.topright { position: fixed; top: calc(env(safe-area-inset-top, 0px) + 8px); right: 10px;
+  z-index: 41; display: flex; gap: 6px; }
+.topright button { background: var(--surface); border: 1px solid var(--separator);
+  color: var(--text); width: 34px; height: 34px; border-radius: 50%; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; font-size: 15px; }
+.topright button:active { transform: scale(.92); }
 .sidebar-divider { height: 1px; background: var(--separator); margin: 6px 8px; }
 body.sidebar-collapsed .sidebar-divider { margin: 6px 4px; }
 .sidebar-toggle { display: flex; align-items: center; justify-content: center;
@@ -4442,6 +4466,20 @@ button.warn { background: #ff9500; color: #fff; }
      or tapping the same cluster icon again. -->
 <div class=subsidebar id=subsidebar></div>
 
+<!-- Bottom tab bar (primary nav). Home → content feed; the four clusters open
+     their sub-hub via clusterEnter(). Admin + Account live top-right. -->
+<nav class=bottom-nav id=bottom-nav>
+  <button class="bn-item active" data-tab=home onclick="clusterNavHome()"><span class=bn-ico>🏠</span>Home</button>
+  <button class=bn-item data-tab=watch onclick="clusterEnter('watch')"><span class=bn-ico>📺</span>Watch</button>
+  <button class=bn-item data-tab=get onclick="clusterEnter('get')"><span class=bn-ico>📥</span>Get</button>
+  <button class=bn-item data-tab=make onclick="clusterEnter('make')"><span class=bn-ico>🎨</span>Make</button>
+  <button class=bn-item data-tab=inbox onclick="clusterEnter('inbox')"><span class=bn-ico>🔔</span>Inbox</button>
+</nav>
+<div class=topright>
+  <button class=admin-only onclick="clusterEnter('admin')" title="Admin">⚙️</button>
+  <button onclick="location.href='/account'" title="Account">👤</button>
+</div>
+
 <script>
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
@@ -5018,6 +5056,12 @@ function goto(page) {
       : ('nav-cluster-' + (_PAGE_TO_CLUSTER[page] || ''));
   document.querySelectorAll('.sidebar-item').forEach(el =>
     el.classList.toggle('active', el.id === targetId));
+  // Bottom-nav active sync (mirrors the sidebar→cluster mapping).
+  const _tabKey = page === 'home' ? 'home'
+    : page === 'cluster' ? (_clusterHubKey || '')
+    : (_PAGE_TO_CLUSTER[page] || '');
+  document.querySelectorAll('.bn-item').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === _tabKey));
   // If the sub-sidebar flyout is open while we navigate, refresh its
   // "current" highlight so the active page is marked.
   if (_openCluster) _renderSubsidebar(_openCluster);

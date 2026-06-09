@@ -3506,16 +3506,26 @@ body.sidebar-collapsed .sidebar { width: 28px; }
 .sidebar, .subsidebar, .sidebar-toggle, #home-tiles { display: none !important; }
 body, body.sidebar-collapsed { padding-left: 0 !important;
   padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px)) !important; }
+/* Modern bottom tab bar — typography + SVG icon language borrowed from the
+   IPTV page nav (system font stack, 1.7-stroke line icons, #5ac8fa accent),
+   so /app and the standalone IPTV pages read as one app. */
 .bottom-nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
-  display: flex; background: var(--surface); border-top: 1px solid var(--separator);
-  box-shadow: 0 -2px 16px rgba(0,0,0,0.4);
-  padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px)); }
-.bottom-nav .bn-item { flex: 1; display: flex; flex-direction: column; align-items: center;
-  gap: 2px; padding: 4px 0; cursor: pointer; color: var(--text-muted); font-size: 10px;
-  font-weight: 600; border: 0; background: none; transition: color .12s ease; }
-.bottom-nav .bn-ico { font-size: 21px; line-height: 1; }
-.bottom-nav .bn-item.active { color: var(--accent, #5ac8fa); }
+  display: flex; background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid var(--separator); box-shadow: 0 -2px 16px rgba(0,0,0,0.4);
+  padding: 7px 4px calc(7px + env(safe-area-inset-bottom, 0px));
+  font: 10px/1.1 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+.bottom-nav .bn-item { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center;
+  gap: 4px; padding: 3px 0; cursor: pointer; color: var(--text-muted);
+  letter-spacing: .2px; font-weight: 600; border: 0; background: none;
+  transition: color .14s ease, transform .1s ease; -webkit-tap-highlight-color: transparent; }
+.bottom-nav .bn-ico { display: flex; align-items: center; justify-content: center; }
+.bottom-nav .bn-ico svg { width: 23px; height: 23px; display: block; }
+.bottom-nav .bn-item.active { color: #5ac8fa; }
+.bottom-nav .bn-item.active .bn-ico svg { filter: drop-shadow(0 0 6px rgba(90,200,250,.45)); }
 .bottom-nav .bn-item:active { transform: scale(.9); }
+.bottom-nav .bn-badge { position: absolute; top: 0; right: 26%; min-width: 7px; height: 7px;
+  border-radius: 99px; background: #ff453a; display: none; }
 .topright { position: fixed; top: calc(env(safe-area-inset-top, 0px) + 8px); right: 10px;
   z-index: 41; display: flex; gap: 6px; }
 .topright button { background: var(--surface); border: 1px solid var(--separator);
@@ -4469,11 +4479,11 @@ button.warn { background: #ff9500; color: #fff; }
 <!-- Bottom tab bar (primary nav). Home → content feed; the four clusters open
      their sub-hub via clusterEnter(). Admin + Account live top-right. -->
 <nav class=bottom-nav id=bottom-nav>
-  <button class="bn-item active" data-tab=home onclick="clusterNavHome()"><span class=bn-ico>🏠</span>Home</button>
-  <button class=bn-item data-tab=watch onclick="clusterEnter('watch')"><span class=bn-ico>📺</span>Watch</button>
-  <button class=bn-item data-tab=get onclick="clusterEnter('get')"><span class=bn-ico>📥</span>Get</button>
-  <button class=bn-item data-tab=make onclick="clusterEnter('make')"><span class=bn-ico>🎨</span>Make</button>
-  <button class=bn-item data-tab=inbox onclick="clusterEnter('inbox')"><span class=bn-ico>🔔</span>Inbox</button>
+  <button class="bn-item active" data-tab=home onclick="clusterNavHome()"><span class=bn-ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9"/><path d="M9 21v-6h6v6"/></svg></span>Home</button>
+  <button class=bn-item data-tab=watch onclick="clusterEnter('watch')"><span class=bn-ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/><path d="M6 12a4 4 0 0 1 4-4"/></svg></span>Watch</button>
+  <button class=bn-item data-tab=get onclick="clusterEnter('get')"><span class=bn-ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></span>Get</button>
+  <button class=bn-item data-tab=make onclick="clusterEnter('make')"><span class=bn-ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M14 8.5h.01"/><path d="M9 9.5h.01"/><path d="M8.5 14a4 4 0 0 0 7 0"/></svg></span>Make</button>
+  <button class=bn-item data-tab=inbox onclick="clusterEnter('inbox')"><span class=bn-ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg></span><span class=bn-badge id=bn-inbox-badge></span>Inbox</button>
 </nav>
 <div class=topright>
   <button class=admin-only onclick="clusterEnter('admin')" title="Admin">⚙️</button>
@@ -4913,28 +4923,28 @@ function _homeCard(c) {
   const cls = c.logo ? 'home-card-logo' : 'home-card-poster';
   const img = bg
     ? `<div class="${cls}" style="background-image:url('${bg}')"></div>`
-    : `<div class="home-card-poster home-card-blank">${escapeHtml((c.label || '?').slice(0, 1))}</div>`;
+    : `<div class="home-card-poster home-card-blank">${esc((c.label || '?').slice(0, 1))}</div>`;
   const attrs = c.act === 'play'
-    ? `data-act=play data-id="${escapeHtml(String(c.id))}"`
-    : `data-act=page data-page="${escapeHtml(c.page || 'home')}"`;
+    ? `data-act=play data-id="${esc(String(c.id))}"`
+    : `data-act=page data-page="${esc(c.page || 'home')}"`;
   return `<div class=home-card ${attrs}>${img}`
-       + `<div class=home-card-label>${escapeHtml(c.label || '')}</div>`
-       + (c.sub ? `<div class=home-card-sub>${escapeHtml(c.sub)}</div>` : '')
+       + `<div class=home-card-label>${esc(c.label || '')}</div>`
+       + (c.sub ? `<div class=home-card-sub>${esc(c.sub)}</div>` : '')
        + `</div>`;
 }
 function _homeRowShell(title) {
   const sec = document.createElement('div');
   sec.className = 'home-row';
-  sec.innerHTML = `<div class=home-row-title>${escapeHtml(title)}</div><div class=home-row-scroll></div>`;
+  sec.innerHTML = `<div class=home-row-title>${esc(title)}</div><div class=home-row-scroll></div>`;
   document.getElementById('home-rows').appendChild(sec);
   return sec.querySelector('.home-row-scroll');
 }
 function _homeEmptyRow(title, msg, action, label) {
   const sec = document.createElement('div');
   sec.className = 'home-row';
-  sec.innerHTML = `<div class=home-row-title>${escapeHtml(title)}</div>`
-    + `<div class=home-row-empty><span>${escapeHtml(msg)}</span>`
-    + `<button onclick="${action}">${escapeHtml(label)}</button></div>`;
+  sec.innerHTML = `<div class=home-row-title>${esc(title)}</div>`
+    + `<div class=home-row-empty><span>${esc(msg)}</span>`
+    + `<button onclick="${action}">${esc(label)}</button></div>`;
   document.getElementById('home-rows').appendChild(sec);
 }
 async function _homeRow(title, url, mapFn, emptyMsg, action, label) {
@@ -5103,6 +5113,9 @@ function setNotifBadge(n) {
     if (n > 0) { b.textContent = txt; b.style.display = ''; }
     else b.style.display = 'none';
   });
+  // Bottom-nav Inbox tab carries a dot (no count) so the tab bar stays clean.
+  const dot = document.getElementById('bn-inbox-badge');
+  if (dot) dot.style.display = n > 0 ? 'block' : 'none';
 }
 
 async function refreshNotifBadge() {

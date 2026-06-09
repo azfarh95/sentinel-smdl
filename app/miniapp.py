@@ -3526,6 +3526,42 @@ body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
    description lists the actual sub-pages in the cluster so the home view
    teaches the structure without a separate label row. */
 .home-clusters { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 6px; }
+/* ── Phase-1 cohesive home: content rows + first-run welcome ── */
+.home-rows { margin-top: 18px; display: flex; flex-direction: column; gap: 18px; }
+.home-row-title { font-size: 14px; font-weight: 700; margin: 0 0 8px; }
+.home-row-scroll { display: flex; gap: 10px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  scrollbar-width: none; padding-bottom: 2px; }
+.home-row-scroll::-webkit-scrollbar { display: none; }
+.home-card { flex: 0 0 auto; width: 108px; cursor: pointer; }
+.home-card-logo, .home-card-poster { width: 108px; border-radius: 10px; background-size: cover;
+  background-position: center; border: 1px solid var(--separator); transition: transform .12s ease; }
+.home-card-logo { height: 68px; background-color: #fff; background-size: contain; background-repeat: no-repeat; }
+.home-card-poster { height: 152px; background-color: var(--surface); }
+.home-card:active .home-card-logo, .home-card:active .home-card-poster { transform: scale(.96); }
+.home-card-blank { display: flex; align-items: center; justify-content: center; font-size: 34px;
+  font-weight: 700; color: var(--text-muted); }
+.home-card-label { font-size: 12px; font-weight: 600; margin-top: 5px; line-height: 1.25;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.home-card-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 1px; }
+.home-row-empty { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 14px; border: 1px dashed var(--separator); border-radius: 12px; color: var(--text-muted);
+  font-size: 13px; }
+.home-row-empty button { background: var(--accent, #5ac8fa); color: #04121b; border: 0;
+  padding: 8px 14px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 13px; }
+.welcome-scrim { position: fixed; inset: 0; z-index: 9998; display: none; align-items: center;
+  justify-content: center; background: rgba(0,0,0,.6); padding: 20px; }
+.welcome-scrim.show { display: flex; }
+.welcome-card { background: var(--surface, #15191f); border: 1px solid var(--separator);
+  border-radius: 16px; padding: 22px 20px; max-width: 360px; width: 100%; text-align: center;
+  box-shadow: 0 14px 50px rgba(0,0,0,.5); }
+.welcome-emoji { font-size: 40px; }
+.welcome-title { font-size: 19px; font-weight: 700; margin: 6px 0 12px; }
+.welcome-body { text-align: left; font-size: 13.5px; line-height: 1.6; }
+.welcome-line { margin: 3px 0; }
+.welcome-free { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--separator);
+  color: var(--text-muted); font-size: 12.5px; }
+.welcome-cta { margin-top: 16px; width: 100%; background: var(--accent, #5ac8fa); color: #04121b;
+  border: 0; padding: 11px; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; }
 .home-cluster-tile { background: var(--surface); border: 1px solid var(--separator);
                       border-radius: var(--tile-radius); padding: 16px;
                       display: flex; gap: 14px; align-items: center;
@@ -4063,6 +4099,27 @@ button.warn { background: #ff9500; color: #fff; }
           <div class=desc>Server · Scraper · Settings</div>
         </div>
       </div>
+    </div>
+    <!-- Phase-1 cohesive home: content rows below the cluster tiles. Populated
+         by loadHomeRows() on goto('home'); each row degrades to a "Start here"
+         empty state so a cold beta user always has a next tap. -->
+    <div id=home-rows class=home-rows></div>
+  </div>
+
+  <!-- First-run welcome (one-time, dismissable). Shown by maybeShowWelcome()
+       keyed off localStorage so it appears once per device. -->
+  <div id=welcome-scrim class=welcome-scrim onclick="if(event.target===this)dismissWelcome()">
+    <div class=welcome-card>
+      <div class=welcome-emoji>👋</div>
+      <div class=welcome-title>Welcome to Sentinel Media</div>
+      <div class=welcome-body>
+        <div class=welcome-line>📺 <b>Live TV</b> — browse &amp; watch free channels</div>
+        <div class=welcome-line>📥 <b>Downloader</b> — grab a link</div>
+        <div class=welcome-line>🎨 <b>Stickers</b> — make your own packs</div>
+        <div class=welcome-line>📚 <b>Library</b> — your saved content</div>
+        <div class=welcome-free>All of the above is <b>free</b>. Premium adds recording, multiview, HD &amp; batch downloads — see <a href="/app/entitlements" target=_blank>Plans</a>.</div>
+      </div>
+      <button class=welcome-cta onclick="dismissWelcome()">Let's go →</button>
     </div>
   </div>
 
@@ -4797,6 +4854,99 @@ function clusterNavHome() {
   goto('home');
 }
 
+// ── Phase-1 cohesive home: content rows + first-run welcome ──────────────────
+let _homeRowsLoaded = false, _homeClickBound = false;
+
+function maybeShowWelcome() {
+  try {
+    if (localStorage.getItem('smdl_welcomed')) return;
+    const w = document.getElementById('welcome-scrim');
+    if (w) w.classList.add('show');
+  } catch (e) {}
+}
+function dismissWelcome() {
+  try { localStorage.setItem('smdl_welcomed', '1'); } catch (e) {}
+  const w = document.getElementById('welcome-scrim');
+  if (w) w.classList.remove('show');
+}
+
+function _homeCard(c) {
+  const bg = (c.logo || c.poster || '').replace(/['"\\]/g, '');
+  const cls = c.logo ? 'home-card-logo' : 'home-card-poster';
+  const img = bg
+    ? `<div class="${cls}" style="background-image:url('${bg}')"></div>`
+    : `<div class="home-card-poster home-card-blank">${escapeHtml((c.label || '?').slice(0, 1))}</div>`;
+  const attrs = c.act === 'play'
+    ? `data-act=play data-id="${escapeHtml(String(c.id))}"`
+    : `data-act=page data-page="${escapeHtml(c.page || 'home')}"`;
+  return `<div class=home-card ${attrs}>${img}`
+       + `<div class=home-card-label>${escapeHtml(c.label || '')}</div>`
+       + (c.sub ? `<div class=home-card-sub>${escapeHtml(c.sub)}</div>` : '')
+       + `</div>`;
+}
+function _homeRowShell(title) {
+  const sec = document.createElement('div');
+  sec.className = 'home-row';
+  sec.innerHTML = `<div class=home-row-title>${escapeHtml(title)}</div><div class=home-row-scroll></div>`;
+  document.getElementById('home-rows').appendChild(sec);
+  return sec.querySelector('.home-row-scroll');
+}
+function _homeEmptyRow(title, msg, action, label) {
+  const sec = document.createElement('div');
+  sec.className = 'home-row';
+  sec.innerHTML = `<div class=home-row-title>${escapeHtml(title)}</div>`
+    + `<div class=home-row-empty><span>${escapeHtml(msg)}</span>`
+    + `<button onclick="${action}">${escapeHtml(label)}</button></div>`;
+  document.getElementById('home-rows').appendChild(sec);
+}
+async function _homeRow(title, url, mapFn, emptyMsg, action, label) {
+  try {
+    const r = await fetch(url, { headers: { 'X-Init-Data': initData } });
+    const cards = mapFn(await r.json()) || [];
+    if (!cards.length) { _homeEmptyRow(title, emptyMsg, action, label); return; }
+    _homeRowShell(title).innerHTML = cards.map(_homeCard).join('');
+  } catch (e) { _homeEmptyRow(title, emptyMsg, action, label); }
+}
+async function _homeForYou() {
+  try {
+    const r = await fetch('/api/iptv/for_you', { headers: { 'X-Init-Data': initData } });
+    const rows = (await r.json()).rows || [];
+    if (!rows.length) { _homeEmptyRow('Trending TV near you', "Watch a few channels and we'll tailor this.", "clusterEnter('watch')", '▶ Browse Live TV'); return; }
+    rows.slice(0, 2).forEach(row => {
+      _homeRowShell(row.title || 'Trending TV').innerHTML =
+        (row.channels || []).map(ch => _homeCard(
+          { label: ch.name, sub: ch.country || '', logo: ch.logo, act: 'play', id: ch.id })).join('');
+    });
+  } catch (e) { _homeEmptyRow('Trending TV near you', 'Live TV suggestions will appear here.', "clusterEnter('watch')", '▶ Browse Live TV'); }
+}
+async function loadHomeRows() {
+  maybeShowWelcome();
+  const host = document.getElementById('home-rows');
+  if (!host) return;
+  if (!_homeClickBound) {
+    _homeClickBound = true;
+    host.addEventListener('click', e => {
+      const card = e.target.closest('.home-card');
+      if (!card) return;
+      if (card.dataset.act === 'play') location.href = '/iptv/play/' + encodeURIComponent(card.dataset.id);
+      else goto(card.dataset.page || 'home');
+    });
+  }
+  if (_homeRowsLoaded) return;
+  _homeRowsLoaded = true;
+  host.innerHTML = '';
+  _homeRow('Continue watching', '/api/iptv/last_watched?limit=10',
+    d => (d.items || []).map(it => ({ label: it.name || ('Channel ' + it.channel_id), sub: 'Live TV', logo: it.logo, act: 'play', id: it.channel_id })),
+    'No history yet.', "clusterEnter('watch')", '▶ Browse Live TV');
+  _homeForYou();
+  _homeRow('New in your library', '/api/miniapp/library?kind=all',
+    d => (d.items || []).slice(0, 12).map(it => ({ label: it.title || it.name || it.filename || 'Item', sub: it.kind || '', poster: it.poster || it.thumb, act: 'page', page: 'library' })),
+    'Your library is empty.', "clusterEnter('get')", '📥 Get something');
+  _homeRow('Your sticker packs', '/api/sticker_packs',
+    d => (d.packs || []).slice(0, 12).map(p => ({ label: p.title || p.name || 'Pack', sub: (p.count != null ? p.count + ' stickers' : ''), poster: p.thumb, act: 'page', page: 'stickers' })),
+    'No packs yet.', "clusterEnter('make')", '🎨 Make a sticker');
+}
+
 function clusterOpen(key) {
   // Sidebar cluster icon: toggle the flyout sub-sidebar. Doesn't
   // navigate — user picks the sub-page from the flyout.
@@ -4866,7 +5016,8 @@ function goto(page) {
   // If the sub-sidebar flyout is open while we navigate, refresh its
   // "current" highlight so the active page is marked.
   if (_openCluster) _renderSubsidebar(_openCluster);
-  if (page === 'downloads') loadDownloads();
+  if (page === 'home') loadHomeRows();
+  else if (page === 'downloads') loadDownloads();
   else if (page === 'search') { const si = document.getElementById('search-input'); if (si) si.focus(); }
   else if (page === 'notifications') loadNotifications();
   else if (page === 'library') loadLibrary(libKind);

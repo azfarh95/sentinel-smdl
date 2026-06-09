@@ -488,7 +488,8 @@ IPTV_ORG_COUNTRY_BASE = "https://iptv-org.github.io/iptv/countries"
 
 # Pre-baked quick-action set — surfaced as buttons in the Mini App.
 # refresh_iptv_org_country() will accept any ISO-3166 alpha-2 code.
-IPTV_ORG_COUNTRY_QUICK = ["sg", "my", "id"]
+# (Owner-only: iptv-org country slices are a _PRIVATE_SOURCES aggregator.)
+IPTV_ORG_COUNTRY_QUICK = ["sg", "my", "id", "th", "kr", "jp"]
 
 
 def _country_source_id(cc: str) -> str:

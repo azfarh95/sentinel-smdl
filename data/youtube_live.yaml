@@ -503,6 +503,111 @@ channels:
     country: KR
     categories: [news]
 
+  # ── Korea — news (24/7 official lives) ──────────────────────────
+  - id: ytn
+    name: YTN
+    handle: YTNnews24
+    country: KR
+    categories: [news]
+
+  - id: sbs-news
+    name: SBS News
+    handle: SBSnews8
+    country: KR
+    categories: [news]
+
+  - id: mbc-news
+    name: MBC News
+    handle: MBCNEWS11
+    country: KR
+    categories: [news]
+
+  - id: kbs-news
+    name: KBS News
+    handle: KBSnews
+    country: KR
+    categories: [news]
+
+  - id: jtbc-news
+    name: JTBC News
+    handle: jtbcnews
+    country: KR
+    categories: [news]
+
+  - id: channel-a-news
+    name: Channel A News
+    handle: ChannelA-news
+    country: KR
+    categories: [news]
+
+  # ── Korea — K-pop / entertainment ───────────────────────────────
+  - id: kbs-world
+    name: KBS World TV
+    handle: kbsworldtv
+    country: KR
+    categories: [general, entertainment]
+
+  - id: sbs-kpop
+    name: SBS KPOP
+    handle: SBSKPOP
+    country: KR
+    categories: [music]
+
+  - id: mnet
+    name: Mnet
+    handle: Mnet
+    country: KR
+    categories: [music, entertainment]
+
+  - id: kpop-1thek
+    name: 1theK
+    handle: 1theK
+    country: KR
+    categories: [music]
+
+  - id: kbs-kpop
+    name: KBS Kpop
+    handle: KBSKpop
+    country: KR
+    categories: [music]
+
+  - id: mbc-kpop
+    name: MBC Kpop
+    handle: MBCkpop
+    country: KR
+    categories: [music]
+
+  # ── Japan — news (24/7 official lives) ──────────────────────────
+  - id: ann-news
+    name: ANN News (TV Asahi)
+    handle: ANNnewsCH
+    country: JP
+    categories: [news]
+
+  - id: tbs-news-dig
+    name: TBS NEWS DIG
+    handle: tbsnewsdig
+    country: JP
+    categories: [news]
+
+  - id: fnn-prime
+    name: FNN Prime Online (Fuji)
+    handle: FNNnewsCH
+    country: JP
+    categories: [news]
+
+  - id: ntv-news24
+    name: Nippon TV News 24
+    handle: ntvnews24
+    country: JP
+    categories: [news]
+
+  - id: weathernews-jp
+    name: Weathernews LIVE
+    handle: WeathernewsLIVE
+    country: JP
+    categories: [news, weather]
+
   # ── India (regional) ────────────────────────────────────────────
   - id: ndtv-247
     name: NDTV 24x7
@@ -546,6 +651,74 @@ channels:
     handle: ThaiPBS
     country: TH
     categories: [news]
+
+  # ── Thailand — news ─────────────────────────────────────────────
+  - id: pptv-th
+    name: PPTV HD 36
+    handle: PPTVHD36
+    country: TH
+    categories: [news, general]
+
+  - id: tnn-th
+    name: TNN Online
+    handle: tnnonline
+    country: TH
+    categories: [news]
+
+  - id: amarin-th
+    name: Amarin TV
+    handle: AMARINTVHD
+    country: TH
+    categories: [news, general]
+
+  - id: nation-th
+    name: Nation TV
+    handle: NationTVchannel
+    country: TH
+    categories: [news]
+
+  - id: mcot-th
+    name: MCOT HD (Ch9)
+    handle: MCOT
+    country: TH
+    categories: [general]
+
+  # ── Thailand — entertainment (broadcasters run 24/7 YT lives) ───
+  - id: ch7-th
+    name: Ch7HD
+    handle: Ch7HD
+    country: TH
+    categories: [general, entertainment]
+
+  - id: ch3-th
+    name: Ch3 Thailand
+    handle: Ch3Thailand
+    country: TH
+    categories: [general, entertainment]
+
+  - id: gmm25-th
+    name: GMM25
+    handle: GMM25Thailand
+    country: TH
+    categories: [entertainment]
+
+  - id: one31-th
+    name: ONE 31
+    handle: one31official
+    country: TH
+    categories: [entertainment]
+
+  - id: workpoint-th
+    name: Workpoint
+    handle: WorkpointOfficial
+    country: TH
+    categories: [entertainment]
+
+  - id: gmmtv-th
+    name: GMMTV
+    handle: GMMTV
+    country: TH
+    categories: [entertainment]
 
   - id: ptv-ph
     name: PTV Philippines

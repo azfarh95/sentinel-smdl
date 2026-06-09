@@ -72,88 +72,42 @@ from . import grant_transport as _grant_transport
 # localStorage under `smdl_iptv_nav_mode`.
 _IPTV_TOPNAV = """
 <style>
-.smdl-iptv-topnav-host { position: fixed; top: 0; left: 0; right: 0; z-index: 9000;
-    pointer-events: none; }
-.smdl-iptv-topnav-host .nav { pointer-events: auto; display: flex; align-items: center;
-    gap: 4px; padding: 6px 10px;
-    background: rgba(15, 17, 21, 0.92); border-bottom: 1px solid #1f2733;
-    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-    transition: transform 180ms ease;
-    font: 12px/1.2 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
-.smdl-iptv-topnav-host .nav a { display: inline-flex; align-items: center; gap: 6px;
-    padding: 6px 10px; color: #cfd2d8; text-decoration: none; border-radius: 6px;
-    border: 1px solid transparent; }
-.smdl-iptv-topnav-host .nav a svg { width: 16px; height: 16px; flex: none; }
-.smdl-iptv-topnav-host .nav a:hover { background: #1a1d24; color: #fff; }
-.smdl-iptv-topnav-host .nav a.active { background: #1a2a3a; color: #5ac8fa;
-    border-color: #2a4054; }
-.smdl-iptv-topnav-host .nav .mode-chip { margin-left: auto; font-size: 10px; color: #6a7585;
-    background: #1a1d24; border: 1px solid #2a2f3a; padding: 2px 8px; border-radius: 99px;
-    cursor: context-menu; user-select: none; white-space: nowrap; }
-.smdl-iptv-topnav-host .reveal-pill { pointer-events: auto; position: fixed;
-    top: 8px; right: 8px; padding: 4px 10px; font-size: 10px; color: #6a7585;
-    background: rgba(15,17,21,0.9); border: 1px solid #2a2f3a; border-radius: 99px;
-    cursor: context-menu; user-select: none; display: none;
-    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
-/* Mode: fixed */
-body.smdl-iptv-nav-fixed { padding-top: 36px; }
-body.smdl-iptv-nav-fixed .smdl-iptv-topnav-host .nav { transform: translateY(0); }
-/* Mode: hover — nav slides off-screen by default, reveals on mouseenter on a 6px
-   top hot-zone created via the host's :hover state. */
-body.smdl-iptv-nav-hover .smdl-iptv-topnav-host { top: 0; height: 6px; }
-body.smdl-iptv-nav-hover .smdl-iptv-topnav-host:hover { height: auto; }
-body.smdl-iptv-nav-hover .smdl-iptv-topnav-host .nav { transform: translateY(-100%); }
-body.smdl-iptv-nav-hover .smdl-iptv-topnav-host:hover .nav { transform: translateY(0); }
-/* Mode: hidden — nav gone entirely; reveal-pill in corner catches right-click. */
-body.smdl-iptv-nav-hidden .smdl-iptv-topnav-host .nav { display: none; }
-body.smdl-iptv-nav-hidden .smdl-iptv-topnav-host .reveal-pill { display: inline-block; }
-@media print { .smdl-iptv-topnav-host { display: none !important; } }
+/* Bottom tab bar for the standalone IPTV pages — same 5 tabs, SVG icon
+   language and #5ac8fa accent as the /app Mini App, so jumping between the
+   SPA and the full-page IPTV screens reads as one app. (Was a top nav; moved
+   to the bottom on 2026-06-09 to match every other surface.) */
+.smdl-iptv-bottomnav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 9000;
+    display: flex; padding: 7px 4px calc(7px + env(safe-area-inset-bottom, 0px));
+    background: rgba(15, 17, 21, 0.92); border-top: 1px solid #1f2733;
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    font: 10px/1.1 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+.smdl-iptv-bottomnav a { flex: 1; display: flex; flex-direction: column; align-items: center;
+    gap: 4px; padding: 3px 0; color: #9aa3b2; text-decoration: none; letter-spacing: .2px;
+    font-weight: 600; -webkit-tap-highlight-color: transparent; transition: color .14s ease; }
+.smdl-iptv-bottomnav a svg { width: 23px; height: 23px; display: block; }
+.smdl-iptv-bottomnav a:hover { color: #fff; }
+.smdl-iptv-bottomnav a.active { color: var(--accent, #5ac8fa); }
+.smdl-iptv-bottomnav a.active svg { filter: drop-shadow(0 0 6px rgba(90,200,250,.45)); }
+.smdl-iptv-bottomnav a:active { transform: scale(.9); }
+/* Reserve room so page content / the player never hides behind the bar. */
+body { padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px)); }
+@media print { .smdl-iptv-bottomnav { display: none !important; } }
 </style>
-<div class="smdl-iptv-topnav-host" id="smdl-iptv-topnav-host">
-  <div class="nav" id="smdl-iptv-topnav">
-    <a href="/app" title="Home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9"/><path d="M9 21v-6h6v6"/></svg> Home</a>
-    <a href="/app#downloads" title="Downloads"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg> DL</a>
-    <a href="/app#watchlist" title="Streams"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8.5a5 5 0 0 0 0 7"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M5 5.5a9 9 0 0 0 0 13"/><path d="M19 5.5a9 9 0 0 1 0 13"/></svg> Streams</a>
-    <a href="/iptv" class="active" title="IPTV"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/><path d="M6 12a4 4 0 0 1 4-4"/></svg> IPTV</a>
-    <a href="/iptv/family" title="Family TV — simple MY/SG/ID channel picker"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3"/><circle cx="17" cy="9" r="2.4"/><path d="M3 20v-1a5 5 0 0 1 9-3"/><path d="M14 20v-.5a4 4 0 0 1 7-2.6"/></svg> Family</a>
-    <a href="/app#files" title="Files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> Files</a>
-    <a href="/app#scraper" title="Scraper"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg> Scrape</a>
-    <a href="/app#admin" title="Server"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg> Server</a>
-    <a href="/app#settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h8M16 6h4"/><path d="M4 12h4M12 12h8"/><path d="M4 18h8M16 18h4"/><circle cx="14" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="14" cy="18" r="2"/></svg> Settings</a>
-    <span class="mode-chip" id="smdl-iptv-nav-mode-chip" title="Right-click here or anywhere on this bar to cycle: Fixed → Hover → Hidden">Fixed</span>
-  </div>
-  <span class="reveal-pill" id="smdl-iptv-nav-reveal" title="Right-click to bring the nav back">⋯ nav</span>
-</div>
+<nav class="smdl-iptv-bottomnav" id="smdl-iptv-bottomnav">
+    <a href="/app" title="Home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9"/><path d="M9 21v-6h6v6"/></svg>Home</a>
+    <a href="/iptv" class="active" title="Watch — Live TV"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/><path d="M6 12a4 4 0 0 1 4-4"/></svg>Watch</a>
+    <a href="/app?tab=downloads" title="Get — downloads"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Get</a>
+    <a href="/app?tab=stickers" title="Make — stickers"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M14 8.5h.01"/><path d="M9 9.5h.01"/><path d="M8.5 14a4 4 0 0 0 7 0"/></svg>Make</a>
+    <a href="/app?tab=notifications" title="Inbox — activity"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>Inbox</a>
+</nav>
 <script>
 (function(){
-  const MODES = ['fixed', 'hover', 'hidden'];
-  const LABELS = { fixed: 'Fixed', hover: 'Hover', hidden: 'Hidden' };
-  const KEY = 'smdl_iptv_nav_mode';
-  const chip = document.getElementById('smdl-iptv-nav-mode-chip');
-  const nav  = document.getElementById('smdl-iptv-topnav');
-  const pill = document.getElementById('smdl-iptv-nav-reveal');
-  function apply(mode) {
-    const cls = document.body.classList;
-    MODES.forEach(m => cls.remove('smdl-iptv-nav-' + m));
-    cls.add('smdl-iptv-nav-' + mode);
-    if (chip) chip.textContent = LABELS[mode] || 'Fixed';
-    try { localStorage.setItem(KEY, mode); } catch(_){}
-  }
-  function cycle(e) {
-    if (e) e.preventDefault();
-    let cur = 'fixed';
-    try { cur = localStorage.getItem(KEY) || 'fixed'; } catch(_){}
-    const next = MODES[(MODES.indexOf(cur) + 1) % MODES.length] || 'fixed';
-    apply(next);
-  }
-  let saved = 'fixed';
-  try { saved = localStorage.getItem(KEY) || 'fixed'; } catch(_){}
-  if (!MODES.includes(saved)) saved = 'fixed';
-  apply(saved);
-  if (nav)  nav.addEventListener('contextmenu', cycle);
-  if (pill) pill.addEventListener('contextmenu', cycle);
+  // Carry the user's chosen accent (set in the IPTV Personalize sheet) onto
+  // every IPTV surface so the bottom nav matches across grid/play/recordings.
+  try { var _ac = localStorage.getItem('smdl_iptv_accent_v1');
+        if (_ac) document.documentElement.style.setProperty('--accent', _ac); } catch(_){}
   // Telegram BackButton: make one Android system-back press go back ONE page
-  // (e.g. play → channels → app). Without this, TG's default minimises the
+  // (e.g. play -> channels -> app). Without this, TG's default minimises the
   // whole Mini App from these full-page IPTV screens (the "clanky back").
   var _tg = window.Telegram && window.Telegram.WebApp;
   if (_tg && _tg.BackButton) {
@@ -2430,7 +2384,7 @@ _BROWSE_HTML = r"""<!doctype html>
     }
     .quick-tabs .qt:hover { background:#15181f; }
     .quick-tabs .qt.active {
-      color:#5ac8fa; border-bottom-color:#5ac8fa; font-weight:600;
+      color:var(--accent,#5ac8fa); border-bottom-color:var(--accent,#5ac8fa); font-weight:600;
     }
 
     /* ── Genre strip — one-tap category browse ────────────────── */
@@ -2449,6 +2403,49 @@ _BROWSE_HTML = r"""<!doctype html>
     .genre-strip .gchip.active {
       background:#1f3a5a; color:#bfe0ff; border-color:#3390ec; font-weight:600;
     }
+
+    /* ── Country shortcuts bar — configurable one-tap country FILTERS.
+       Distinct from the drawer's "Refresh <CC>" buttons, which re-FETCH a
+       country slice over the network. Edit the set via ⚙ Personalize. ── */
+    .country-shortcuts {
+      display:flex; gap:7px; padding:9px 14px 2px; align-items:center;
+      overflow-x:auto; overflow-y:hidden; scrollbar-width:thin;
+      -webkit-overflow-scrolling:touch;
+    }
+    .country-shortcuts .csc {
+      flex:0 0 auto; font:inherit; font-size:12.5px; cursor:pointer;
+      padding:6px 12px; border-radius:999px; white-space:nowrap; line-height:1;
+      background:#15181f; color:#cfd2d8; border:1px solid #232831;
+      display:inline-flex; align-items:center; gap:5px;
+    }
+    .country-shortcuts .csc:hover { border-color:#3a4150; }
+    .country-shortcuts .csc.active {
+      background:color-mix(in srgb, var(--accent,#5ac8fa) 22%, #0d0f14);
+      color:#fff; border-color:var(--accent,#5ac8fa); font-weight:600;
+    }
+    .country-shortcuts .csc .fl { font-size:15px; }
+    .country-shortcuts .csc-gear { margin-left:2px; color:#8a8f99; border-style:dashed; }
+
+    /* ── Personalize sheet (reuses .import-modal / .import-card chrome) ── */
+    .pz-section + .pz-section { margin-top:18px; }
+    .pz-grid { display:flex; flex-wrap:wrap; gap:7px; margin-top:8px;
+      max-height:230px; overflow-y:auto; }
+    .pz-chip {
+      font:inherit; font-size:12.5px; cursor:pointer; padding:6px 11px;
+      border-radius:999px; background:#0d0f14; color:#cfd2d8;
+      border:1px solid #2a2f3a; display:inline-flex; align-items:center; gap:6px;
+    }
+    .pz-chip.on { background:#163a23; border-color:#1f5230; color:#bdedcc; }
+    .pz-chip .ct { opacity:.5; font-size:11px; }
+    .pz-swatches { display:flex; gap:10px; margin-top:8px; }
+    .pz-swatch {
+      width:30px; height:30px; border-radius:50%; cursor:pointer;
+      border:2px solid transparent; box-sizing:border-box;
+    }
+    .pz-swatch.on { box-shadow:0 0 0 2px #0d0f14, 0 0 0 4px currentColor; }
+    .pz-hint { font-size:11px; color:#8a8f99; margin-top:6px; line-height:1.5; }
+    .pz-stub { margin-top:18px; padding-top:14px; border-top:1px solid #232831;
+      font-size:11px; color:#6a7585; }
 
     /* ── Last-watched horizontal scroller row ─────────────────── */
     .recent-grid {
@@ -2709,8 +2706,9 @@ _BROWSE_HTML = r"""<!doctype html>
     <div class="ft-options chip-row" id="category-chips"></div>
   </details>
 
-  <div class="section-h" style="margin-top:18px; display:flex; gap:14px; padding:14px;">
+  <div class="section-h" style="margin-top:18px; display:flex; gap:14px; padding:14px; flex-wrap:wrap;">
     <a href="/iptv/recordings" style="color:#5ac8fa; text-decoration:none;">📼 Recordings</a>
+    <a href="#" id="drawer-personalize" style="color:#5ac8fa; text-decoration:none;">⚙ Personalize</a>
     <a href="/app" style="color:#5ac8fa; text-decoration:none; margin-left:auto;">← Back to SMDL</a>
   </div>
 </aside>
@@ -2732,6 +2730,11 @@ _BROWSE_HTML = r"""<!doctype html>
     <button class="qt" data-tab="fav">⭐ Favorites</button>
     <button class="qt" data-tab="recent" id="qt-recent" style="display:none">⏱ Last watched</button>
   </div>
+
+  <!-- Country shortcuts: configurable one-tap country FILTERS (flag + code).
+       Pure display filter (sets state.country) — NOT a network refresh. Edit
+       the set, and the accent, via the ⚙ Personalize sheet. -->
+  <div class="country-shortcuts" id="country-shortcuts"></div>
 
   <!-- Genre strip: one-tap browse by category (sets state.category) -->
   <div class="genre-strip" id="genre-strip"></div>
@@ -2774,6 +2777,28 @@ _BROWSE_HTML = r"""<!doctype html>
         <button class="ghost" id="m3u-cancel">Cancel</button>
       </div>
       <div class="hint" id="m3u-status" style="margin-top:8px; min-height:18px"></div>
+    </div>
+  </div>
+
+  <!-- Personalize sheet — configure country shortcuts + accent (stub for a
+       future fuller settings page). -->
+  <div class="import-modal" id="personalize-modal">
+    <div class="import-card">
+      <h3 style="margin:0 0 4px">⚙ Personalize</h3>
+      <div class="pz-section">
+        <label>Country shortcuts <small>(tap to add / remove · max 8)</small></label>
+        <div class="pz-grid" id="pz-countries"><div class="pz-hint">Loading countries…</div></div>
+        <div class="pz-hint">These filter the grid by country instantly — they don't re-download anything.</div>
+      </div>
+      <div class="pz-section">
+        <label>Accent colour</label>
+        <div class="pz-swatches" id="pz-swatches"></div>
+      </div>
+      <div class="pz-stub">More appearance &amp; playback settings will live here.</div>
+      <div style="display:flex; gap:8px; margin-top:16px">
+        <button id="pz-save">Save</button>
+        <button class="ghost" id="pz-close">Close</button>
+      </div>
     </div>
   </div>
 </main>
@@ -3214,6 +3239,8 @@ function makeChip(label, value, active, kind) {
     // Keep the genre strip's active pill in sync when the category changes
     // from the drawer facet.
     if (kind === 'category') { try { renderGenreStrip(); } catch (_) {} }
+    // Keep the country shortcut bar's active chip in sync with the facet.
+    if (kind === 'country') { try { renderCountryShortcuts(); } catch (_) {} }
     _autoCloseDrawerIfMobile();
   });
   return el;
@@ -3819,7 +3846,147 @@ document.getElementById('m3u-go')?.addEventListener('click', async () => {
 window.smdlIptvOpenImport = openImportModal;
 document.getElementById('import-m3u-btn')?.addEventListener('click', openImportModal);
 
+// ── Country shortcuts + Personalize (accent) ───────────────────
+// A configurable one-tap country FILTER bar (flag + code). Tapping a chip
+// sets state.country and re-renders the grid — a pure display filter, NOT a
+// network refresh (that's the drawer's "Refresh <CC>" buttons). The chip set
+// and the accent are edited in the ⚙ Personalize sheet and kept in
+// localStorage so they survive reloads.
+const SHORTCUTS_KEY = 'smdl_iptv_shortcuts_v1';
+const ACCENT_KEY    = 'smdl_iptv_accent_v1';
+const _DEFAULT_SHORTCUTS = ['SG','MY','ID','TH','KR','JP'];
+const _ACCENTS = ['#5ac8fa','#3390ec','#34c759','#ff9f0a','#bf5af2','#ff453a'];
+
+function getShortcutCodes() {
+  try {
+    const a = JSON.parse(localStorage.getItem(SHORTCUTS_KEY) || 'null');
+    if (Array.isArray(a)) return a.filter(x => typeof x === 'string' && x.length === 2);
+  } catch {}
+  return _DEFAULT_SHORTCUTS.slice();
+}
+function setShortcutCodes(codes) {
+  try { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(codes)); } catch {}
+}
+function getAccent() {
+  try { return localStorage.getItem(ACCENT_KEY) || _ACCENTS[0]; } catch { return _ACCENTS[0]; }
+}
+function applyAccent(color) {
+  const c = color || getAccent();
+  document.documentElement.style.setProperty('--accent', c);
+  try { localStorage.setItem(ACCENT_KEY, c); } catch {}
+}
+
+function renderCountryShortcuts() {
+  const strip = document.getElementById('country-shortcuts');
+  if (!strip) return;
+  strip.innerHTML = '';
+  const mkChip = (html, code, gear) => {
+    const b = document.createElement('button');
+    b.className = 'csc' + (gear ? ' csc-gear' : '')
+      + (!gear && (state.country || null) === code ? ' active' : '');
+    b.innerHTML = html;
+    if (gear) { b.title = 'Personalize shortcuts'; b.addEventListener('click', openPersonalize); }
+    else b.addEventListener('click', () => selectCountryShortcut(code));
+    strip.appendChild(b);
+  };
+  mkChip('All', null);
+  for (const cc of getShortcutCodes()) {
+    const u = cc.toUpperCase();
+    mkChip(`<span class="fl">${flag(u)}</span>${u}`, u);
+  }
+  mkChip('⚙', '__gear__', true);
+}
+
+function selectCountryShortcut(code) {
+  state.country = code || null;
+  // A country filter implies the generic All view (not curated SG / live-only).
+  if (state.tab === 'sg' || state.tab === 'live') state.tab = 'all';
+  document.querySelectorAll('.quick-tabs .qt').forEach(q =>
+    q.classList.toggle('active', q.dataset.tab === (state.tab || 'all')));
+  _persistState();
+  _syncCountryUi();
+  loadChannels();
+}
+
+// Keep the drawer's country facet and the shortcut strip in sync whenever
+// state.country changes from either surface.
+function _syncCountryUi() {
+  renderCountryShortcuts();
+  const lbl = document.getElementById('ft-value-country');
+  if (lbl) lbl.textContent = state.country
+    ? (countryName(state.country) + ' · ' + state.country) : 'All';
+  document.querySelectorAll('#country-chips .chip').forEach(c =>
+    c.classList.toggle('active', (c.dataset.value || '') === (state.country || '')));
+}
+
+// ── Personalize sheet ──────────────────────────────────────────
+const _pzModal = document.getElementById('personalize-modal');
+let _pzSelected = null;   // working Set of codes while the sheet is open
+async function openPersonalize() {
+  if (!_pzModal) return;
+  _pzSelected = new Set(getShortcutCodes().map(c => c.toUpperCase()));
+  _pzModal.classList.add('show');
+  renderPzSwatches();
+  const host = document.getElementById('pz-countries');
+  host.innerHTML = '<div class="pz-hint">Loading countries…</div>';
+  let countries = [];
+  try { countries = (await api('/api/iptv/countries')).countries || []; } catch {}
+  countries = countries.slice().sort((a, b) =>
+    countryName(a.code).localeCompare(countryName(b.code)));
+  // Always surface currently-saved shortcuts even if a code has no rows now.
+  const have = new Set(countries.map(c => c.code.toUpperCase()));
+  for (const cc of _pzSelected) if (!have.has(cc)) countries.unshift({ code: cc, count: 0 });
+  host.innerHTML = '';
+  for (const c of countries) {
+    const u = c.code.toUpperCase();
+    const b = document.createElement('button');
+    b.className = 'pz-chip' + (_pzSelected.has(u) ? ' on' : '');
+    b.innerHTML = `${flag(u)} ${escapeHtml(countryName(u))} <span class="ct">${c.count || 0}</span>`;
+    b.addEventListener('click', () => {
+      if (_pzSelected.has(u)) { _pzSelected.delete(u); b.classList.remove('on'); }
+      else if (_pzSelected.size >= 8) { toast('Up to 8 shortcuts', 1800); }
+      else { _pzSelected.add(u); b.classList.add('on'); }
+    });
+    host.appendChild(b);
+  }
+}
+function renderPzSwatches() {
+  const host = document.getElementById('pz-swatches');
+  if (!host) return;
+  const cur = getAccent();
+  host.innerHTML = '';
+  for (const col of _ACCENTS) {
+    const s = document.createElement('div');
+    s.className = 'pz-swatch' + (col === cur ? ' on' : '');
+    s.style.background = col; s.style.color = col;
+    s.addEventListener('click', () => {
+      applyAccent(col);
+      host.querySelectorAll('.pz-swatch').forEach(x => x.classList.remove('on'));
+      s.classList.add('on');
+    });
+    host.appendChild(s);
+  }
+}
+function closePersonalize() { _pzModal && _pzModal.classList.remove('show'); }
+document.getElementById('pz-close')?.addEventListener('click', closePersonalize);
+document.getElementById('pz-save')?.addEventListener('click', () => {
+  // Preserve the existing order; append newly-checked codes at the end.
+  const prev = getShortcutCodes().map(c => c.toUpperCase());
+  const kept = prev.filter(c => _pzSelected.has(c));
+  const added = [..._pzSelected].filter(c => !kept.includes(c));
+  setShortcutCodes([...kept, ...added]);
+  renderCountryShortcuts();
+  closePersonalize();
+  toast('Shortcuts saved', 1600);
+});
+_pzModal?.addEventListener('click', e => { if (e.target === _pzModal) closePersonalize(); });
+document.getElementById('drawer-personalize')?.addEventListener('click', e => {
+  e.preventDefault(); openPersonalize(); _autoCloseDrawerIfMobile();
+});
+
 (async () => {
+  applyAccent();
+  renderCountryShortcuts();
   await _migrateFavoritesIfNeeded();
   renderGenreStrip();
   loadFilters();

@@ -3690,6 +3690,26 @@ body.sidebar-collapsed .sidebar-item .icon svg { width: 17px; height: 17px; }
   color: var(--button-text); border-color: transparent; box-shadow: var(--glow); }
 .stk-sec { display: none; }
 .stk-sec.active { display: block; }
+/* Sticker Maker header + top-right pack switcher (global; visible on every
+   section so you can re-target where new stickers land from anywhere). */
+.stk-head { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; }
+.stk-pack-dd { position: relative; flex: 0 0 auto; }
+.stk-pack-btn { font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--separator); color: var(--text);
+  max-width: 52vw; white-space: nowrap; }
+.stk-pack-btn #stk-pack-label { overflow: hidden; text-overflow: ellipsis; max-width: 38vw; }
+.stk-pack-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 50;
+  min-width: 180px; max-height: 52vh; overflow-y: auto; display: none; padding: 6px;
+  background: var(--surface); border: 1px solid var(--separator); border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45); }
+.stk-pack-dd.open .stk-pack-menu { display: block; }
+.stk-pack-item { display: block; width: 100%; text-align: left; font: inherit; font-size: 13px;
+  cursor: pointer; padding: 8px 10px; border: 0; background: none; color: var(--text);
+  border-radius: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stk-pack-item:hover { background: rgba(255,255,255,0.05); }
+.stk-pack-item.active { color: var(--accent); font-weight: 600; }
+.stk-pack-new { margin-top: 4px; border-top: 1px solid var(--separator); color: var(--accent); }
 .subtabs { display: flex; gap: 6px; margin: 0 0 14px; overflow-x: auto;
            -webkit-overflow-scrolling: touch; scrollbar-width: none; }
 .subtabs::-webkit-scrollbar { display: none; }
@@ -4249,14 +4269,21 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
 
   <div class=page id=page-stickers>
-    <h1>Sticker Maker</h1>
+    <div class=stk-head>
+      <h1 style="margin:0">Sticker Maker</h1>
+      <span style="flex:1"></span>
+      <div class=stk-pack-dd id=stk-pack-dd>
+        <button class=stk-pack-btn id=stk-pack-btn onclick="stkPackMenuToggle(event)" title="Switch where new stickers land">📦 <span id=stk-pack-label>Pack</span> <span style="opacity:.55">▾</span></button>
+        <div class=stk-pack-menu id=stk-pack-menu></div>
+      </div>
+    </div>
     <div class=stk-nav id=stk-nav>
-      <button data-sec=pack onclick="stkSection('pack')">📦 Pack</button>
+      <button data-sec=home onclick="stkSection('home')">🏠 Home</button>
       <button data-sec=add onclick="stkSection('add')">＋ Add</button>
       <button data-sec=stickers onclick="stkSection('stickers')">🎞 Stickers</button>
     </div>
 
-    <div class="stk-sec active" data-section=stickers>
+    <div class=stk-sec data-section=stickers>
       <div id=stickers-import-banner style="display:none;margin:0 2px 10px;padding:11px 13px;border:1px solid var(--accent);border-radius:10px;background:rgba(80,120,255,0.10)">
         <div style="font-weight:600;margin-bottom:3px" id=stickers-import-title>Import a pack</div>
         <div class=meta id=stickers-import-sub style="font-size:12px;margin-bottom:9px;color:var(--muted)"></div>
@@ -4266,6 +4293,9 @@ button.warn { background: #ff9500; color: #fff; }
           <span style="flex:1"></span>
           <span id=stickers-import-status class=meta style="font-size:11px;color:var(--muted)"></span>
         </div>
+      </div>
+      <div class=card id=stickers-pack-card style="margin-bottom:10px">
+        <div class=empty><span class=spin></span> Loading…</div>
       </div>
       <h2 style="margin:2px 4px 8px;font-size:15px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:8px">
         <span>In your pack</span>
@@ -4294,10 +4324,7 @@ button.warn { background: #ff9500; color: #fff; }
           <span style="flex:1"></span>
           <span class=pill data-mode=instant onclick="stickersSetMode('instant')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">⚡ Instant</span>
           <span class=pill data-mode=manual onclick="stickersSetMode('manual')" title="Open the editor: scrubber · crop · shapes · background cutout" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">✂️ Edit / crop</span>
-          <button class=sec id=stk-info-btn onclick="stickersToggleHint()" title="What do Instant / Edit &amp; crop do?" style="font-size:13px;padding:2px 8px;line-height:1">🛈</button>
-          <input type=text id=stickers-default-emoji maxlength=8 value="🎬" title="Default emoji used in Instant mode" style="width:54px;padding:4px 6px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:18px;text-align:center">
         </div>
-        <div class=meta id=stickers-mode-hint style="display:none;font-size:11px;margin-bottom:8px;color:var(--muted)"></div>
         <input type=file id=stickers-file accept="video/*,image/gif" multiple style="display:none">
         <input type=file id=stickers-camera accept="video/*" capture="environment" style="display:none">
         <div id=stickers-dropzone style="border:2px dashed var(--separator);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s">
@@ -4338,10 +4365,23 @@ button.warn { background: #ff9500; color: #fff; }
       </div>
     </div>
 
-    <div class=stk-sec data-section=pack>
-      <div class=meta style="font-size:11px;color:var(--muted);margin:0 2px 6px">Your packs — tap to switch where new stickers land.</div>
-      <div id=stickers-pack-picker style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center"></div>
-      <div class=card style="margin-bottom:10px">
+    <div class="stk-sec active" data-section=home>
+      <div class=card>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <span style="font-weight:600">Defaults</span>
+          <span style="flex:1"></span>
+          <span class=pill data-mode=instant onclick="stickersSetMode('instant')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">⚡ Instant</span>
+          <span class=pill data-mode=manual onclick="stickersSetMode('manual')" title="Open the editor: scrubber · crop · shapes · background cutout" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">✂️ Edit / crop</span>
+          <button class=sec id=stk-info-btn onclick="stickersToggleHint()" title="What do Instant / Edit &amp; crop do?" style="font-size:13px;padding:2px 8px;line-height:1">🛈</button>
+        </div>
+        <div class=meta id=stickers-mode-hint style="display:none;font-size:11px;margin-bottom:8px;color:var(--muted)"></div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class=meta style="font-size:12px;color:var(--muted)">Default emoji <span style="opacity:.7">(Instant mode)</span></span>
+          <span style="flex:1"></span>
+          <input type=text id=stickers-default-emoji maxlength=8 value="🎬" title="Default emoji used in Instant mode" style="width:54px;padding:4px 6px;border-radius:6px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:18px;text-align:center">
+        </div>
+      </div>
+      <div class=card style="margin-top:10px;margin-bottom:10px">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <span style="font-weight:600">Send a sticker to the bot</span>
           <span style="flex:1"></span>
@@ -4349,9 +4389,6 @@ button.warn { background: #ff9500; color: #fff; }
           <span class=pill data-imp=all onclick="stickersSetImportPref('all')" style="font-size:11px;background:#222;border:1px solid #333;border-radius:999px;padding:3px 10px;color:#bbb;cursor:pointer;user-select:none">📦 Whole pack</span>
         </div>
         <div class=meta style="font-size:11px;margin-top:6px;color:var(--muted)">Sending any sticker to <b>@Sentinel_Media_bot</b> clones it to you. <b>Add one</b> drops just that sticker into your active pack (and offers a button to grab the rest). <b>Whole pack</b> clones the entire set into a brand-new pack automatically.</div>
-      </div>
-      <div class=card id=stickers-pack-card>
-        <div class=empty><span class=spin></span> Loading…</div>
       </div>
       <div style="display:flex;gap:6px;margin:10px 0;flex-wrap:wrap">
         <button class=sec onclick="stickersToggleLookup()" style="font-size:12px" title="View any TG pack + clone stickers into yours">🔍 Look up pack</button>
@@ -5693,8 +5730,9 @@ async function streamerSignOut() {
 
 // Sticker Maker top-nav: switch the active section (remembered per device).
 function stkSection(sec) {
-  const valid = ['stickers', 'add', 'pack'];
-  if (!valid.includes(sec)) sec = 'stickers';
+  if (sec === 'pack') sec = 'home';   // migrate old saved/deep-linked section
+  const valid = ['home', 'add', 'stickers'];
+  if (!valid.includes(sec)) sec = 'home';
   document.querySelectorAll('#page-stickers .stk-sec').forEach(s =>
     s.classList.toggle('active', s.dataset.section === sec));
   document.querySelectorAll('#stk-nav button').forEach(b =>
@@ -5747,9 +5785,12 @@ async function stkGifSearch() {
       el.addEventListener('click', () => stkGifImport(el.dataset.url, el)));
   } catch (e) {
     const msg = ('' + e);
-    st.textContent = msg.includes('not configured')
-      ? '⚠ Tenor needs an API key (set TENOR_API_KEY). GIPHY works now.'
-      : 'Search failed: ' + msg;
+    if (/not configured|api key|GIPHY_API_KEY|TENOR_API_KEY|invalid|banned|rejected/i.test(msg)) {
+      st.innerHTML = '⚠ ' + label + ' search needs an API key — the owner adds '
+        + '<code>GIPHY_API_KEY</code> / <code>TENOR_API_KEY</code> to <code>.env.local</code> (both free).';
+    } else {
+      st.textContent = 'Search failed: ' + msg;
+    }
   }
 }
 async function stkGifImport(url, el) {
@@ -5866,31 +5907,47 @@ async function stkLibAction(id, action) {
 
 // ── Pack picker (multiple named packs; the active one is where new stickers go) ──
 async function stickersLoadPacks() {
-  const el = document.getElementById('stickers-pack-picker');
-  if (!el) return;
+  // Populate the top-right pack dropdown (label = active pack; menu = switch /
+  // create). The pack chooser is global — visible from every sticker section.
+  const label = document.getElementById('stk-pack-label');
+  const menu = document.getElementById('stk-pack-menu');
+  if (!menu) return;
   let data;
   try { data = await api('/api/sticker_packs?kind=regular'); }
-  catch (e) { el.innerHTML = ''; return; }
-  el.innerHTML = '';
-  (data.packs || []).forEach(p => {
-    const b = document.createElement('button');
-    b.className = 'sec';
-    b.style.cssText = 'font-size:12px';
-    b.textContent = (p.pack_title || 'Pack') + (p.is_active ? ' ✓' : '');
-    if (p.is_active) {
-      b.style.background = 'linear-gradient(180deg,var(--accent),var(--accent-2))';
-      b.style.color = 'var(--button-text)';
-      b.style.borderColor = 'transparent';
-    }
-    b.onclick = () => stickersActivatePack(p.pack_name);
-    el.appendChild(b);
+  catch (e) { return; }
+  const packs = data.packs || [];
+  const active = packs.find(p => p.is_active);
+  if (label) label.textContent = active ? (active.pack_title || 'Pack') : (packs.length ? 'Pack' : 'No pack');
+  menu.innerHTML = '';
+  packs.forEach(p => {
+    const it = document.createElement('button');
+    it.className = 'stk-pack-item' + (p.is_active ? ' active' : '');
+    it.textContent = (p.is_active ? '✓ ' : '') + (p.pack_title || 'Pack');
+    it.onclick = () => { stkPackMenuClose(); stickersActivatePack(p.pack_name); };
+    menu.appendChild(it);
   });
   const nb = document.createElement('button');
-  nb.className = 'sec'; nb.style.cssText = 'font-size:12px';
+  nb.className = 'stk-pack-item stk-pack-new';
   nb.textContent = '＋ New pack';
-  nb.onclick = stickersNewPack;
-  el.appendChild(nb);
+  nb.onclick = () => { stkPackMenuClose(); stickersNewPack(); };
+  menu.appendChild(nb);
 }
+
+// ── Pack dropdown (top-right) open/close ───────────────────────────────────
+function stkPackMenuToggle(ev) {
+  if (ev) ev.stopPropagation();
+  const dd = document.getElementById('stk-pack-dd');
+  if (dd) dd.classList.toggle('open');
+}
+function stkPackMenuClose() {
+  const dd = document.getElementById('stk-pack-dd');
+  if (dd) dd.classList.remove('open');
+}
+// Close the pack menu on any outside click.
+document.addEventListener('click', (e) => {
+  const dd = document.getElementById('stk-pack-dd');
+  if (dd && dd.classList.contains('open') && !dd.contains(e.target)) dd.classList.remove('open');
+});
 
 async function stickersActivatePack(name) {
   try {
@@ -6008,9 +6065,9 @@ async function loadStickers() {
     });
     // Reflect mode persisted across sessions.
     stickersSetMode(_stickersMode);
-    // Initialise the section nav (remembered per device; default Stickers).
+    // Initialise the section nav (remembered per device; default Home).
     let _sec; try { _sec = localStorage.getItem('smdl_stk_section'); } catch (e) {}
-    stkSection(_sec || 'stickers');
+    stkSection(_sec || 'home');
     stickersLoadPacks();
     stickersLoadImportPref();
   }

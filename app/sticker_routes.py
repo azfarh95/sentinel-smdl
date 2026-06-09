@@ -55,12 +55,12 @@ OUTPUT_DIR    = Path(os.environ.get("STICKER_OUTPUT_DIR",
                                      "/data/stickers"))
 
 # ── GIF library sources (Giphy / Tenor) → sticker ──────────────────────────
-# Keys come from the environment (WCM-sourced via .env.local). Giphy falls
-# back to its long-standing public *beta* key so the feature works out of the
-# box; set a real GIPHY_API_KEY for production rate limits + ToS compliance.
-# Tenor (Google) has no public demo key — it stays dark until TENOR_API_KEY
-# is set. The from_url importer SSRF-guards downloads to these hosts only.
-GIPHY_API_KEY = os.environ.get("GIPHY_API_KEY", "").strip() or "dc6zaTOxFJmzC"
+# Keys come from the environment (WCM-sourced via .env.local). BOTH need a real
+# key — Giphy's old public beta key (dc6zaTOxFJmzC) is now BANNED (403), so we
+# no longer ship it; search stays dark until a key is set. Both are free:
+# developers.giphy.com (instant) and Google Cloud → Tenor API. The keyless
+# from_url importer still works for pasted media links (SSRF-guarded below).
+GIPHY_API_KEY = os.environ.get("GIPHY_API_KEY", "").strip()
 TENOR_API_KEY = os.environ.get("TENOR_API_KEY", "").strip()
 _GIF_FETCH_HOSTS = (".giphy.com", ".tenor.com", ".tenorapi.com", ".googleapis.com")
 
@@ -1754,13 +1754,25 @@ async def gif_search(request: Request, q: str = "", source: str = "giphy",
     try:
         async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
             if src == "giphy":
+                if not GIPHY_API_KEY:
+                    raise HTTPException(503, "Giphy not configured — set GIPHY_API_KEY")
                 ep = "search" if q else "trending"
                 params = {"api_key": GIPHY_API_KEY, "limit": limit, "rating": "pg-13"}
                 if q:
                     params["q"] = q
                 r = await client.get(f"https://api.giphy.com/v1/gifs/{ep}", params=params)
-                r.raise_for_status()
-                for g in (r.json().get("data") or []):
+                body = {}
+                try:
+                    body = r.json()
+                except Exception:
+                    body = {}
+                gmeta = body.get("meta") or {}
+                if r.status_code != 200 or gmeta.get("status", 200) != 200:
+                    bad = (gmeta.get("msg") or "").upper()
+                    if r.status_code in (401, 403) or "BANNED" in bad or "KEY" in bad:
+                        raise HTTPException(503, "Giphy key rejected (invalid/banned) — set a valid GIPHY_API_KEY")
+                    raise HTTPException(502, f"giphy error: {gmeta.get('msg') or r.status_code}")
+                for g in (body.get("data") or []):
                     imgs = g.get("images") or {}
                     prev = ((imgs.get("fixed_width_small") or imgs.get("fixed_width")
                              or imgs.get("preview_gif") or {}).get("url"))

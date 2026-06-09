@@ -4136,7 +4136,7 @@ function upgradeCta() {
   closeUpgrade();
   const sim = _viewAsCookie();
   if (sim && sim !== 'owner') { exitViewAs(); return; }   // owner preview → drop it = "unlock"
-  toast('Upgrade flow — wiring pending', 2500);
+  location.href = '/app/entitlements';   // pricing/features + Request access
 }
 renderViewAsBanner();
 

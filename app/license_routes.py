@@ -287,10 +287,73 @@ async def entitlements_matrix_page(request: Request):
         f"<div class=meta><span class=chip>{ed}</span>"
         f"<span class=chip>Entitlements {enf}</span></div>"
         f"<div class=card>{matrix}</div>"
+        + ("" if plan != "free" else
+           "<button id=req-btn onclick='requestAccess()' style='width:100%;"
+           "background:#3a6df0;color:#fff;border:0;padding:12px;border-radius:10px;"
+           "font-weight:700;font-size:15px;cursor:pointer;margin:4px 0 10px'>"
+           "⭐ Request premium access</button>"
+           "<div id=req-flash style='text-align:center;font-size:13px;color:#6fe39a;"
+           "margin-bottom:8px'></div>") +
         "<div class=meta>Plans are cumulative — each tier includes everything "
         "below it. <b>Community</b> also hides some surfaces entirely "
         "(source-admission boundary, ADR&nbsp;MED-001) regardless of plan.</div>"
+        "<script src='https://telegram.org/js/telegram-web-app.js'></script>"
+        "<script>"
+        "async function requestAccess(){"
+        " const tg=window.Telegram&&window.Telegram.WebApp;"
+        " const init=(tg&&tg.initData)||'';"
+        " const b=document.getElementById('req-btn'); if(b)b.disabled=true;"
+        " try{"
+        "  const r=await fetch('/api/request_access',{method:'POST',"
+        "   headers:{'Content-Type':'application/json','X-Init-Data':init},"
+        "   body:JSON.stringify({plan:'plus'})});"
+        "  const j=await r.json();"
+        "  document.getElementById('req-flash').textContent="
+        "   j.ok?('✓ '+(j.message||'Request sent.')):('Could not send: '+(j.error||j.detail||'try from the Mini App'));"
+        "  if(!j.ok&&b)b.disabled=false;"
+        " }catch(e){document.getElementById('req-flash').textContent='Open this from the Telegram Mini App to request.';if(b)b.disabled=false;}"
+        "}"
+        "</script>"
         "</div></body></html>")
+
+
+@router.post("/api/request_access")
+async def request_access(request: Request):
+    """A community user asks for premium. Verifies them and pings the owner on
+    Telegram with their identity + current/wanted plan; the owner grants via
+    /app/premium. The beta bridge until Play/license billing is wired."""
+    import logging as _logging
+    p = await _verify(request)
+    user = p.get("user") or {}
+    uid = user.get("id")
+    name = user.get("first_name") or user.get("username") or "user"
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    want = str((body or {}).get("plan") or "plus").strip().lower()
+    if want not in entitlements.PLANS:
+        want = "plus"
+    plan = "free"
+    try:
+        from . import grant_transport
+        plan = (await grant_transport.resolve_grant(request)).get("plan", "free")
+    except Exception:
+        pass
+    try:
+        from . import tg_app
+        from .config import OWNER_CHAT_ID
+        if OWNER_CHAT_ID and getattr(tg_app, "bot", None):
+            await tg_app.bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text=("⭐ Premium access request\n"
+                      f"User: {name} (id {uid})\n"
+                      f"Current: {plan} → wants: {want}\n"
+                      "Grant at /app/premium"))
+    except Exception:
+        _logging.getLogger(__name__).exception("request_access owner ping failed")
+    return {"ok": True,
+            "message": "Request sent — you'll get access once it's approved."}
 
 
 _LICENSE_HTML = r"""<!doctype html>

@@ -272,7 +272,7 @@ def feature_banner(grant: dict, cap: str, *, feature_label: str | None = None) -
         '<span aria-hidden="true">🔒</span>'
         f'<span>{label} is only available to '
         f'<b style="color:#fff;">{req_label}</b> users. '
-        '<a href="/app/premium" style="color:#ff5252;font-weight:600;'
+        '<a href="/app/entitlements" style="color:#ff5252;font-weight:600;'
         'text-decoration:none;">Upgrade →</a></span></div>'
     )
 

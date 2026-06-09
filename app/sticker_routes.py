@@ -2742,19 +2742,24 @@ _EDIT_HTML = r"""<!doctype html>
     /* Tool area: setup rail (Pro) + the active tool's controls, fixed height. */
     .tool-area{display:flex;gap:8px;align-items:stretch;}
     .tool-panels{flex:1 1 auto;min-width:0;height:30vh;overflow-y:auto;
-      -webkit-overflow-scrolling:touch;}
-    .setup-rail{display:none;flex-direction:column;gap:6px;flex:0 0 auto;}
+      -webkit-overflow-scrolling:touch;order:1;}
+    /* Configure rail sits on the RIGHT of the tool dock (order:2). */
+    .setup-rail{display:none;flex-direction:column;gap:6px;flex:0 0 auto;order:2;}
     body.skin-studio .setup-rail{display:flex;}
     .setup-rail button{width:34px;height:34px;font-size:14px;line-height:1;
       padding:0;border-radius:var(--radius);background:var(--surf2);
       border:1px solid var(--border);color:var(--text);cursor:pointer;}
     .setup-rail button.on{background:var(--accent);border-color:var(--accent);
       color:var(--onacc);box-shadow:0 0 12px -3px var(--accent);}
-    /* In Pro the setup tools live on the rail → drop them from the bottom bar. */
+    /* In Pro the global configurators live on the right rail → drop them from
+       the bottom bar, which keeps only the ADDITIVE tools (Emoji · Text ·
+       Image — and future GIF / sticker-on-sticker). */
     body.skin-studio #tool-tabs button[data-tab="trim"],
     body.skin-studio #tool-tabs button[data-tab="crop"],
     body.skin-studio #tool-tabs button[data-tab="shape"],
-    body.skin-studio #tool-tabs button[data-tab="emoji"]{display:none;}
+    body.skin-studio #tool-tabs button[data-tab="cutout"],
+    body.skin-studio #tool-tabs button[data-tab="outline"],
+    body.skin-studio #tool-tabs button[data-tab="layers"]{display:none;}
   </style>
 </head>
 <body>
@@ -2796,11 +2801,17 @@ _EDIT_HTML = r"""<!doctype html>
 
   <div class="tool-area">
     <!-- Setup rail (Pro only): video-sticker tools, icon-only, left of the controls -->
+    <!-- Configure rail (Pro): global modifiers that change the whole sticker /
+         manage the stack — Shape · Crop · Clip · Cutout · Outline · Layers.
+         The additive tools (Emoji · Text · Image) stay on the bottom studio
+         bar. 2026-06-10 studio-bar split. -->
     <div class="setup-rail" id="setup-rail">
-      <button data-tab="trim"  data-tier="std" title="Clip">✂️</button>
-      <button data-tab="crop"  data-tier="std" title="Crop">⛶</button>
-      <button data-tab="shape" title="Shape">◯</button>
-      <button data-tab="emoji" title="Emoji">😀</button>
+      <button data-tab="shape"   title="Shape / frame">◯</button>
+      <button data-tab="crop"    data-tier="std" title="Crop">⛶</button>
+      <button data-tab="trim"    data-tier="std" title="Clip — trim to 3s">✂️</button>
+      <button data-tab="cutout"  title="Cutout — remove background">🪄</button>
+      <button data-tab="outline" title="Outline — die-cut border">🔲</button>
+      <button data-tab="layers"  title="Layers — undo / reorder">▤</button>
     </div>
     <div class="tool-panels">
   <div class="section tool-panel" data-panel="trim" data-tier="std">

@@ -5742,9 +5742,7 @@ async function stkGifSearch() {
     if (!items.length) { st.textContent = 'No GIFs found — try another search.'; return; }
     st.textContent = label + ' · tap a GIF to add it';
     res.innerHTML = items.map(it =>
-      '<div class=stk-gif-cell data-url="' + esc(it.url) + '" title="' + esc(it.title || '') + '" ' +
-      'style="aspect-ratio:1/1;border-radius:8px;cursor:pointer;background:#0d0f14 center/cover no-repeat;' +
-      "background-image:url('" + esc(it.preview) + "');border:1px solid var(--separator)\"></div>").join('');
+      `<div class=stk-gif-cell data-url="${esc(it.url)}" title="${esc(it.title || '')}" style="aspect-ratio:1/1;border-radius:8px;cursor:pointer;background:#0d0f14 center/cover no-repeat;background-image:url('${esc(it.preview)}');border:1px solid var(--separator)"></div>`).join('');
     res.querySelectorAll('.stk-gif-cell').forEach(el =>
       el.addEventListener('click', () => stkGifImport(el.dataset.url, el)));
   } catch (e) {

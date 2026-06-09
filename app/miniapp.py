@@ -3499,11 +3499,11 @@ body.sidebar-collapsed { padding-left: 28px; }
 body.sidebar-collapsed .sidebar { width: 28px; }
 .sidebar-spacer { flex: 1; }
 
-/* ── Bottom tab bar (replaces the left rail). Home becomes a content feed
-      (the cluster tiles are now the tabs, so #home-tiles is hidden). The
-      rail + its flyout are removed; bottom tabs drive clusterEnter(), which
-      already opens each cluster's sub-hub. 2026-06-09 nav revamp. ── */
-.sidebar, .subsidebar, .sidebar-toggle, #home-tiles { display: none !important; }
+/* ── Bottom tab bar (replaces the left rail). The HOME stays the cluster-tile
+      launcher (one big tile per surface → tap opens that cluster's sub-hub),
+      which is what it has always been; the bottom tabs are a parallel quick
+      switch. The left rail + its flyout are removed. 2026-06-09 nav revamp. ── */
+.sidebar, .subsidebar, .sidebar-toggle { display: none !important; }
 body, body.sidebar-collapsed { padding-left: 0 !important;
   padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px)) !important; }
 /* Modern bottom tab bar — typography + SVG icon language borrowed from the
@@ -3560,7 +3560,11 @@ body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
    description lists the actual sub-pages in the cluster so the home view
    teaches the structure without a separate label row. */
 .home-clusters { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 6px; }
-/* ── Phase-1 cohesive home: content rows + first-run welcome ── */
+/* ── Phase-1 cohesive home: content rows + first-run welcome ──
+   The home is the cluster-tile launcher; these discovery rows are currently
+   dormant (not populated on home). Collapse the empty container so there's no
+   gap under the tiles. Re-enable by calling loadHomeRows() in goto('home'). */
+.home-rows:empty { display: none; }
 .home-rows { margin-top: 18px; display: flex; flex-direction: column; gap: 18px; }
 .home-row-title { font-size: 14px; font-weight: 700; margin: 0 0 8px; }
 .home-row-scroll { display: flex; gap: 10px; overflow-x: auto; -webkit-overflow-scrolling: touch;
@@ -5075,8 +5079,9 @@ function goto(page) {
   // If the sub-sidebar flyout is open while we navigate, refresh its
   // "current" highlight so the active page is marked.
   if (_openCluster) _renderSubsidebar(_openCluster);
-  if (page === 'home') loadHomeRows();
-  else if (page === 'downloads') loadDownloads();
+  // Home is the cluster-tile launcher. The discovery rows (loadHomeRows) are
+  // dormant — re-enable by restoring the call here if we want a hybrid home.
+  if (page === 'downloads') loadDownloads();
   else if (page === 'search') { const si = document.getElementById('search-input'); if (si) si.focus(); }
   else if (page === 'notifications') loadNotifications();
   else if (page === 'library') loadLibrary(libKind);

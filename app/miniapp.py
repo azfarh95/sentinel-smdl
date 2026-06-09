@@ -4871,7 +4871,7 @@ function dismissWelcome() {
 }
 
 function _homeCard(c) {
-  const bg = (c.logo || c.poster || '').replace(/['"\\]/g, '');
+  const bg = (c.logo || c.poster || '').replace(/['"]/g, '');
   const cls = c.logo ? 'home-card-logo' : 'home-card-poster';
   const img = bg
     ? `<div class="${cls}" style="background-image:url('${bg}')"></div>`

@@ -252,6 +252,47 @@ async def license_admin_page():
     return HTMLResponse(_LICENSE_HTML)
 
 
+@router.get("/app/entitlements", response_class=HTMLResponse)
+async def entitlements_matrix_page(request: Request):
+    """Features × plans matrix — what each license tier unlocks on each surface.
+    Non-sensitive (it's the published plan structure), so anyone can view it as
+    a pricing/features reference; the caller's CURRENT (or previewed) plan is
+    highlighted. Pairs with `entitlements.feature_banner()` for the in-place
+    'locked' message on live deployments."""
+    from . import grant_transport, edition as _edition
+    grant = await grant_transport.resolve_grant(request)
+    plan = grant.get("plan", "free")
+    matrix = entitlements.render_matrix(current_plan=plan)
+    ed = "Community build (safe-by-default)" if _edition.is_community() else "Private build (owner)"
+    enf = "enforced" if grant_transport.enforcement_active() else "not enforced (owner box)"
+    plan_label = entitlements.PLAN_LABEL.get(plan, plan.title())
+    return HTMLResponse(
+        "<!doctype html><html lang=en><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width, initial-scale=1'>"
+        "<title>Plans & Features — Sentinel Media</title><style>"
+        ":root{color-scheme:dark}*{box-sizing:border-box}"
+        "body{margin:0;background:#0d1014;color:#e6e9ef;"
+        "font:14px/1.5 Inter,system-ui,-apple-system,sans-serif}"
+        ".wrap{max-width:880px;margin:0 auto;padding:18px 16px 60px}"
+        "h1{font-size:20px;margin:6px 0 2px}.sub{color:#8b94a3;margin:0 0 14px;font-size:13px}"
+        "a.back{color:#6ea0ff;text-decoration:none;font-size:13px}"
+        ".card{background:#15191f;border:1px solid #2a313c;border-radius:12px;padding:16px;margin-bottom:16px;overflow-x:auto}"
+        ".meta{font-size:12px;color:#8b94a3;margin:2px 0 12px}"
+        ".chip{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;background:#1b2a3a;color:#7fb8ff;margin-right:6px}"
+        "</style></head><body><div class=wrap>"
+        "<a class=back href='/app'>&larr; Sentinel Media</a>"
+        "<h1>Plans &amp; Features</h1>"
+        f"<div class=sub>What each license tier unlocks on each surface. "
+        f"You are viewing as <b style='color:#4cd964'>{plan_label}</b>.</div>"
+        f"<div class=meta><span class=chip>{ed}</span>"
+        f"<span class=chip>Entitlements {enf}</span></div>"
+        f"<div class=card>{matrix}</div>"
+        "<div class=meta>Plans are cumulative — each tier includes everything "
+        "below it. <b>Community</b> also hides some surfaces entirely "
+        "(source-admission boundary, ADR&nbsp;MED-001) regardless of plan.</div>"
+        "</div></body></html>")
+
+
 _LICENSE_HTML = r"""<!doctype html>
 <html lang="en">
 <head>

@@ -236,3 +236,88 @@ def require_entitlement(grant: dict, cap: str) -> None:
                 "required_plan": min_plan_for(cap),
             },
         )
+
+
+# ── UI: per-plan feature matrix + inline "locked" banner ─────────────────────
+# Display metadata for the surfaces (cap `area`s) and the plan columns. Keep in
+# sync with CAP_META areas + PLANS.
+AREA_LABEL: dict[str, str] = {
+    "tv": "Live TV", "library": "Library", "downloader": "Downloader",
+    "stickers": "Stickers", "watchlist": "Watchlist & Sync",
+}
+PLAN_LABEL: dict[str, str] = {
+    "free": "Free", "registered": "Registered", "plus": "Plus", "family": "Family",
+}
+
+
+def feature_banner(grant: dict, cap: str, *, feature_label: str | None = None) -> str:
+    """Inline red banner for a feature the caller's plan can't use — returns ''
+    when the grant IS entitled (so it's safe to drop in unconditionally).
+
+    Use on a live deployment to tell a lower-tier user, in place, that a
+    feature needs an upgrade — instead of (or alongside) the 402 paywall sheet.
+    """
+    if has_entitlement(grant, cap):
+        return ""
+    req = min_plan_for(cap) or "plus"
+    req_label = PLAN_LABEL.get(req, req.title())
+    label = feature_label or CAP_META.get(cap, (cap, ""))[0]
+    return (
+        '<div class="ent-locked-banner" role="alert" '
+        f'data-cap="{cap}" data-required-plan="{req}" '
+        'style="display:flex;gap:8px;align-items:center;margin:8px 0;'
+        'padding:9px 12px;border-radius:8px;background:rgba(229,57,53,0.12);'
+        'border:1px solid rgba(229,57,53,0.45);border-left:3px solid #e53935;'
+        'color:#ff8a80;font-size:13px;line-height:1.4;">'
+        '<span aria-hidden="true">🔒</span>'
+        f'<span>{label} is only available to '
+        f'<b style="color:#fff;">{req_label}</b> users. '
+        '<a href="/app/premium" style="color:#ff5252;font-weight:600;'
+        'text-decoration:none;">Upgrade →</a></span></div>'
+    )
+
+
+def render_matrix(*, current_plan: str | None = None) -> str:
+    """Features (grouped by surface) × plans matrix. The owner-facing 'what does
+    each tier unlock, on each surface' interface. `current_plan` highlights one
+    column (e.g. the owner's preview-as plan)."""
+    plans = list(_PLAN_ORDER)
+    # group caps by area, preserving CAP_META order
+    by_area: dict[str, list[str]] = {}
+    for cap in CAP_META:
+        by_area.setdefault(CAP_META[cap][1], []).append(cap)
+
+    head = '<th style="text-align:left;padding:8px 10px;">Feature</th>'
+    for p in plans:
+        hl = ';color:#4cd964' if p == current_plan else ''
+        head += (f'<th style="text-align:center;padding:8px 10px;white-space:nowrap{hl}">'
+                 f'{PLAN_LABEL.get(p, p.title())}</th>')
+
+    rows = ""
+    for area, caps in by_area.items():
+        rows += (f'<tr><td colspan="{len(plans)+1}" '
+                 'style="padding:12px 10px 4px;font-size:11px;letter-spacing:.4px;'
+                 'text-transform:uppercase;color:#8a93a0;border-top:1px solid #223;">'
+                 f'{AREA_LABEL.get(area, area.title())}</td></tr>')
+        for cap in caps:
+            label = CAP_META[cap][0]
+            mp = min_plan_for(cap)
+            rows += f'<tr><td style="padding:6px 10px;">{label}</td>'
+            for p in plans:
+                included = cap in PLANS.get(p, frozenset())
+                is_entry = (p == mp)            # the cheapest plan that unlocks it
+                if included:
+                    mark = ('<span style="color:#4cd964;font-weight:700;">✓</span>'
+                            + (' <span style="font-size:10px;color:#4cd964;">incl.</span>'
+                               if is_entry else ''))
+                else:
+                    mark = '<span style="color:#3a3f48;">—</span>'
+                cell_bg = 'background:rgba(76,217,100,0.06);' if p == current_plan else ''
+                rows += (f'<td style="text-align:center;padding:6px 10px;{cell_bg}">'
+                         f'{mark}</td>')
+            rows += '</tr>'
+
+    return (
+        '<table style="width:100%;border-collapse:collapse;font-size:13px;">'
+        f'<thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table>'
+    )

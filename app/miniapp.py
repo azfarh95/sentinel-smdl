@@ -4935,6 +4935,11 @@ async function loadHomeRows() {
   if (_homeRowsLoaded) return;
   _homeRowsLoaded = true;
   host.innerHTML = '';
+  // Trending FIRST — works for everyone (cross-user, with a curated fallback),
+  // so a brand-new user with no history still has real discovery on open.
+  _homeRow('🔥 Trending now', '/api/iptv/trending?limit=15',
+    d => (d.items || []).map(it => ({ label: it.name, sub: it.country || '', logo: it.logo, act: 'play', id: it.id })),
+    'Live TV is warming up…', "clusterEnter('watch')", '▶ Browse Live TV');
   _homeRow('Continue watching', '/api/iptv/last_watched?limit=10',
     d => (d.items || []).map(it => ({ label: it.name || ('Channel ' + it.channel_id), sub: 'Live TV', logo: it.logo, act: 'play', id: it.channel_id })),
     'No history yet.', "clusterEnter('watch')", '▶ Browse Live TV');

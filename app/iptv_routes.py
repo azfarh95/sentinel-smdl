@@ -1681,6 +1681,42 @@ async def iptv_favorites_reorder(body: FavReorderBody, request: Request):
     return {"ok": True}
 
 
+@router.get("/api/iptv/trending")
+async def iptv_trending(request: Request, limit: int = 15):
+    """Cross-user trending — most-played ALIVE channels in the last 14 days, so
+    the home has real discovery even for a user with zero history. Falls back to
+    curated alive picks when play history is thin (it usually is in beta)."""
+    await _verify_iptv(request)
+    await _ensure_play_history_table()
+    from datetime import datetime as _dtm, timezone as _tz, timedelta as _td
+    since = (_dtm.now(_tz.utc) - _td(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        rows = await (await conn.execute(
+            "SELECT v.id, v.name, v.country, v.logo, COUNT(*) AS plays "
+            "FROM iptv_play_history ph "
+            "JOIN v_channels_with_status v ON v.id = ph.channel_id "
+            "WHERE ph.played_at >= ? AND v.alive_count_srcs > 0 "
+            "GROUP BY v.id ORDER BY plays DESC, v.is_curated DESC LIMIT ?",
+            (since, limit))).fetchall()
+        items = [{"id": r["id"], "name": r["name"], "country": r["country"],
+                  "logo": r["logo"]} for r in rows]
+        if len(items) < limit:                       # thin history → curated picks
+            have = {i["id"] for i in items}
+            extra = await (await conn.execute(
+                "SELECT id, name, country, logo FROM v_channels_with_status "
+                "WHERE alive_count_srcs > 0 ORDER BY is_curated DESC, name ASC "
+                "LIMIT ?", (limit * 2,))).fetchall()
+            for r in extra:
+                if r["id"] in have:
+                    continue
+                items.append({"id": r["id"], "name": r["name"],
+                              "country": r["country"], "logo": r["logo"]})
+                if len(items) >= limit:
+                    break
+    return {"ok": True, "items": items}
+
+
 @router.get("/api/iptv/for_you")
 async def iptv_for_you(request: Request):
     """Personalized rows from watch history: 'More <country> TV' + a category

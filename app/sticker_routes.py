@@ -2822,7 +2822,7 @@ _EDIT_HTML = r"""<!doctype html>
       padding:2px 0 8px;}
     .preview-dock .video-wrap{max-height:36vh;}
     .preview-dock .video-wrap video{max-height:36vh;width:auto;max-width:100%;}
-    .preview-dock #result-preview{width:128px;height:128px;}
+    .preview-dock #result-preview{width:150px;height:150px;}
     .tool-panel{display:none;}
     body[data-tab="trim"]    [data-panel="trim"],
     body[data-tab="crop"]    [data-panel="crop"],
@@ -2901,7 +2901,7 @@ _EDIT_HTML = r"""<!doctype html>
       </div>
       <div class="result-pane" data-tier="std">
         <canvas id="result-preview" width="256" height="256"></canvas>
-        <div class="result-cap">Result preview ▶</div>
+        <div class="result-cap">▶ Live result (your layers)</div>
       </div>
     </div>
     <div id="studio-stage" data-tier="pro">
@@ -3845,6 +3845,40 @@ function _refreshShapePreview() {
 // ── Live result preview (right pane) — exactly what the sticker will look ────
 const resultCanvas = document.getElementById('result-preview');
 const resultCtx = resultCanvas ? resultCanvas.getContext('2d') : null;
+// Cached snapshot of the Studio overlay layers (text/emoji/image/stickers) on
+// a transparent 512² canvas, drawn on TOP of the live video in the preview so
+// the composite is visible on EVERY tab — not just the Fabric editor tabs.
+// Regenerated only when the canvas changes (object add/modify/remove/undo).
+let _overlayImg = null, _overlaySnapTimer = 0;
+function _updateOverlaySnapshot() {
+  if (!fcanvas) { _overlayImg = null; return; }
+  clearTimeout(_overlaySnapTimer);
+  _overlaySnapTimer = setTimeout(() => {
+    if (!fcanvas) return;
+    const base = fcanvas.getObjects().find(o => o.studioRole === 'base');
+    const bv = base ? base.visible : false;
+    const pbg = fcanvas.backgroundColor;
+    try {
+      if (base) base.visible = false;
+      fcanvas.backgroundColor = null;
+      fcanvas.renderAll();
+      const others = fcanvas.getObjects().filter(o => o.studioRole !== 'base');
+      if (!others.length) { _overlayImg = null; }
+      else {
+        const url = fcanvas.toDataURL({ format: 'png', multiplier: 512 / STUDIO_PX });
+        const im = new Image();
+        im.onload = () => { _overlayImg = im; };
+        im.onerror = () => { _overlayImg = null; };
+        im.src = url;
+      }
+    } catch (e) { /* keep the previous snapshot */ }
+    finally {
+      if (base) base.visible = bv;
+      fcanvas.backgroundColor = pbg;
+      fcanvas.renderAll();
+    }
+  }, 60);
+}
 
 // The square region of the SOURCE the encoder turns into the 512² sticker:
 // the centre square of the crop box (pick-region) or of the whole video.
@@ -3905,6 +3939,11 @@ function renderResult() {
   if (path) resultCtx.clip(path);
   try { resultCtx.drawImage(vid, sq.sx, sq.sy, sq.side, sq.side, 0, 0, R, R); } catch (e) {}
   resultCtx.restore();
+  // 3) Studio overlays ON TOP (unclipped, like the export) — so the live
+  //    preview shows your stickers/text/emoji on EVERY tab.
+  if (_overlayImg && _overlayImg.naturalWidth) {
+    try { resultCtx.drawImage(_overlayImg, 0, 0, R, R); } catch (e) {}
+  }
 }
 
 let _resultRAF = 0;
@@ -4054,7 +4093,7 @@ function _snap() {
 }
 function _loadState(json) {
   _restoring = true;
-  fcanvas.loadFromJSON(json, () => { fcanvas.renderAll(); _restoring = false; });
+  fcanvas.loadFromJSON(json, () => { fcanvas.renderAll(); _restoring = false; _updateOverlaySnapshot(); });
 }
 function studioUndo() {
   if (_hist.length < 2) return;          // keep at least the base state
@@ -4134,10 +4173,15 @@ async function ensureStudio() {
     if (e && e.target && e.target.setControlsVisibility) {
       e.target.setControlsVisibility({ mt: false, mb: false, ml: false, mr: false });
     }
-    _snap();
+    _snap(); _updateOverlaySnapshot();
   });
-  fcanvas.on('object:modified', _snap);
-  fcanvas.on('object:removed', _snap);
+  fcanvas.on('object:modified', () => { _snap(); _updateOverlaySnapshot(); });
+  fcanvas.on('object:removed', () => { _snap(); _updateOverlaySnapshot(); });
+  // Keep the live preview in step while a layer is dragged/scaled, not just at
+  // transform-end — cheap (debounced snapshot), big UX win.
+  fcanvas.on('object:moving', _updateOverlaySnapshot);
+  fcanvas.on('object:scaling', _updateOverlaySnapshot);
+  fcanvas.on('object:rotating', _updateOverlaySnapshot);
   _restoring = true;                       // don't snapshot the initial base add
   const url = await _studioBaseDataUrl();
   if (url) await _addImage(url, { role: 'base', cover: true, toBack: true, silent: true });

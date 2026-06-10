@@ -2895,11 +2895,17 @@ _EDIT_HTML = r"""<!doctype html>
     body.skin-studio.pmode-studio #tool-tabs button.studio-tool{display:inline-block!important;}
     body.skin-studio.pmode-layout #tool-tabs button.studio-tool{display:none!important;}
     body.skin-studio.pmode-layout #tool-tabs button.layout-tool{display:inline-block!important;}
-    /* Layout = ONE big framing canvas. The composite preview lives in Studio,
-       so hide the redundant "Live result" here and give the video the room. */
-    body.skin-studio.pmode-layout .result-pane{display:none;}
+    /* Layout = one big framing canvas + a SMALL floating "Live result" thumbnail
+       (PiP, bottom-right of the video) so the composite stays visible while you
+       frame, without pushing the layout around. */
     body.skin-studio.pmode-layout .video-wrap,
     body.skin-studio.pmode-layout .video-wrap video{max-height:54vh;}
+    body.skin-studio.pmode-layout .studio-row{position:relative;}
+    body.skin-studio.pmode-layout .result-pane{position:absolute;right:8px;bottom:8px;
+      z-index:5;margin:0;padding:0;width:auto;}
+    body.skin-studio.pmode-layout #result-preview{width:88px!important;height:88px!important;
+      border:2px solid var(--accent);border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.55);}
+    body.skin-studio.pmode-layout .result-cap{display:none;}
   </style>
 </head>
 <body>

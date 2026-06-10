@@ -15,7 +15,7 @@ _DEFAULTS: dict = {
     "delete_after_send":      False,
     "default_quality":        "1080p",
     "max_concurrent_downloads": 2,
-    "temp_ttl_hours":         24,
+    "temp_ttl_hours":         12,   # non-owner downloads land in TEMP_DIR → reaped after 12h
     "owner_chat_id":          None,
     "allowed_chat_ids":       [],
     # Livestream recording (v2)

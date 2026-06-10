@@ -168,6 +168,7 @@ async def download(
     media_type: str | None = None,
     is_owner: bool = True,
     quality: str | None = None,
+    subdir: str | None = None,
 ) -> dict:
     """Download url. Returns {files: [...], cached: bool} or {error: str}.
 
@@ -185,6 +186,13 @@ async def download(
         loop = asyncio.get_running_loop()
         cookiepath = _resolve_cookies(url)
         out_dir = TEMP_DIR if temp else DOWNLOADS_DIR
+        if temp and subdir:
+            # Per-user temp subdir → enables the per-user storage budget and
+            # lets the 12h sweep account/target one user's files.
+            import re as _re
+            safe = _re.sub(r"[^A-Za-z0-9_-]", "", str(subdir))[:32]
+            if safe:
+                out_dir = os.path.join(out_dir, safe)
         Path(out_dir).mkdir(parents=True, exist_ok=True)
 
         try:
@@ -337,6 +345,26 @@ async def send_files(bot, chat_id: int, filepaths: list[str], caption: str | Non
         if result.get("ok"):
             sent += 1
     return {"ok": True, "count": sent}
+
+
+def temp_user_bytes(subdir: str) -> int:
+    """Total bytes a non-owner (temp) user currently holds on disk — drives the
+    per-user storage budget. Missing/empty dir → 0."""
+    import re as _re
+    safe = _re.sub(r"[^A-Za-z0-9_-]", "", str(subdir or ""))[:32]
+    if not safe:
+        return 0
+    d = Path(TEMP_DIR) / safe
+    if not d.exists():
+        return 0
+    total = 0
+    for f in d.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            pass
+    return total
 
 
 async def cleanup_temp_files() -> None:

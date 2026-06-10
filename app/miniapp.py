@@ -181,6 +181,13 @@ COMMUNITY_USER_SCOPES = (
     "smdl.streamtracker",
 )
 
+# Per-user budget for NON-OWNER (community) downloads. Their files go to
+# TEMP_DIR/<uid>/ and are reaped after temp_ttl_hours (12h). The budget keeps
+# one user from filling the disk before the sweep runs. Owner is unlimited.
+NONOWNER_MAX_ACTIVE = 4                    # concurrent downloads per user
+NONOWNER_MAX_BYTES  = 5 * 1024 ** 3        # 5 GB of live files per user
+_active_dls: dict[int, int] = {}           # uid -> in-flight download count
+
 
 async def _check_access(payload: dict) -> int:
     """Returns the caller's user_id if authorised. Routes the decision through
@@ -1799,9 +1806,38 @@ async def downloads_batch(request: Request):
                         for u in accepted[MAX_PER_REQUEST:])
         accepted = accepted[:MAX_PER_REQUEST]
 
+    # ── Per-user budget for NON-OWNER downloads (owner is unlimited) ──
+    # Their files land in TEMP_DIR/<uid>/ and are reaped after 12h; the budget
+    # stops one user filling the disk before the sweep runs. See the author's
+    # "until we add per-user budgets" note on the Stremio block.
+    sub = None
+    if not is_owner_flag:
+        sub = str(uid)
+        active = _active_dls.get(uid, 0)
+        slots = max(0, NONOWNER_MAX_ACTIVE - active)
+        if slots <= 0:
+            rejected.extend({"url": u, "reason": f"download limit ({NONOWNER_MAX_ACTIVE} at once)"}
+                            for u in accepted)
+            return JSONResponse({"accepted": 0, "rejected": len(rejected),
+                                 "accepted_urls": [], "rejected_urls": rejected,
+                                 "detail": f"You can run {NONOWNER_MAX_ACTIVE} downloads at once. Wait for some to finish."},
+                                status_code=429)
+        if _dl.temp_user_bytes(sub) >= NONOWNER_MAX_BYTES:
+            rejected.extend({"url": u, "reason": "storage full (5 GB)"} for u in accepted)
+            return JSONResponse({"accepted": 0, "rejected": len(rejected),
+                                 "accepted_urls": [], "rejected_urls": rejected,
+                                 "detail": "You're at the 5 GB limit. Files auto-delete 12h after download — or clear some."},
+                                status_code=429)
+        if len(accepted) > slots:
+            rejected.extend({"url": u, "reason": f"download limit ({NONOWNER_MAX_ACTIVE} at once)"}
+                            for u in accepted[slots:])
+            accepted = accepted[:slots]
+
     async def _run_one(url: str):
+        if sub is not None:
+            _active_dls[uid] = _active_dls.get(uid, 0) + 1
         try:
-            res = await _dl.download(url=url, is_owner=is_owner_flag)
+            res = await _dl.download(url=url, is_owner=is_owner_flag, subdir=sub)
             if res.get("files"):
                 try:
                     await _db.record_download(
@@ -1815,6 +1851,9 @@ async def downloads_batch(request: Request):
                                url, res.get("error"))
         except Exception:
             logger.exception("paste-batch: download failed for %s", url)
+        finally:
+            if sub is not None:
+                _active_dls[uid] = max(0, _active_dls.get(uid, 0) - 1)
 
     for u in accepted:
         asyncio.create_task(_run_one(u))
@@ -4197,6 +4236,9 @@ button.warn { background: #ff9500; color: #fff; }
       <h1>Recent Downloads</h1>
       <button class="small sec" onclick="clearDownloadHistory()" title="Wipe your download history">🗑 Clear</button>
     </div>
+    <div id=dl-ttl-banner style="display:none;margin:0 0 12px;padding:11px 13px;border:1px solid #5c2226;border-radius:10px;background:rgba(120,30,30,0.14);color:#ffb3b3;font-size:13px">
+      ⚠ <b>Files are deleted 12 hours after download.</b> Grab what you need promptly — this is shared, temporary storage on the host (up to 4 at once, 5 GB total).
+    </div>
     <div class=card style="margin-bottom:14px">
       <div class=meta style="margin-bottom:6px">Paste one or more URLs (newline / space / comma-separated). Up to 50 at a time. Live-recording URLs go through the watchlist, not this box.</div>
       <textarea id=dl-batch-input rows=3 placeholder="https://... &#10;https://..." style="width:100%;box-sizing:border-box;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:ui-monospace,monospace;font-size:13px;resize:vertical"></textarea>
@@ -5414,6 +5456,10 @@ async function loadMoreLibrary() {
 }
 
 async function loadDownloads() {
+  // Non-owners download into shared temp storage that's swept after 12h — warn
+  // them with the red banner (owner's downloads are permanent, so hide it).
+  const _ttlB = document.getElementById('dl-ttl-banner');
+  if (_ttlB) _ttlB.style.display = isOwner ? 'none' : '';
   try {
     const j = await api('/api/miniapp/downloads?limit=50');
     const root = document.getElementById('downloads-list');

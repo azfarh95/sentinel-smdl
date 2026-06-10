@@ -1829,9 +1829,12 @@ async def gif_search(request: Request, q: str = "", source: str = "giphy",
                     still = ((imgs.get("fixed_width_still") or imgs.get("original_still") or {}).get("url"))
                     anim = ((imgs.get("fixed_width") or imgs.get("original") or {}).get("webp")
                             or (imgs.get("original") or {}).get("url"))
+                    # The animated transparent GIF — ffmpeg-friendly (loops via
+                    # -ignore_loop) for the editor's animated-overlay export.
+                    anim_gif = ((imgs.get("original") or imgs.get("fixed_width") or {}).get("url"))
                     items.append({"id": g.get("id"), "preview": prev,
-                                  "url": still or anim, "is_mp4": False,
-                                  "title": g.get("title") or ""})
+                                  "url": still or anim, "anim_url": anim_gif,
+                                  "is_mp4": False, "title": g.get("title") or ""})
             else:
                 raise HTTPException(400, f"unknown source: {src}")
     except HTTPException:
@@ -4217,16 +4220,26 @@ async function studioExport() {
   // → an animated sticker (v2.7-A). Static drafts export the flattened canvas.
   const base = animated ? fcanvas.getObjects().find(o => o.studioRole === 'base') : null;
   const baseVis = base ? (base.visible !== false) : false;
+  // The editor canvas sits on an opaque #000 background so the dock looks right.
+  // For a VIDEO export we hide the base frame and the overlay PNG MUST be
+  // transparent — otherwise that black fills the canvas and the server stamps
+  // it over every frame (the "static sticker on black" bug: the animated video
+  // is hidden behind the black). Null the bg for the export, then restore it.
+  const _prevBg = fcanvas.backgroundColor;
   let png;
   try {
-    if (base) { base.visible = false; fcanvas.renderAll(); }
+    if (base) base.visible = false;
+    if (animated) fcanvas.backgroundColor = null;
+    fcanvas.renderAll();
     png = fcanvas.toDataURL({ format: 'png', multiplier: 512 / STUDIO_PX });
   } catch (e) {
-    if (base) { base.visible = baseVis; fcanvas.renderAll(); }
+    if (base) base.visible = baseVis;
+    fcanvas.backgroundColor = _prevBg; fcanvas.renderAll();
     prog.textContent = '❌ Export blocked (image security): ' + e.message;
     return;
   }
-  if (base) { base.visible = baseVis; fcanvas.renderAll(); }
+  if (base) base.visible = baseVis;
+  fcanvas.backgroundColor = _prevBg; fcanvas.renderAll();
   btn.disabled = true;
   try {
     let result;

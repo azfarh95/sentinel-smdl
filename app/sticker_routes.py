@@ -2881,6 +2881,25 @@ _EDIT_HTML = r"""<!doctype html>
     body.skin-studio #tool-tabs button[data-tab="cutout"],
     body.skin-studio #tool-tabs button[data-tab="outline"],
     body.skin-studio #tool-tabs button[data-tab="layers"]{display:none;}
+    /* ── 2-mode (Pro): explicit Studio (layers) vs Layout (framing the source) ── */
+    .mode-switch{display:none;justify-content:flex-end;gap:5px;margin:8px 12px 2px;}
+    body.skin-studio .mode-switch{display:flex;}
+    .mode-switch button{font-size:12px;padding:6px 18px;border:1px solid var(--border);
+      border-radius:999px;background:var(--surf2);color:var(--text);cursor:pointer;}
+    .mode-switch button.on{background:var(--accent);color:var(--onacc);
+      border-color:var(--accent);font-weight:600;}
+    /* One tool bar, switched by mode — fold the right rail into the bottom bar. */
+    body.skin-studio.pmode-studio .setup-rail,
+    body.skin-studio.pmode-layout .setup-rail{display:none;}
+    body.skin-studio.pmode-studio #tool-tabs button.layout-tool{display:none!important;}
+    body.skin-studio.pmode-studio #tool-tabs button.studio-tool{display:inline-block!important;}
+    body.skin-studio.pmode-layout #tool-tabs button.studio-tool{display:none!important;}
+    body.skin-studio.pmode-layout #tool-tabs button.layout-tool{display:inline-block!important;}
+    /* Layout = ONE big framing canvas. The composite preview lives in Studio,
+       so hide the redundant "Live result" here and give the video the room. */
+    body.skin-studio.pmode-layout .result-pane{display:none;}
+    body.skin-studio.pmode-layout .video-wrap,
+    body.skin-studio.pmode-layout .video-wrap video{max-height:54vh;}
   </style>
 </head>
 <body>
@@ -2891,6 +2910,11 @@ _EDIT_HTML = r"""<!doctype html>
       <button data-skin="native">✈️ Standard</button>
       <button data-skin="studio">⚡ Pro</button>
     </div>
+  </div>
+
+  <div class="mode-switch" id="mode-switch">
+    <button data-mode="layout">✂️ Layout</button>
+    <button data-mode="studio">🎨 Studio</button>
   </div>
 
   <div class="preview-dock">
@@ -3106,16 +3130,16 @@ _EDIT_HTML = r"""<!doctype html>
   <div class="toolbar">
     <div id="progress"></div>
     <div class="tabs" id="tool-tabs">
-      <button data-tab="trim"  data-tier="std">✂️ Clip</button>
-      <button data-tab="crop"  data-tier="std">⛶ Crop</button>
-      <button data-tab="shape">◯ Shape</button>
-      <button data-tab="emoji">😀 Emoji</button>
-      <button data-tab="text"    data-tier="pro">➕ Text</button>
-      <button data-tab="image"   data-tier="pro">🖼 Image</button>
-      <button data-tab="assets"  data-tier="pro">✨ Stickers</button>
-      <button data-tab="cutout"  data-tier="pro">✂️ Cutout</button>
-      <button data-tab="outline" data-tier="pro">🔲 Outline</button>
-      <button data-tab="layers"  data-tier="pro">▤ Layers</button>
+      <button data-tab="trim"  data-tier="std" class="layout-tool">✂️ Clip</button>
+      <button data-tab="crop"  data-tier="std" class="layout-tool">⛶ Crop</button>
+      <button data-tab="shape" class="layout-tool">◯ Shape</button>
+      <button data-tab="emoji" class="studio-tool">😀 Emoji</button>
+      <button data-tab="text"    data-tier="pro" class="studio-tool">➕ Text</button>
+      <button data-tab="image"   data-tier="pro" class="studio-tool">🖼 Image</button>
+      <button data-tab="assets"  data-tier="pro" class="studio-tool">✨ Stickers</button>
+      <button data-tab="cutout"  data-tier="pro" class="layout-tool">✂️ Cutout</button>
+      <button data-tab="outline" data-tier="pro" class="studio-tool">🔲 Outline</button>
+      <button data-tab="layers"  data-tier="pro" class="studio-tool">▤ Layers</button>
     </div>
     <button id="make-btn">✨ Make sticker</button>
   </div>
@@ -3152,9 +3176,12 @@ document.getElementById('skin-switch').addEventListener('click', e => {
   const b = e.target.closest('button[data-skin]');
   if (!b) return;
   applySkin(b.dataset.skin);
-  // Mode change can hide the current tab (e.g. Pro→Simple hides Trim/Crop) and
-  // flips the effective corner fill → re-validate the tab + refresh the preview.
-  setTab(document.body.dataset.tab || 'shape');
+  // Pro uses the 2-mode (Studio/Layout) tool split; other tiers use one row.
+  if (b.dataset.skin === 'studio') {
+    setMode((() => { try { return localStorage.getItem('smdl_sticker_pmode'); } catch (e) { return null; } })() || 'studio');
+  } else {
+    setTab(document.body.dataset.tab || 'shape');
+  }
   try { _refreshShapePreview(); } catch (_) {}
 });
 applySkin((() => { try { return localStorage.getItem('smdl_sticker_skin'); }
@@ -3163,7 +3190,7 @@ applySkin((() => { try { return localStorage.getItem('smdl_sticker_skin'); }
 // ── Tool tabs (sticky preview · bottom tab bar) ───────────────────────────
 // The Studio compositor's tools live in the same scrollable row; selecting one
 // pins the canvas in the dock and turns the action button into Export.
-const STUDIO_TABS = ['text', 'image', 'cutout', 'outline', 'layers', 'assets'];
+const STUDIO_TABS = ['emoji', 'text', 'image', 'cutout', 'outline', 'layers', 'assets'];
 const _TAB_SEL = '#tool-tabs [data-tab], #setup-rail [data-tab]';
 function _tabVisible(tab) {
   // visible if ANY copy of the tab (bottom bar OR the Pro setup rail) is shown
@@ -3213,6 +3240,33 @@ document.getElementById('setup-rail').addEventListener('click', e => {
   if (b) setTab(b.dataset.tab);
 });
 setTab('shape');
+
+// ── 2-mode (Pro): Studio = compositing layers · Layout = framing the source ──
+// Explicit modes so the two surfaces (square compositor vs full-frame video)
+// aren't confusingly swapped per-tab. The surface follows the chosen tool, so
+// each mode lands on its own tool set + a sensible default tab.
+const STUDIO_MODE_TABS = ['emoji', 'text', 'image', 'assets', 'outline', 'layers'];
+const LAYOUT_MODE_TABS = ['trim', 'crop', 'shape', 'cutout'];
+let _pmode = 'studio';
+function setMode(m) {
+  _pmode = (m === 'layout') ? 'layout' : 'studio';
+  document.body.classList.toggle('pmode-studio', _pmode === 'studio');
+  document.body.classList.toggle('pmode-layout', _pmode === 'layout');
+  document.querySelectorAll('#mode-switch button').forEach(
+    b => b.classList.toggle('on', b.dataset.mode === _pmode));
+  try { localStorage.setItem('smdl_sticker_pmode', _pmode); } catch (e) {}
+  const tabs = (_pmode === 'studio') ? STUDIO_MODE_TABS : LAYOUT_MODE_TABS;
+  const cur = document.body.dataset.tab;
+  setTab(tabs.includes(cur) ? cur : tabs[0]);
+}
+document.getElementById('mode-switch').addEventListener('click', e => {
+  const b = e.target.closest('button[data-mode]');
+  if (b) setMode(b.dataset.mode);
+});
+// If we booted straight into Pro, land in the remembered/default mode.
+if (document.body.classList.contains('skin-studio')) {
+  setMode((() => { try { return localStorage.getItem('smdl_sticker_pmode'); } catch (e) { return null; } })() || 'studio');
+}
 
 async function api(path, opts = {}) {
   opts.headers = Object.assign({}, opts.headers || {}, {

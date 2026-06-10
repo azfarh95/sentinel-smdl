@@ -3044,10 +3044,14 @@ async function epgSearch() {
     + label + '</button>';
   box.innerHTML = _epgResults.map((p, i) => {
     const chan = escapeHtml(p.channel_name || p.channel_id || '?');
-    const acts = p.channel_id
-      ? '<div style="display:flex;gap:5px">' + btn('🔔', 'epgRemind', i)
-        + btn('⏺', 'epgRecord', i) + btn('📺', 'epgSeries', i) + '</div>'
-      : '<span style="font-size:11px;color:var(--muted,#999)">no channel</span>';
+    // EPG actions (reminder / record / series-link) are owner/private only —
+    // hidden on community (ADR MED-008: no controls that no-op / fail there;
+    // the "what's on" search itself stays, it's just read-only metadata).
+    const acts = !p.channel_id
+      ? '<span style="font-size:11px;color:var(--muted,#999)">no channel</span>'
+      : (EDITION === 'community' ? ''
+         : '<div style="display:flex;gap:5px">' + btn('🔔', 'epgRemind', i)
+           + btn('⏺', 'epgRecord', i) + btn('📺', 'epgSeries', i) + '</div>');
     return '<div style="display:flex;gap:8px;align-items:center;padding:7px 4px;'
       + 'border-bottom:1px solid var(--line,#2a2a2e)">'
       + '<div style="flex:1;min-width:0">'

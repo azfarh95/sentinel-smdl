@@ -5477,6 +5477,11 @@ function renderLibCard(it) {
 }
 
 async function loadLibrary(kind, force) {
+  if (!isOwner) {
+    const g = document.getElementById('library-grid');
+    if (g) g.innerHTML = '<div class=empty>Library is owner-only.</div>';
+    return;
+  }
   if (_libBusy) return;
   _libBusy = true;
   libKind = kind || 'all';
@@ -7039,6 +7044,12 @@ function fmtDate(unix) {
 }
 
 async function loadFiles(path) {
+  if (!isOwner) {
+    const l = document.getElementById('files-list');
+    if (l) l.innerHTML = '<div class=empty>Files is owner-only.</div>';
+    const c = document.getElementById('files-crumbs'); if (c) c.innerHTML = '';
+    return;
+  }
   filesCwd = path || '';
   const listRoot   = document.getElementById('files-list');
   const crumbsRoot = document.getElementById('files-crumbs');

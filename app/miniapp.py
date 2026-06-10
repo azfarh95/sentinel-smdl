@@ -2393,8 +2393,16 @@ async def watchlist(request: Request):
     require_scope(p, "smdl.streamtracker")
     uid = int(p["user"]["id"])
     is_own = _is_owner(uid)
-    # Owner sees the global list; everyone else sees only their own entries.
-    items = stream_monitor.list_watchlist(chat_id=None if is_own else uid)
+    # Per-user isolation (owner directive 2026-06-10): EVERYONE — owner
+    # included — sees only their own entries + their own active recordings.
+    # Another account's watchlist/recordings must not bleed into this view.
+    # (Legacy entries predating added_by are attributed to the owner.)
+    all_items = stream_monitor.list_watchlist(chat_id=None)
+    if is_own:
+        items = [e for e in all_items
+                 if not e.get("added_by") or int(e.get("added_by") or 0) == uid]
+    else:
+        items = [e for e in all_items if e.get("added_by") == uid]
     enriched = _enrich_watchlist_items(items)
     # Hide blocked-platform entries from non-owners (they still live in the
     # JSON file — owner can see + edit them, just shielded from regular users).
@@ -2402,11 +2410,23 @@ async def watchlist(request: Request):
         bl = set(await _auth.get_site_blocklist())
         if bl:
             enriched = [w for w in enriched if w.get("platform") not in bl]
+    # Recording-consent gate (Twitch): tell the UI which entries may record so
+    # it can show "Streamer hasn't opted in to recording yet" instead of a
+    # working REC button. Non-Twitch rows pass through (gate is Twitch-only).
+    from . import streamer_consent as _sc
+    for w in enriched:
+        try:
+            allowed, ci = await _sc.is_record_allowed(w.get("url") or "", str(uid))
+            w["record_allowed"] = bool(allowed)
+            if not allowed:
+                w["consent_reason"] = ci.get("reason")
+        except Exception:
+            w["record_allowed"] = True   # gate failure must not brick the list
     return {
         "items":   enriched,
-        "active":  _active_by_url_for_user(uid, is_own),
+        "active":  _active_by_url_for_user(uid, False),
         "user_id": uid,
-        "scope":   "all" if is_own else "mine",
+        "scope":   "mine",
     }
 
 
@@ -2500,6 +2520,16 @@ async def watchlist_auto_record(request: Request, body: WatchAutoRecordBody):
     p = await _verify(request)
     require_scope(p, "smdl.streamtracker")
     uid = int(p["user"]["id"])
+    # Consent gate: can't ARM auto-record on a Twitch channel that hasn't
+    # opted in (the monitor also re-checks at fire time as a backstop).
+    if body.auto_record:
+        from . import streamer_consent as _sc
+        allowed, ci = await _sc.is_record_allowed(body.url, str(uid))
+        if not allowed:
+            return JSONResponse({"ok": False,
+                                 "error": ci.get("message")
+                                 or "Streamer hasn't opted in to recording yet."},
+                                status_code=403)
     ok, msg = stream_monitor.set_auto_record(
         body.url, body.auto_record,
         chat_id=None if _is_owner(uid) else uid,
@@ -2578,6 +2608,15 @@ async def stream_start(request: Request, body: StreamStartBody):
     if not _is_owner(uid) and await _auth.is_platform_blocked(url):
         return JSONResponse({"ok": False,
                              "error": f"{stream_monitor.extract_platform(url)} is disabled by the admin."},
+                            status_code=403)
+    # Recording-consent gate (Twitch, applies to EVERYONE incl. owner): no
+    # recording unless the streamer has opted in via the Streamer console.
+    from . import streamer_consent as _sc
+    allowed, ci = await _sc.is_record_allowed(url, str(uid))
+    if not allowed:
+        return JSONResponse({"ok": False,
+                             "error": ci.get("message")
+                             or "Streamer hasn't opted in to recording yet."},
                             status_code=403)
     if bridge.has_job(uid):
         return JSONResponse({"ok": False, "error": "a recording is already active for this user"}, status_code=409)
@@ -3804,6 +3843,14 @@ input:focus { outline: none; border-color: var(--accent);
 .wl-row .u-link { color: var(--fg); text-decoration: none; cursor: pointer; -webkit-tap-highlight-color: rgba(41,151,255,0.2); }
 .wl-row .u-link:active { color: var(--button); }
 .wl-row .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+/* Watchlist online/offline filter chips (sit above the platform sections,
+   aligned right toward the per-section Mute-all buttons). */
+.wl-filter { display: flex; gap: 6px; justify-content: flex-end; margin: 0 0 8px; }
+.wl-filter button { font-size: 11px; padding: 4px 10px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--separator); color: var(--muted); cursor: pointer; }
+.wl-filter button.on { color: var(--accent); border-color: var(--accent); font-weight: 600; }
+/* Consent-locked REC / auto buttons — visibly inert, tap explains why. */
+.wl-tile .actions button.dim { opacity: .38; }
 .wl-row button.icon-btn { background: transparent; color: var(--muted); border: 1px solid var(--separator);
     padding: 5px 9px; font-size: 14px; line-height: 1; border-radius: 6px; min-width: 36px; }
 .wl-row button.icon-btn.on { color: #ff9500; border-color: #ff9500; }
@@ -7117,6 +7164,25 @@ function wlToggleCollapse(platform) {
 }
 function cssEscapeId(s) { return String(s).replace(/[^a-z0-9_-]/gi, '_'); }
 
+// Online/offline filter for the watchlist (persisted per device). 'all' shows
+// everything; 'live' = online only; 'offline' = everything not live.
+let _wlFilter = 'all';
+try { _wlFilter = localStorage.getItem('smdl_wl_filter') || 'all'; } catch (e) {}
+function wlSetFilter(f) {
+  _wlFilter = (f === 'live' || f === 'offline') ? f : 'all';
+  try { localStorage.setItem('smdl_wl_filter', _wlFilter); } catch (e) {}
+  loadWatchlist();
+}
+function _wlFilterChips() {
+  const mk = (key, label) =>
+    `<button class="${_wlFilter === key ? 'on' : ''}" onclick="wlSetFilter('${key}')">${label}</button>`;
+  return `<div class=wl-filter>${mk('all', 'All')}${mk('live', '🟢 Online')}${mk('offline', '⚫ Offline')}</div>`;
+}
+// Tapping a locked REC/auto button explains WHY instead of doing nothing.
+function wlConsentMsg() {
+  showErr('Streamer has not opted in to recording yet — recording unlocks once they enable it from the Streamer console (Make → Streamer).');
+}
+
 async function loadWatchlist() {
   try {
     const j = await api('/api/miniapp/watchlist');
@@ -7124,9 +7190,19 @@ async function loadWatchlist() {
     if (!j.items.length) { root.innerHTML = '<div class=empty>Watchlist is empty.</div>'; return; }
     const active = j.active || {};
 
+    // Online/offline filter (the chips render above the platform sections).
+    let items = j.items;
+    if (_wlFilter === 'live')    items = items.filter(w => (w.status || '') === 'live');
+    if (_wlFilter === 'offline') items = items.filter(w => (w.status || '') !== 'live');
+    if (!items.length) {
+      root.innerHTML = _wlFilterChips()
+        + `<div class=empty>No ${_wlFilter === 'live' ? 'online' : 'offline'} streamers right now.</div>`;
+      return;
+    }
+
     // Group by platform; server already sorted by (platform, username).
     const groups = new Map();
-    for (const w of j.items) {
+    for (const w of items) {
       const k = w.platform || 'Other';
       if (!groups.has(k)) groups.set(k, []);
       groups.get(k).push(w);
@@ -7150,18 +7226,24 @@ async function loadWatchlist() {
         const u = encodeURIComponent(w.url);
         const job = active[w.url];
         const recording = !!job;
+        // Recording-consent gate: a Twitch channel that hasn't opted in gets a
+        // 🔒 button + a visible note instead of a working REC / auto toggle.
+        const canRec = w.record_allowed !== false;
         let sub;
         if (recording) {
           sub = `<span class=rec-tag>● REC</span> · ${duration(job.elapsed_sec)} · ${bytes(job.bytes)}`;
         } else {
           const pieces = [statusLabel(status)];
-          if (auto)  pieces.push('🎬 auto');
+          if (!canRec) pieces.push('🔒 not opted in to recording');
+          if (auto && canRec)  pieces.push('🎬 auto');
           if (muted) pieces.push('🔕');
           sub = pieces.join(' · ');
         }
         const actionBtn = recording
           ? `<button class="rec-on" title="Stop recording" onclick="stopFromWatchlist(${job.chat_id})">⏹</button>`
-          : `<button title="Start recording" onclick="recFromWatchlist('${u}')">▶</button>`;
+          : (canRec
+            ? `<button title="Start recording" onclick="recFromWatchlist('${u}')">▶</button>`
+            : `<button class=dim title="Streamer has not opted in to recording yet" onclick="wlConsentMsg()">🔒</button>`);
         return `
         <div class="wl-tile ${recording?'recording':''}">
           <div class=uname>
@@ -7173,8 +7255,10 @@ async function loadWatchlist() {
             ${actionBtn}
             <button class="${muted?'on':''}" title="${esc(muted?'Unmute':'Mute notifications')}"
                     onclick="toggleMute('${u}', ${muted?'false':'true'})">${muted?'🔕':'🔔'}</button>
-            <button class="${auto?'auto-on':''}" title="Auto-record when live (skip Yes/No prompt)"
-                    onclick="toggleAutoRecord('${u}', ${auto?'false':'true'})">🎬</button>
+            ${canRec
+              ? `<button class="${auto?'auto-on':''}" title="Auto-record when live (skip Yes/No prompt)"
+                    onclick="toggleAutoRecord('${u}', ${auto?'false':'true'})">🎬</button>`
+              : `<button class=dim title="Streamer has not opted in to recording yet" onclick="wlConsentMsg()">🎬</button>`}
             <button title="Edit URL" onclick="toggleEdit(${i})">✎</button>
             <button title="Remove" onclick="removeWatch('${u}')">🗑</button>
           </div>
@@ -7202,7 +7286,7 @@ async function loadWatchlist() {
           <div class=wl-tiles>${tiles}</div>
         </div>`);
     }
-    root.innerHTML = sections.join('');
+    root.innerHTML = _wlFilterChips() + sections.join('');
   } catch(e) { showErr('Load failed: '+e); }
 }
 

@@ -420,7 +420,21 @@ async def _poll_once(app: Application, entries: list[dict[str, Any]]) -> None:
             # record_live directly. The recording is owned by whoever
             # added the entry (added_by), or the owner for legacy entries.
             entry_for_url = next((x for x in entries if x.get("url") == url), {})
+            # Consent backstop: an entry armed BEFORE the streamer revoked (or
+            # before the gate existed) must not auto-fire. The Mini App blocks
+            # arming un-consented entries; this re-check covers fire time.
+            _auto_ok = True
             if entry_for_url.get("auto_record") and not entry_for_url.get("muted"):
+                try:
+                    from . import streamer_consent as _sc
+                    _auto_ok, _ci = await _sc.is_record_allowed(
+                        url, str(entry_for_url.get("added_by") or OWNER_CHAT_ID))
+                    if not _auto_ok:
+                        logger.info("monitor: %s LIVE — auto-record blocked by consent gate (%s)",
+                                    label, _ci.get("reason"))
+                except Exception:
+                    _auto_ok = True   # gate failure must not silence the prompt path
+            if entry_for_url.get("auto_record") and not entry_for_url.get("muted") and _auto_ok:
                 target_chat = int(entry_for_url.get("added_by") or OWNER_CHAT_ID)
                 try:
                     await app.bot.send_message(

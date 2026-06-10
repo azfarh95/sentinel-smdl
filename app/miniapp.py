@@ -4226,7 +4226,7 @@ button.warn { background: #ff9500; color: #fff; }
         <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M14 8.5h.01"/><path d="M9 9.5h.01"/><path d="M8.5 14a4 4 0 0 0 7 0"/></svg></div>
         <div class=meta>
           <div class=name>🎨 Make</div>
-          <div class=desc>Stickers · Streamer (Twitch opt-in)</div>
+          <div class=desc>Stickers — packs · editor · GIF library</div>
         </div>
       </div>
       <div class=home-cluster-tile data-tile=cluster-inbox onclick="clusterEnter('inbox')">
@@ -4963,7 +4963,9 @@ const _CLUSTERS = {
   ]},
   make:  { label: '🎨 Make', pages: [
     ['stickers',  'Stickers',  '🎨', 'Build your sticker packs'],
-    ['streamer',  'Streamer',  '🎙️', 'Twitch opt-in console'],
+    // 'streamer' (Twitch opt-in console) moved OUT of Make (owner directive
+    // 2026-06-10) — identity stuff lives in Account → Connections, which links
+    // to the console at /app?tab=streamer. The page itself still exists.
   ]},
   inbox: { label: '🔔 Inbox', pages: [
     ['notifications', 'Activity', '🔔', 'Downloads · recordings · approvals'],
@@ -9379,7 +9381,7 @@ padding:8px 14px;font-size:13px;font-weight:600;text-decoration:none;width:auto;
 <div class=card id=connections-card style="display:none">
   <p class=lbl>Connections</p>
   <div class=conn-row>
-    <div class=conn-meta><span class=conn-name>🎮 Twitch</span><span class=muted>For the Streamer opt-in console</span></div>
+    <div class=conn-meta><span class=conn-name>🎮 Twitch</span><span class=muted>Streamer recording consent — <a href="/app?tab=streamer" style="color:#5b9dff">open the console</a></span></div>
     <a class=conn-btn href="/auth/twitch/start?next=/account">Connect</a>
   </div>
   <div class=conn-row>

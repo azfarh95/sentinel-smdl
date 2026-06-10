@@ -1530,6 +1530,14 @@ async def _ensure_play_history_table():
             CREATE INDEX IF NOT EXISTS idx_iptv_play_history_ts
               ON iptv_play_history(played_at DESC)
         """)
+        # MEDIA-TV-LINEUPS: per-play engagement seconds (heartbeat from the
+        # player). Migrate the column in if it predates this feature.
+        cols = [r[1] for r in await (await conn.execute(
+            "PRAGMA table_info(iptv_play_history)")).fetchall()]
+        if "watch_seconds" not in cols:
+            await conn.execute(
+                "ALTER TABLE iptv_play_history "
+                "ADD COLUMN watch_seconds INTEGER NOT NULL DEFAULT 0")
         await conn.commit()
 
 
@@ -1545,13 +1553,35 @@ async def iptv_log_play(channel_id: str, body: PlayLogBody, request: Request):
     await _ensure_play_history_table()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     async with aiosqlite.connect(_db.DB_PATH) as conn:
-        await conn.execute(
+        cur = await conn.execute(
             "INSERT INTO iptv_play_history (channel_id, played_at, source_id) "
             "VALUES (?, ?, ?)",
             (channel_id, now, body.source_id),
         )
         await conn.commit()
-    return {"ok": True, "played_at": now}
+        rowid = cur.lastrowid
+    return {"ok": True, "played_at": now, "id": rowid}
+
+
+class WatchBeatBody(BaseModel):
+    seconds: int = 0
+
+
+@router.post("/api/iptv/play_history/{rowid}/watch")
+async def iptv_log_watch(rowid: int, body: WatchBeatBody, request: Request):
+    """Accumulate engagement seconds onto a play_history row (MEDIA-TV-LINEUPS).
+    The player POSTs a heartbeat (~every 30 s) + a final delta on stop/unload,
+    against the row id returned by /channels/{id}/played. One beat is clamped so
+    a backgrounded tab or a clock jump can't poison the totals."""
+    await _verify_iptv(request)
+    await _ensure_play_history_table()
+    secs = max(0, min(int(body.seconds or 0), 3600))
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE iptv_play_history SET watch_seconds = watch_seconds + ? WHERE id = ?",
+            (secs, rowid))
+        await conn.commit()
+    return {"ok": True}
 
 
 @router.get("/api/iptv/last_watched")
@@ -1647,11 +1677,13 @@ async def iptv_trending(request: Request, limit: int = 15):
     async with aiosqlite.connect(_db.DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
         rows = await (await conn.execute(
-            "SELECT v.id, v.name, v.country, v.logo, COUNT(*) AS plays "
+            "SELECT v.id, v.name, v.country, v.logo, COUNT(*) AS plays, "
+            "SUM(COALESCE(ph.watch_seconds, 0)) AS secs "
             "FROM iptv_play_history ph "
             "JOIN v_channels_with_status v ON v.id = ph.channel_id "
             "WHERE ph.played_at >= ? AND v.alive_count_srcs > 0 "
-            "GROUP BY v.id ORDER BY plays DESC, v.is_curated DESC LIMIT ?",
+            "GROUP BY v.id "
+            "ORDER BY secs DESC, plays DESC, v.is_curated DESC LIMIT ?",
             (since, limit))).fetchall()
         items = [{"id": r["id"], "name": r["name"], "country": r["country"],
                   "logo": r["logo"]} for r in rows]
@@ -1727,6 +1759,147 @@ async def iptv_for_you(request: Request):
                 if picks:
                     out.append({"title": f"Because you watched {cat}", "channels": picks})
     return {"ok": True, "rows": out}
+
+
+# ── MEDIA-TV-LINEUPS: user-curated channel lineups ────────────────────────────
+# A lineup is a named, ordered set of channel ids. Mirrors the iptv_favorites
+# storage model (a single shared table, not per-user) — see the per-user note
+# in the backlog; isolating both favorites and lineups is a separate pass.
+
+async def _ensure_lineups_table():
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS iptv_lineups (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                channel_ids TEXT NOT NULL DEFAULT '[]',
+                sort_order  INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            )
+        """)
+        await conn.commit()
+
+
+def _lineup_row(r) -> dict:
+    d = dict(r)
+    try:
+        d["channel_ids"] = json.loads(d.get("channel_ids") or "[]")
+    except Exception:
+        d["channel_ids"] = []
+    return d
+
+
+class LineupCreateBody(BaseModel):
+    name: str
+    channel_ids: list[str] = []
+
+
+class LineupUpdateBody(BaseModel):
+    name: Optional[str] = None
+    channel_ids: Optional[list[str]] = None
+
+
+class LineupChannelBody(BaseModel):
+    channel_id: str
+    on: bool = True
+
+
+@router.get("/api/iptv/lineups")
+async def iptv_lineups_list(request: Request):
+    await _verify_iptv(request)
+    await _ensure_lineups_table()
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        rows = await (await conn.execute(
+            "SELECT * FROM iptv_lineups ORDER BY sort_order ASC, created_at ASC")).fetchall()
+    return {"ok": True, "lineups": [_lineup_row(r) for r in rows]}
+
+
+@router.post("/api/iptv/lineups")
+async def iptv_lineup_create(body: LineupCreateBody, request: Request):
+    await _verify_iptv(request)
+    await _ensure_lineups_table()
+    name = (body.name or "").strip()[:60]
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    now = _iptv._iso_now()
+    ids = json.dumps([str(c) for c in (body.channel_ids or []) if str(c).strip()])
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        so = (await (await conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM iptv_lineups")).fetchone())[0]
+        cur = await conn.execute(
+            "INSERT INTO iptv_lineups (name, channel_ids, sort_order, created_at, "
+            "updated_at) VALUES (?,?,?,?,?)", (name, ids, so, now, now))
+        await conn.commit()
+        lid = cur.lastrowid
+    return {"ok": True, "id": lid}
+
+
+@router.post("/api/iptv/lineups/{lid}")
+async def iptv_lineup_update(lid: int, body: LineupUpdateBody, request: Request):
+    """Rename and/or replace the channel set of a lineup."""
+    await _verify_iptv(request)
+    await _ensure_lineups_table()
+    sets: list[str] = []
+    params: list = []
+    if body.name is not None:
+        nm = body.name.strip()[:60]
+        if nm:
+            sets.append("name=?")
+            params.append(nm)
+    if body.channel_ids is not None:
+        sets.append("channel_ids=?")
+        params.append(json.dumps([str(c) for c in body.channel_ids if str(c).strip()]))
+    if not sets:
+        return {"ok": True}
+    sets.append("updated_at=?")
+    params.append(_iptv._iso_now())
+    params.append(lid)
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        cur = await conn.execute(
+            f"UPDATE iptv_lineups SET {', '.join(sets)} WHERE id=?", params)
+        await conn.commit()
+        if not cur.rowcount:
+            raise HTTPException(status_code=404, detail="lineup not found")
+    return {"ok": True}
+
+
+@router.post("/api/iptv/lineups/{lid}/channel")
+async def iptv_lineup_channel(lid: int, body: LineupChannelBody, request: Request):
+    """Add/remove a single channel from a lineup — the per-channel 'add to
+    lineup' toggle from the grid."""
+    await _verify_iptv(request)
+    await _ensure_lineups_table()
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        row = await (await conn.execute(
+            "SELECT channel_ids FROM iptv_lineups WHERE id=?", (lid,))).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="lineup not found")
+        try:
+            ids = json.loads(row[0] or "[]")
+        except Exception:
+            ids = []
+        cid = str(body.channel_id)
+        if body.on and cid not in ids:
+            ids.append(cid)
+        elif not body.on:
+            ids = [x for x in ids if x != cid]
+        await conn.execute(
+            "UPDATE iptv_lineups SET channel_ids=?, updated_at=? WHERE id=?",
+            (json.dumps(ids), _iptv._iso_now(), lid))
+        await conn.commit()
+    return {"ok": True, "channel_ids": ids}
+
+
+@router.post("/api/iptv/lineups/{lid}/delete")
+async def iptv_lineup_delete(lid: int, request: Request):
+    await _verify_iptv(request)
+    await _ensure_lineups_table()
+    async with aiosqlite.connect(_db.DB_PATH) as conn:
+        await conn.execute("DELETE FROM iptv_lineups WHERE id=?", (lid,))
+        await conn.commit()
+    return {"ok": True}
 
 
 # ── v3.6-D rolling-HLS DVR buffer (pause / rewind live TV) ─────────────────────
@@ -5265,14 +5438,41 @@ document.getElementById('sched-go')?.addEventListener('click', async () => {
 
 // ── Play-history beacon — fires when a stream actually starts ──
 let _beaconFired = false;
+let _playRowId = null;       // id of this session's play_history row
+let _watchAccum = 0;         // unflushed engagement seconds
+let _watchTimer = null;
 async function _maybeFirePlayBeacon() {
   if (_beaconFired) return;
   _beaconFired = true;
   try {
     const src = (SOURCES && SOURCES[CURRENT_SOURCE_IDX]) || null;
-    await api(`/api/iptv/channels/${encodeURIComponent(CHANNEL_ID)}/played`, {
+    const r = await api(`/api/iptv/channels/${encodeURIComponent(CHANNEL_ID)}/played`, {
       method:'POST',
       body: JSON.stringify({ source_id: src ? src.id : null }),
+    });
+    _playRowId = (r && r.id) || null;
+    if (_playRowId) _startWatchHeartbeat();   // MEDIA-TV-LINEUPS: track engagement
+  } catch (_) { /* shrug */ }
+}
+// Accumulate foreground watch-time and flush ~30s deltas to the play row, plus
+// a final flush when the page is backgrounded/closed. Drives engagement-ranked
+// trending. Pauses while the tab is hidden; the server clamps each beat.
+function _startWatchHeartbeat() {
+  if (_watchTimer) return;
+  _watchTimer = setInterval(() => {
+    if (document.hidden) return;
+    _watchAccum += 15;
+    if (_watchAccum >= 30) _flushWatch();
+  }, 15000);
+  window.addEventListener('pagehide', _flushWatch);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) _flushWatch(); });
+}
+async function _flushWatch() {
+  const secs = _watchAccum; _watchAccum = 0;
+  if (!_playRowId || secs <= 0) return;
+  try {
+    await api(`/api/iptv/play_history/${_playRowId}/watch`, {
+      method:'POST', body: JSON.stringify({ seconds: secs }),
     });
   } catch (_) { /* shrug */ }
 }

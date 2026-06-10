@@ -4516,7 +4516,7 @@ button.warn { background: #ff9500; color: #fff; }
   <div class=sidebar-item id=nav-cluster-inbox onclick="clusterOpen('inbox')" title="Inbox — Activity">
     <div class=icon style="position:relative"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span class=tile-badge id=notif-badge-nav style="display:none"></span></div><div class=label>Inbox</div>
   </div>
-  <div class="sidebar-item admin-only" id=nav-cluster-admin onclick="clusterOpen('admin')" title="Admin — Server / Scraper / Settings">
+  <div class="sidebar-item admin-only" id=nav-cluster-admin onclick="clusterOpen('admin')" title="Admin — Server / Settings">
     <div class=icon><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div><div class=label>Admin</div>
   </div>
   <div class=sidebar-spacer></div>

@@ -35,7 +35,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import yt_dlp
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application
 
 from .config import (
@@ -455,24 +455,25 @@ async def _poll_once(app: Application, entries: list[dict[str, Any]]) -> None:
                 except Exception:
                     logger.exception("monitor: auto-record dispatch failed for %s", label)
                 continue
-            # Two links in the prompt: the streamer handle opens the live
-            # stream on its platform; "Click here" opens the Mini App
-            # stream-tracker (Streams) page. Rendered via parse_mode=HTML.
+            # The streamer handle in the text links to the live stream on its
+            # platform (parse_mode=HTML). The stream tracker opens via a web_app
+            # BUTTON below — a plain URL in message text punts to an external
+            # browser; web_app opens the Mini App in-Telegram straight at the
+            # Streams tab (?tab=watchlist), like the "Open dashboard" button.
             _base = (os.environ.get("WEBAPP_URL") or "").strip()
             if not _base:
                 _pub = (os.environ.get("SMDL_PUBLIC_BASE_URL") or "").strip().rstrip("/")
                 _base = (_pub + "/app") if _pub else ""
             tracker_url = (
                 _base + ("&" if "?" in _base else "?") + "tab=watchlist"
-            ) if _base else url
+            ) if _base else ""
             text = t(
                 "monitor_live_prompt", owner_lang,
                 platform=platform,
                 uploader=html.escape(uname),
                 stream_url=html.escape(url, quote=True),
-                tracker_url=html.escape(tracker_url, quote=True),
             )
-            keyboard = InlineKeyboardMarkup([
+            rows = [
                 [
                     InlineKeyboardButton(t("btn_yes_record", owner_lang), callback_data=f"mon:rec:{url}"),
                     InlineKeyboardButton(t("btn_skip", owner_lang),       callback_data=f"mon:skip:{url}"),
@@ -481,7 +482,15 @@ async def _poll_once(app: Application, entries: list[dict[str, Any]]) -> None:
                     InlineKeyboardButton(t("btn_snooze_1h", owner_lang), callback_data=f"mon:snooze1h:{url}"),
                     InlineKeyboardButton(t("btn_snooze_8h", owner_lang), callback_data=f"mon:snooze8h:{url}"),
                 ],
-            ])
+            ]
+            # web_app buttons need https + only work in private chats — both hold
+            # here (owner DM). No button if WEBAPP_URL is unset (graceful).
+            if tracker_url.startswith("https://"):
+                rows.append([InlineKeyboardButton(
+                    t("btn_open_tracker", owner_lang),
+                    web_app=WebAppInfo(url=tracker_url),
+                )])
+            keyboard = InlineKeyboardMarkup(rows)
             try:
                 await app.bot.send_message(
                     chat_id=OWNER_CHAT_ID,

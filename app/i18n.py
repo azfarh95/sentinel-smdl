@@ -103,9 +103,10 @@ STRINGS: dict[str, dict[str, str]] = {
         # Stream monitor live notification — one-liner pattern so the
         # snooze/skip/rec follow-ups can replace the whole bubble instead of
         # appending to a verbose prompt.
-        "monitor_live_prompt":  '🔴 {platform} — <a href="{stream_url}">{uploader}</a> is online. <a href="{tracker_url}">Click here</a> to open stream tracker.',
+        "monitor_live_prompt":  '🔴 {platform} — <a href="{stream_url}">{uploader}</a> is online. Record stream?',
         "btn_yes_record":       "✅ Yes — Record",
         "btn_skip":             "❌ Skip",
+        "btn_open_tracker":     "📺 Open stream tracker",
         "btn_lang_en":          "English",
         "btn_lang_ru":          "Русский",
         "monitor_skipped":      "{uploader} — ⏭ Skipped",
@@ -219,9 +220,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "watchlist_header":     "📺 Список отслеживания ({count})",
 
         # Stream monitor live notification — see English block for rationale.
-        "monitor_live_prompt":  '🔴 {platform} — <a href="{stream_url}">{uploader}</a> в эфире. <a href="{tracker_url}">Нажмите здесь</a>, чтобы открыть трекер эфиров.',
+        "monitor_live_prompt":  '🔴 {platform} — <a href="{stream_url}">{uploader}</a> в эфире. Записать?',
         "btn_yes_record":       "✅ Да — записать",
         "btn_skip":             "❌ Пропустить",
+        "btn_open_tracker":     "📺 Открыть трекер эфиров",
         "btn_lang_en":          "English",
         "btn_lang_ru":          "Русский",
         "monitor_skipped":      "{uploader} — ⏭ Пропущено",

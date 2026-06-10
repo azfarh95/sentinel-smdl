@@ -18,6 +18,14 @@ from . import database as _db
 
 logger = logging.getLogger(__name__)
 
+# Generous per-call timeouts for sticker file uploads. PTB's ~5s default
+# write/read is too short to push a composited video-overlay webm to Telegram
+# (especially when the container egresses through the tunnel/VPN), which
+# surfaced as "Telegram: Timed out" on animated export.
+_TG_UPLOAD_TIMEOUTS = dict(
+    read_timeout=120, write_timeout=120, connect_timeout=30, pool_timeout=60,
+)
+
 # Cached bot username so we don't hit get_me on every call.
 _BOT_USERNAME: Optional[str] = None
 
@@ -201,6 +209,10 @@ async def upload_and_add(
             user_id=user_id,
             sticker=InputFile(f, filename=file_path.name),
             sticker_format=sticker_format,
+            # PTB defaults to ~5s write/read — too short to push a composited
+            # video-overlay webm to Telegram (esp. over the tunnel/VPN), which
+            # surfaced as "Telegram: Timed out" on animated export. Be generous.
+            **_TG_UPLOAD_TIMEOUTS,
         )
     upload_file_id = uploaded.file_id
 
@@ -217,6 +229,7 @@ async def upload_and_add(
             user_id=user_id,
             name=pack_name,
             sticker=sticker_obj,
+            **_TG_UPLOAD_TIMEOUTS,
         )
     else:
         kwargs = dict(
@@ -227,6 +240,7 @@ async def upload_and_add(
         )
         if sticker_type == "custom_emoji":
             kwargs["sticker_type"] = "custom_emoji"
+        kwargs.update(_TG_UPLOAD_TIMEOUTS)
         await bot.create_new_sticker_set(**kwargs)
 
     # 3. Resolve the pack-bound file_id. add/create don't return it — we

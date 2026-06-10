@@ -27,6 +27,9 @@ _DEFAULTS: dict = {
     "cache_max_gb": None,
     "addons": [],                    # empty = use stremio.DEFAULT_ADDONS
     "auto_grab_top_seeded": False,
+    # ISO-3166-1 alpha-2 region for the "Where to watch" panel (TMDB/JustWatch
+    # availability is per-country). Defaults to the owner's home region.
+    "region": "SG",
 }
 
 _SCHEMA = """

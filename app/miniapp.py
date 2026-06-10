@@ -589,7 +589,9 @@ async def stremio_search(request: Request, q: str = "", type: str = "movie",
     """Cinemeta search. Returns a list of MetaItems (id, name, year, poster,
     imdb_rating, genres). The Svelte UI renders these as poster tiles."""
     p = await _verify(request)
-    _require_owner(p)
+    # Cinemeta metadata search is public/legal — available to community too:
+    # it's the gateway to the legal "Where to watch" path. No RD/disk side
+    # effects, so it's intentionally NOT owner-only.
     from . import stremio as _st, stremio_settings as _ss
     q = (q or "").strip()
     if not q:
@@ -694,7 +696,10 @@ async def stremio_discover(request: Request):
     Each row is independent: a failure in one returns [] for that row
     rather than failing the whole page."""
     p = await _verify(request)
-    _require_owner(p)
+    # Discovery is public/legal for community: the popular catalog is Cinemeta
+    # metadata. Continue-watching is the owner's personal playback data, so it's
+    # computed only for the owner; community gets popular rows + search.
+    is_owner = bool((p.get("user") or {}).get("is_owner"))
     from . import stremio as _st
     from . import stremio_settings as _ss
 
@@ -738,8 +743,8 @@ async def stremio_discover(request: Request):
         enriched = await asyncio.gather(*[_enrich(r) for r in prog])
         return [d for d in enriched if d]
 
-    cont, movies, series = await asyncio.gather(
-        _continue(), _popular("movie"), _popular("series"))
+    movies, series = await asyncio.gather(_popular("movie"), _popular("series"))
+    cont = await _continue() if is_owner else []
     return {"continue_watching": cont,
             "popular_movies": movies,
             "popular_series": series}
@@ -753,7 +758,9 @@ async def stremio_episodes(request: Request, imdb_id: str = ""):
     Stremio addon `id` (e.g. 'tt0903747:1:1') ready to feed into
     /streams for resolution."""
     p = await _verify(request)
-    _require_owner(p)
+    # Episode metadata is public/legal — community needs it to open a series
+    # detail and see "Where to watch". (Owner-only stream resolution stays gated
+    # in /stremio/streams.)
     from . import stremio as _st, stremio_settings as _ss
     imdb_id = (imdb_id or "").strip()
     if not imdb_id.startswith("tt"):
@@ -770,6 +777,35 @@ async def stremio_episodes(request: Request, imdb_id: str = ""):
          "thumbnail": e.thumbnail, "runtime": e.runtime}
         for e in eps
     ]}
+
+
+@router.get("/api/miniapp/stremio/watch_providers")
+async def stremio_watch_providers(request: Request, imdb_id: str = "",
+                                  type: str = "movie", region: str = ""):
+    """Legal "where to watch" — TMDB/JustWatch streaming availability for a
+    title in the viewer's region, returned as deep-link-out options.
+
+    Unlike the torrent-grab endpoints (owner-only, RD + disk), this is a
+    read-only lookup with no RD/disk side effects, so it's available to any
+    verified user — it's the community deployment's lawful answer to "where can
+    I watch this" (link out to the provider via JustWatch; never embed/restream,
+    per ADR MED-002). Degrades silently: no TMDB key or no match ⇒
+    ``found: false`` and the panel hides."""
+    await _verify(request)  # authenticated, but intentionally NOT owner-only
+    from . import tmdb as _tmdb, stremio_settings as _ss
+    imdb_id = (imdb_id or "").strip()
+    if not imdb_id.startswith("tt"):
+        return _tmdb.watch_providers_for_imdb("", region or _tmdb.DEFAULT_REGION)
+    if not region:
+        try:
+            region = (await _ss.get_all()).get("region") or _tmdb.DEFAULT_REGION
+        except Exception:
+            region = _tmdb.DEFAULT_REGION
+    try:
+        return await asyncio.to_thread(_tmdb.watch_providers_for_imdb, imdb_id, region)
+    except Exception as e:
+        logger.exception("stremio watch_providers failed")
+        raise HTTPException(500, f"watch providers failed: {e!s}")
 
 
 @router.get("/api/miniapp/stremio/streams")

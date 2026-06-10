@@ -142,8 +142,36 @@ export interface EpisodeMeta {
   runtime: number | null;
 }
 
+/** One streaming/rent/buy option for a title in a region (TMDB/JustWatch). */
+export interface WatchProvider {
+  id: number | null;
+  name: string;
+  logo: string | null;   // absolute image URL, or null
+  priority?: number;
+}
+
+/** "Where to watch" availability for a title in the viewer's region. */
+export interface WatchProviders {
+  configured: boolean;   // false ⇒ no TMDB key on this deployment
+  found: boolean;        // true ⇒ at least one provider to show
+  region: string;        // ISO-3166-1 alpha-2
+  link: string | null;   // JustWatch deep-link for this title+region
+  title?: string | null;
+  media_type?: "movie" | "tv" | null;
+  flatrate: WatchProvider[];   // subscription streaming
+  free: WatchProvider[];
+  ads: WatchProvider[];        // free with ads
+  rent: WatchProvider[];
+  buy: WatchProvider[];
+}
+
 // ── Endpoint wrappers ────────────────────────────────────────────────────────
 export const api = {
+  /** Owner vs community gate — drives which Theater controls are shown.
+   *  Community (non-owner) gets the legal surface: search + popular +
+   *  "Where to watch" only; all torrent/RD controls are owner-only. */
+  whoami: () => get<{ is_owner: boolean }>("/api/miniapp/whoami"),
+
   account: () => get<RDAccount>("/api/miniapp/stremio/account"),
 
   search: (q: string, type: "movie" | "series" = "movie") =>
@@ -163,6 +191,15 @@ export const api = {
   episodes: (imdb_id: string) =>
     get<{ episodes: EpisodeMeta[] }>(
       `/api/miniapp/stremio/episodes?imdb_id=${encodeURIComponent(imdb_id)}`,
+    ),
+
+  /** Legal "where to watch" — streaming availability + deep-link out
+   *  (TMDB/JustWatch). Region defaults to the deployment setting server-side. */
+  watchProviders: (imdb_id: string, type: "movie" | "series" = "movie",
+                   region = "") =>
+    get<WatchProviders>(
+      `/api/miniapp/stremio/watch_providers?imdb_id=${encodeURIComponent(imdb_id)}&type=${type}` +
+        (region ? `&region=${encodeURIComponent(region)}` : ""),
     ),
 
   grab: (params: { infohash?: string; magnet?: string; title?: string;

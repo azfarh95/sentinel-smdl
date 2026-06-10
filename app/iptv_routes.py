@@ -5566,6 +5566,30 @@ async def iptv_recordings_page():
     return HTMLResponse(_RECORDINGS_HTML, headers=_NO_CACHE_HEADERS)
 
 
+# Owner/private-only IPTV controls — hidden on the COMMUNITY build so a
+# non-owner never sees a control that 404/403/402s (ADR MED-008: strip down,
+# never naked-404). Injected as a !important <style> so it also wins over JS
+# that later sets display (e.g. the curate button's conditional show):
+#   • #dvr-btn / #country-quick-row  → edition-gated paths, would 404
+#   • #import-m3u-btn / #curate-btn  → owner-only (403)
+#   • #record-btn                    → CAP_TV_RECORDER entitlement (402)
+#   • #schedule-btn / #refresh-btn / #probe-all-btn / .probe-tune → operator-only
+_COMMUNITY_HIDE_CSS = (
+    "<style>"
+    "#refresh-btn,#probe-all-btn,#import-m3u-btn,#country-quick-row,.probe-tune,"
+    "#dvr-btn,#record-btn,#schedule-btn,#curate-btn"
+    "{display:none!important}"
+    "</style>"
+)
+
+
+def _inject_edition(html: str) -> str:
+    """Inject the community hide-styles (community edition only), before </head>."""
+    if _edition.is_community():
+        return html.replace("</head>", _COMMUNITY_HIDE_CSS + "</head>", 1)
+    return html
+
+
 @router.get("/iptv", response_class=HTMLResponse)
 async def iptv_browse_page():
     """Top-level browse page. Owner-only check is enforced by the JSON
@@ -5573,6 +5597,7 @@ async def iptv_browse_page():
     pattern miniapp.py / sticker_routes.py use for their HTML routes."""
     import json
     html = _BROWSE_HTML.replace("{{EDITION_JSON}}", json.dumps(_edition.EDITION))
+    html = _inject_edition(html)
     return HTMLResponse(html, headers=_NO_CACHE_HEADERS)
 
 
@@ -5585,6 +5610,7 @@ async def iptv_play_page(channel_id: str):
         .replace("{{CHANNEL_ID_JSON}}", safe)
         .replace("{{EDITION_JSON}}", json.dumps(_edition.EDITION))
     )
+    html = _inject_edition(html)
     return HTMLResponse(html, headers=_NO_CACHE_HEADERS)
 
 

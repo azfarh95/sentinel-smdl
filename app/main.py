@@ -303,12 +303,28 @@ _PRIVATE_PATH_PREFIXES = (
     "/api/iptv/refresh_country", # iptv-org per-country slices (aggregator)
 )
 
+# Carve-outs the COMMUNITY build IS allowed to reach inside an otherwise
+# private prefix. The "stripped legal Theater": title search + popular
+# discovery + episode metadata + the JustWatch/TMDB "where to watch" deep-link.
+# All read-only public metadata — NO torrent/RD/disk. Everything else under
+# /api/miniapp/stremio/ (streams, grab, queue, RD token, addons, settings, …)
+# stays edition-blocked. The endpoints additionally gate owner-only data
+# internally (e.g. discover hides continue-watching from non-owners).
+_PRIVATE_PATH_EXCEPTIONS = (
+    "/api/miniapp/stremio/search",
+    "/api/miniapp/stremio/discover",
+    "/api/miniapp/stremio/episodes",
+    "/api/miniapp/stremio/watch_providers",
+)
+
 
 @app.middleware("http")
 async def _edition_gate(request: _EdRequest, call_next):
     if edition.is_community():
         path = request.url.path
-        if any(path.startswith(p) for p in _PRIVATE_PATH_PREFIXES):
+        if any(path.startswith(p) for p in _PRIVATE_PATH_PREFIXES) and not any(
+            path.startswith(a) for a in _PRIVATE_PATH_EXCEPTIONS
+        ):
             return _EdJSONResponse(
                 {"ok": False, "error": "not_available_in_this_edition"},
                 status_code=404,

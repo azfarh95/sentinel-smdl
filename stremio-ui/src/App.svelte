@@ -8,10 +8,11 @@
    *  No router — single-component view state machine. The TG BackButton
    *  is wired to navigate Detail → Search; on Search it closes the app. */
   import { onMount } from "svelte";
-  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive, Tv, Settings, Home, Puzzle, Plus, Trash2, Check, Shield, KeyRound } from "@lucide/svelte";
+  import { Search, ArrowLeft, Play, Download, Loader2, Film, ListVideo, HardDrive, Tv, Settings, Home, Puzzle, Plus, Trash2, Check, Shield, KeyRound, MonitorPlay, ExternalLink } from "@lucide/svelte";
   import { api, type MetaItem, type StreamEntry, type GrabFile, type RDAccount,
             type StremioJob, type CacheEntry, type EpisodeMeta,
-            type DiscoverData, type DiscoverItem, type AddonSummary } from "$lib/api";
+            type DiscoverData, type DiscoverItem, type AddonSummary,
+            type WatchProviders, type WatchProvider } from "$lib/api";
   import { fmtSize } from "$lib/utils";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -24,12 +25,32 @@
   let view = $state<View>("discover");
   // Where Detail returns to (the grid we opened it from).
   let returnTo = $state<View>("discover");
+
+  // Owner vs community. The community build is a LEGAL discovery surface
+  // (search + popular + "Where to watch"); every torrent/RD control is gated
+  // behind this. Loaded from /api/miniapp/whoami on mount (defaults false).
+  let isOwner = $state(false);
   let query = $state("");
   let searching = $state(false);
   let results = $state<MetaItem[]>([]);
   let selected = $state<MetaItem | null>(null);
   let streamsLoading = $state(false);
   let streams = $state<StreamEntry[]>([]);
+
+  // "Where to watch" (TMDB/JustWatch legal availability) for the open title.
+  let watch = $state<WatchProviders | null>(null);
+  let watchLoading = $state(false);
+  const watchGroups = $derived<[string, WatchProvider[]][]>(
+    watch && watch.found
+      ? ([
+          ["Stream", watch.flatrate],
+          ["Free", watch.free],
+          ["With ads", watch.ads],
+          ["Rent", watch.rent],
+          ["Buy", watch.buy],
+        ] as [string, WatchProvider[]][]).filter(([, l]) => l.length > 0)
+      : [],
+  );
   let account = $state<RDAccount | null>(null);
   let lastError = $state<string | null>(null);
 
@@ -111,7 +132,11 @@
 
   // ── Boot: fetch RD account state (gives us premium badge) ──────────────
   onMount(async () => {
-    try { account = await api.account(); } catch (e) { /* non-fatal */ }
+    try { isOwner = (await api.whoami()).is_owner; } catch { isOwner = false; }
+    // RD account is owner-only; the community build never calls it.
+    if (isOwner) {
+      try { account = await api.account(); } catch (e) { /* non-fatal */ }
+    }
     const tg = (window as any).Telegram?.WebApp;
     if (tg?.BackButton) {
       // Inside Telegram: the Mini App back chevron drives navigation.
@@ -187,11 +212,28 @@
     } catch (e) { lastError = String(e); }
   }
 
+  // Legal "where to watch" lookup — fire-and-forget, never blocks the detail
+  // view or surfaces an error (the panel just stays hidden on failure).
+  async function loadWatch(m: MetaItem) {
+    watch = null; watchLoading = true;
+    try {
+      watch = await api.watchProviders(m.id, m.type);
+    } catch {
+      watch = null;
+    } finally {
+      watchLoading = false;
+    }
+  }
+
   async function openDetail(m: MetaItem) {
     returnTo = "discover";
     selected = m; streams = []; episodes = []; pickedEpisode = null;
     view = "detail"; lastError = null;
     following = false;
+    loadWatch(m);
+    // Community (non-owner): legal surface — metadata + "Where to watch" only.
+    // Skip stream resolution, episode fetch, and follow (all owner-only).
+    if (!isOwner) return;
     if (m.type === "series") {
       api.follow.status(m.id).then(r => { following = r.following; }).catch(() => {});
     }
@@ -724,6 +766,55 @@
         </div>
       </div>
 
+      <!-- Where to watch — legal streaming availability (TMDB/JustWatch),
+           deep-link OUT only; never embeds a paid service (ADR MED-002). -->
+      {#if watchLoading}
+        <div class="text-sm text-muted-foreground py-2 mb-3 flex items-center gap-2">
+          <Loader2 class="size-4 animate-spin" /> Checking where to watch…
+        </div>
+      {:else if watch?.found}
+        <Card class="mb-4">
+          <CardContent class="p-3">
+            <div class="flex items-center justify-between mb-2 gap-2">
+              <div class="text-sm font-semibold flex items-center gap-1.5 min-w-0">
+                <MonitorPlay class="size-4 shrink-0" /> Where to watch
+                <span class="text-[10px] font-normal text-muted-foreground">· {watch.region}</span>
+              </div>
+              {#if watch.link}
+                <a href={watch.link} target="_blank" rel="noopener noreferrer"
+                   class="text-xs text-primary hover:underline flex items-center gap-1 shrink-0">
+                  More <ExternalLink class="size-3" />
+                </a>
+              {/if}
+            </div>
+            {#each watchGroups as [label, list]}
+              <div class="flex items-start gap-2 mb-1.5">
+                <span class="text-[10px] uppercase tracking-wide text-muted-foreground w-12 shrink-0 pt-1.5">{label}</span>
+                <div class="flex flex-wrap gap-1.5 min-w-0">
+                  {#each list as p (p.id ?? p.name)}
+                    <a href={watch.link ?? "#"} target="_blank" rel="noopener noreferrer"
+                       title="{p.name} — open on JustWatch"
+                       class="flex items-center gap-1.5 rounded-md bg-secondary/60 hover:bg-secondary px-1.5 py-1">
+                      {#if p.logo}
+                        <img src={p.logo} alt={p.name} class="size-5 rounded" loading="lazy" />
+                      {/if}
+                      <span class="text-[11px] pr-0.5">{p.name}</span>
+                    </a>
+                  {/each}
+                </div>
+              </div>
+            {/each}
+            <p class="text-[10px] text-muted-foreground mt-1.5">
+              Availability via TMDB · opens JustWatch to pick a provider.
+            </p>
+          </CardContent>
+        </Card>
+      {/if}
+
+      <!-- Owner-only: torrent/RD streaming controls (follow · episodes · stream
+           picker · grab). Hidden on the community build, which is a LEGAL
+           discovery surface — metadata + "Where to watch" deep-links only. -->
+      {#if isOwner}
       <!-- Follow: auto-download new episodes (series only) -->
       {#if selected.type === "series"}
         <div class="mb-4">
@@ -834,6 +925,7 @@
           </Card>
         {/each}
       </div>
+      {/if}
     {/if}
 
     <!-- ── GRAB VIEW (live job state) ──────────────────────────────── -->
@@ -1397,6 +1489,9 @@
                    {view === 'discover' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}">
       <Home class="size-4" /><span>Home</span>
     </button>
+    <!-- Owner-only nav. Community keeps just Home — Queue/Library/Addons/
+         Settings are all torrent/RD/owner surfaces. -->
+    {#if isOwner}
     <button onclick={() => { view = "queue"; }}
             class="flex-1 py-3 flex flex-col items-center gap-0.5
                    {view === 'queue' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}">
@@ -1417,6 +1512,7 @@
                    {view === 'settings' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}">
       <Settings class="size-4" /><span>Settings</span>
     </button>
+    {/if}
   </nav>
   <!-- Spacer so content isn't hidden behind the fixed nav -->
   <div class="h-16"></div>

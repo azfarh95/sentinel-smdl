@@ -1800,6 +1800,38 @@ async def gif_search(request: Request, q: str = "", source: str = "giphy",
                     items.append({"id": g.get("id"), "preview": prev,
                                   "url": mp4 or gif, "is_mp4": bool(mp4),
                                   "title": g.get("content_description") or ""})
+            elif src == "giphy_stickers":
+                # Giphy STICKERS — transparent, ideal as editor overlays.
+                if not GIPHY_API_KEY:
+                    raise HTTPException(503, "Giphy not configured — set GIPHY_API_KEY")
+                ep = "search" if q else "trending"
+                params = {"api_key": GIPHY_API_KEY, "limit": limit, "rating": "pg-13"}
+                if q:
+                    params["q"] = q
+                r = await client.get(f"https://api.giphy.com/v1/stickers/{ep}", params=params)
+                body = {}
+                try:
+                    body = r.json()
+                except Exception:
+                    body = {}
+                gmeta = body.get("meta") or {}
+                if r.status_code != 200 or gmeta.get("status", 200) != 200:
+                    bad = (gmeta.get("msg") or "").upper()
+                    if r.status_code in (401, 403) or "BANNED" in bad or "KEY" in bad:
+                        raise HTTPException(503, "Giphy key rejected (invalid/banned) — set a valid GIPHY_API_KEY")
+                    raise HTTPException(502, f"giphy error: {gmeta.get('msg') or r.status_code}")
+                for g in (body.get("data") or []):
+                    imgs = g.get("images") or {}
+                    prev = ((imgs.get("fixed_width_small") or imgs.get("fixed_width")
+                             or imgs.get("preview_gif") or {}).get("url"))
+                    # Transparent STILL (PNG) makes a clean Fabric overlay; fall
+                    # back to the animated transparent webp / gif first frame.
+                    still = ((imgs.get("fixed_width_still") or imgs.get("original_still") or {}).get("url"))
+                    anim = ((imgs.get("fixed_width") or imgs.get("original") or {}).get("webp")
+                            or (imgs.get("original") or {}).get("url"))
+                    items.append({"id": g.get("id"), "preview": prev,
+                                  "url": still or anim, "is_mp4": False,
+                                  "title": g.get("title") or ""})
             else:
                 raise HTTPException(400, f"unknown source: {src}")
     except HTTPException:
@@ -1809,6 +1841,38 @@ async def gif_search(request: Request, q: str = "", source: str = "giphy",
         raise HTTPException(502, f"{src} search failed")
     return {"ok": True, "source": src,
             "items": [i for i in items if i.get("url") and i.get("preview")]}
+
+
+@router.get("/api/stickers/asset_proxy")
+async def asset_proxy(request: Request, u: str = ""):
+    """Stream a Giphy/Tenor image SAME-ORIGIN so the editor's Fabric canvas can
+    use it as an overlay without tainting the export (cross-origin images break
+    canvas.toDataURL). SSRF-guarded to the same hosts as from_url; images only."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    url = (u or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "url must be http(s)")
+    host = (urlparse(url).hostname or "").lower()
+    if not any(host == h.lstrip(".") or host.endswith(h) for h in _GIF_FETCH_HOSTS):
+        raise HTTPException(403, "url host not allowed")
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+    except httpx.HTTPError:
+        raise HTTPException(502, "asset fetch failed")
+    if len(r.content) > _UPLOAD_MAX_BYTES:
+        raise HTTPException(413, "asset too large")
+    ctype = (r.headers.get("content-type") or "").split(";")[0].lower()
+    if not ctype.startswith("image/"):
+        low = url.lower().split("?")[0]
+        if not low.endswith((".png", ".webp", ".gif", ".jpg", ".jpeg")):
+            raise HTTPException(415, "not an image")
+        ctype = "image/png"
+    from fastapi.responses import Response as _Resp
+    return _Resp(content=r.content, media_type=ctype,
+                 headers={"Cache-Control": "public, max-age=86400"})
 
 
 @router.post("/api/sticker_drafts/from_url")
@@ -2720,7 +2784,8 @@ _EDIT_HTML = r"""<!doctype html>
     body[data-tab="image"]   [data-panel="image"],
     body[data-tab="cutout"]  [data-panel="cutout"],
     body[data-tab="outline"] [data-panel="outline"],
-    body[data-tab="layers"]  [data-panel="layers"]{display:block;}
+    body[data-tab="layers"]  [data-panel="layers"],
+    body[data-tab="assets"]  [data-panel="assets"]{display:block;}
     /* Studio tools pin the compositor canvas in the dock (and hide the video). */
     #studio-stage{display:none;}
     body.studio-active .studio-row{display:none;}
@@ -2931,6 +2996,17 @@ _EDIT_HTML = r"""<!doctype html>
     </div>
   </div>
 
+  <div class="section tool-panel" data-panel="assets" data-tier="pro">
+    <label>Stickers &amp; assets <span class="meta">(transparent — tap to drop a layer)</span></label>
+    <div class="row">
+      <input id="asset-q" type="text" placeholder="Search stickers — cat, fire, heart…"
+             style="flex:1;min-width:120px;width:auto">
+      <button class="action" id="asset-go">🔎</button>
+    </div>
+    <div id="asset-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:6px;margin-top:8px"></div>
+    <div class="meta" id="asset-status" style="margin-top:6px">Powered by GIPHY stickers · more sources soon.</div>
+  </div>
+
   <div class="section tool-panel" data-panel="cutout" data-tier="pro">
     <label>Cut out subject</label>
     <div class="row">
@@ -2977,6 +3053,7 @@ _EDIT_HTML = r"""<!doctype html>
       <button data-tab="emoji">😀 Emoji</button>
       <button data-tab="text"    data-tier="pro">➕ Text</button>
       <button data-tab="image"   data-tier="pro">🖼 Image</button>
+      <button data-tab="assets"  data-tier="pro">✨ Stickers</button>
       <button data-tab="cutout"  data-tier="pro">✂️ Cutout</button>
       <button data-tab="outline" data-tier="pro">🔲 Outline</button>
       <button data-tab="layers"  data-tier="pro">▤ Layers</button>
@@ -3027,7 +3104,7 @@ applySkin((() => { try { return localStorage.getItem('smdl_sticker_skin'); }
 // ── Tool tabs (sticky preview · bottom tab bar) ───────────────────────────
 // The Studio compositor's tools live in the same scrollable row; selecting one
 // pins the canvas in the dock and turns the action button into Export.
-const STUDIO_TABS = ['text', 'image', 'cutout', 'outline', 'layers'];
+const STUDIO_TABS = ['text', 'image', 'cutout', 'outline', 'layers', 'assets'];
 const _TAB_SEL = '#tool-tabs [data-tab], #setup-rail [data-tab]';
 function _tabVisible(tab) {
   // visible if ANY copy of the tab (bottom bar OR the Pro setup rail) is shown
@@ -3059,6 +3136,8 @@ function setTab(tab) {
     if (cutoutToggle) cutoutToggle.classList.add('on');
     if (hqToggle) hqToggle.style.display = '';   // expose "best quality"
   }
+  // Lazy-load trending stickers the first time the Assets tab is opened.
+  if (tab === 'assets' && !_assetInit) { _assetInit = true; try { assetSearch(); } catch (_) {} }
 }
 document.getElementById('tool-tabs').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]');
@@ -4196,6 +4275,54 @@ document.getElementById('studio-img').addEventListener('change', e => {
     rd.readAsDataURL(f);
   }
   e.target.value = '';            // allow re-picking the same file
+});
+
+// ── Assets tool — drop a transparent Giphy sticker as an overlay layer.
+// Searches Giphy STICKERS (transparent), proxies the chosen image same-origin
+// (so canvas export isn't tainted), then adds it via _addImage. ──
+var _assetInit = false;
+async function assetSearch() {
+  const grid = document.getElementById('asset-grid');
+  const st = document.getElementById('asset-status');
+  if (!grid || !st) return;
+  const q = (document.getElementById('asset-q').value || '').trim();
+  st.textContent = 'Searching…'; grid.innerHTML = '';
+  try {
+    const d = await api('/api/stickers/gif_search?source=giphy_stickers&q=' + encodeURIComponent(q));
+    const items = d.items || [];
+    if (!items.length) { st.textContent = 'Nothing found — try another word.'; return; }
+    st.textContent = 'Tap a sticker to drop it on the canvas';
+    grid.innerHTML = items.map(it => {
+      const u = (it.url || '').replace(/['"]/g, '');
+      const p = (it.preview || '').replace(/['"]/g, '');
+      const t = (it.title || '').replace(/['"]/g, '');
+      return '<button class="asset-cell" data-url="' + u + '" title="' + t + '" '
+        + "style=\"border:0;padding:0;cursor:pointer;aspect-ratio:1/1;border-radius:8px;"
+        + "background:#0d0f14 center/contain no-repeat;background-image:url('" + p + "')\"></button>";
+    }).join('');
+    grid.querySelectorAll('.asset-cell').forEach(el =>
+      el.addEventListener('click', () => addAssetOverlay(el.dataset.url, el)));
+  } catch (e) {
+    const m = '' + e;
+    st.textContent = /not configured|key|banned|rejected/i.test(m)
+      ? 'Stickers need the Giphy key (GIPHY_API_KEY).' : 'Search failed: ' + m;
+  }
+}
+async function addAssetOverlay(url, el) {
+  if (!url) return;
+  const st = document.getElementById('asset-status');
+  if (el) el.style.opacity = '.5';
+  try {
+    await ensureStudio();
+    const img = await _addImage('/api/stickers/asset_proxy?u=' + encodeURIComponent(url), { cover: false });
+    if (st) st.textContent = img ? '✓ Added — drag / resize on the canvas' : 'Could not add that one.';
+    if (img && tg && tg.HapticFeedback) { try { tg.HapticFeedback.impactOccurred('light'); } catch (_) {} }
+  } catch (e) { if (st) st.textContent = '❌ ' + e; }
+  finally { if (el) el.style.opacity = ''; }
+}
+document.getElementById('asset-go').addEventListener('click', assetSearch);
+document.getElementById('asset-q').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); assetSearch(); }
 });
 document.getElementById('studio-cutout').addEventListener('click', studioCutout);
 document.getElementById('studio-fill').addEventListener('input', e => {

@@ -1012,6 +1012,29 @@ async def build() -> Application:
                 pass
             return
         if action == "rec":
+            # Recording-consent gate (Twitch, applies to EVERYONE incl. the
+            # owner): the bot's inline "Yes — Record" prompt must honour
+            # streamer consent like the Mini App start path and the auto-record
+            # fire-time backstop do (ADR MED-007 / MEDIA-STREAM-BOTGATE). A
+            # definitive no-consent → block; a gate *exception* fails open so a
+            # transient DB error can't brick owner-initiated recording (matches
+            # the auto-record backstop's "gate failure must not silence" stance).
+            try:
+                from . import streamer_consent as _sc
+                _rec_ok, _ci = await _sc.is_record_allowed(url, str(chat_id))
+            except Exception:
+                _rec_ok, _ci = True, {}
+            if not _rec_ok:
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                    await query.edit_message_text(
+                        text=_ci.get("message")
+                             or t("monitor_consent_blocked", lang, uploader=uploader),
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
+                return
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.edit_message_text(

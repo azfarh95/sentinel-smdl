@@ -103,13 +103,14 @@ STRINGS: dict[str, dict[str, str]] = {
         # Stream monitor live notification — one-liner pattern so the
         # snooze/skip/rec follow-ups can replace the whole bubble instead of
         # appending to a verbose prompt.
-        "monitor_live_prompt":  "🔴 {platform} — {uploader} is online. Record stream?",
+        "monitor_live_prompt":  '🔴 {platform} — <a href="{stream_url}">{uploader}</a> is online. <a href="{tracker_url}">Click here</a> to open stream tracker.',
         "btn_yes_record":       "✅ Yes — Record",
         "btn_skip":             "❌ Skip",
         "btn_lang_en":          "English",
         "btn_lang_ru":          "Русский",
         "monitor_skipped":      "{uploader} — ⏭ Skipped",
         "monitor_starting":     "{uploader} — 🎬 Recording starting…",
+        "monitor_consent_blocked": "{uploader} — 🔒 Recording blocked: streamer hasn't opted in to community recording.",
         "monitor_record_starting": "🔴 Recording · @{uploader}\nStarting…",
         "monitor_recording_crashed": "⚠ Recording crashed: {error}",
         "btn_snooze_1h":        "💤 1h",
@@ -218,13 +219,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "watchlist_header":     "📺 Список отслеживания ({count})",
 
         # Stream monitor live notification — see English block for rationale.
-        "monitor_live_prompt":  "🔴 {platform} — {uploader} в эфире. Записать?",
+        "monitor_live_prompt":  '🔴 {platform} — <a href="{stream_url}">{uploader}</a> в эфире. <a href="{tracker_url}">Нажмите здесь</a>, чтобы открыть трекер эфиров.',
         "btn_yes_record":       "✅ Да — записать",
         "btn_skip":             "❌ Пропустить",
         "btn_lang_en":          "English",
         "btn_lang_ru":          "Русский",
         "monitor_skipped":      "{uploader} — ⏭ Пропущено",
         "monitor_starting":     "{uploader} — 🎬 Запись начинается…",
+        "monitor_consent_blocked": "{uploader} — 🔒 Запись заблокирована: стример не дал согласия на запись.",
         "monitor_record_starting": "🔴 Запись · @{uploader}\nЗапуск…",
         "monitor_recording_crashed": "⚠ Запись прервалась с ошибкой: {error}",
         "btn_snooze_1h":        "💤 1ч",

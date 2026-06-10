@@ -24,6 +24,7 @@ V2 ideas (not built):
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -454,9 +455,22 @@ async def _poll_once(app: Application, entries: list[dict[str, Any]]) -> None:
                 except Exception:
                     logger.exception("monitor: auto-record dispatch failed for %s", label)
                 continue
+            # Two links in the prompt: the streamer handle opens the live
+            # stream on its platform; "Click here" opens the Mini App
+            # stream-tracker (Streams) page. Rendered via parse_mode=HTML.
+            _base = (os.environ.get("WEBAPP_URL") or "").strip()
+            if not _base:
+                _pub = (os.environ.get("SMDL_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+                _base = (_pub + "/app") if _pub else ""
+            tracker_url = (
+                _base + ("&" if "?" in _base else "?") + "tab=watchlist"
+            ) if _base else url
             text = t(
                 "monitor_live_prompt", owner_lang,
-                platform=platform, uploader=uname,
+                platform=platform,
+                uploader=html.escape(uname),
+                stream_url=html.escape(url, quote=True),
+                tracker_url=html.escape(tracker_url, quote=True),
             )
             keyboard = InlineKeyboardMarkup([
                 [
@@ -473,6 +487,7 @@ async def _poll_once(app: Application, entries: list[dict[str, Any]]) -> None:
                     chat_id=OWNER_CHAT_ID,
                     text=text,
                     reply_markup=keyboard,
+                    parse_mode="HTML",
                     disable_web_page_preview=True,
                 )
                 logger.info("monitor: %s went LIVE — prompt sent", label)

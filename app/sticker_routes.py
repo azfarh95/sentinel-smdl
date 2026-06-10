@@ -647,12 +647,14 @@ async def build_overlay_and_publish(user_id: int, first_name: str | None,
     dst = OUTPUT_DIR / str(user_id) / f"{draft_id}.webm"
     if progress:
         progress(10)
+    anim_overlays = params.get("anim_overlays") or []
     try:
         ok, err = await _sp.make_video_overlay_sticker(
             src, dst, overlay_png,
             start=float(params.get("trim_start") or 0.0),
             end=float(params.get("trim_end") or 3.0),
             crop=crop, cutout=bool(params.get("cutout")), hq=bool(params.get("hq")),
+            anim_overlays=anim_overlays,
             progress_cb=((lambda f: progress(10.0 + f * 65.0)) if progress else None),
         )
     finally:
@@ -660,6 +662,11 @@ async def build_overlay_and_publish(user_id: int, first_name: str | None,
             overlay_png.unlink(missing_ok=True)
         except Exception:
             pass
+        for ao in anim_overlays:
+            try:
+                Path(ao.get("path") or "").unlink(missing_ok=True)
+            except Exception:
+                pass
     if not ok:
         await _db.sticker_draft_set_status(draft_id, "failed", err)
         raise StickerBuildError(err or "overlay encode failed", status=422)
@@ -1008,6 +1015,12 @@ class ComposeVideoBody(BaseModel):
     cutout: bool = False
     # v2.7-C "best quality" matte (only meaningful with cutout).
     hq: bool = False
+    # ANIMATED overlays (Giphy stickers placed via the Assets tool): each is a
+    # remote GIF + its placement in 512² space. The client EXCLUDES these from
+    # the flattened overlay_b64 PNG; the server loops each GIF over the clip
+    # (ffmpeg -stream_loop) so the overlay itself animates. Max 3; ignored when
+    # cutout=True (those fall back to the static flatten client-side).
+    anim_overlays: list[dict] | None = None
 
 
 @router.post("/api/sticker_drafts/{draft_id}/compose_video")
@@ -1051,6 +1064,38 @@ async def compose_video_sticker(draft_id: int, body: ComposeVideoBody, request: 
         "cutout": bool(body.cutout), "hq": bool(body.hq),
         "_first_name": first_name,
     }
+
+    # Animated overlays: download each placed Giphy sticker's GIF (same SSRF
+    # guard as from_url) next to the flat PNG; pass path + 512²-space geometry
+    # to the encoder. Cutout exports don't take this path (client flattens).
+    anim_params: list[dict] = []
+    if body.anim_overlays and not body.cutout:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            for i, ao in enumerate((body.anim_overlays or [])[:3]):
+                url = str(ao.get("url") or "").strip()
+                host = (urlparse(url).hostname or "").lower()
+                if not url.startswith(("http://", "https://")) or not any(
+                        host == h.lstrip(".") or host.endswith(h) for h in _GIF_FETCH_HOSTS):
+                    continue
+                try:
+                    r = await client.get(url)
+                    r.raise_for_status()
+                    if len(r.content) > 8_000_000:
+                        continue
+                    gp = out_dir / f"{draft_id}_anim{i}.gif"
+                    gp.write_bytes(r.content)
+                    anim_params.append({
+                        "path": str(gp),
+                        "x": max(-512, min(512, int(ao.get("x") or 0))),
+                        "y": max(-512, min(512, int(ao.get("y") or 0))),
+                        "w": max(8, min(512, int(ao.get("w") or 128))),
+                        "h": max(8, min(512, int(ao.get("h") or 128))),
+                    })
+                except (httpx.HTTPError, OSError, ValueError) as e:
+                    logger.warning("anim overlay %d fetch failed: %s", i, e)
+    if anim_params:
+        params["anim_overlays"] = anim_params
+
     job_id = await _sj.enqueue(user_id=user_id, draft_id=draft_id,
                                kind="video_overlay", params=params)
     return {"ok": True, "job_id": job_id, "async": True}
@@ -4002,7 +4047,7 @@ let _outline = false;         // die-cut outline toggle
 let _hist = [], _redo = [], _restoring = false;
 function _snap() {
   if (_restoring || !fcanvas) return;
-  try { _hist.push(JSON.stringify(fcanvas.toJSON(['studioRole']))); }
+  try { _hist.push(JSON.stringify(fcanvas.toJSON(['studioRole', 'animUrl']))); }
   catch (e) { return; }
   if (_hist.length > 40) _hist.shift();
   _redo = [];
@@ -4220,25 +4265,44 @@ async function studioExport() {
   // → an animated sticker (v2.7-A). Static drafts export the flattened canvas.
   const base = animated ? fcanvas.getObjects().find(o => o.studioRole === 'base') : null;
   const baseVis = base ? (base.visible !== false) : false;
+  // ANIMATED overlays (Giphy stickers with animUrl): on a non-cutout video
+  // export they're sent as looping GIF layers (so they keep animating) and
+  // EXCLUDED from the flat PNG — hidden during toDataURL alongside the base.
+  // Rotated ones stay in the PNG (the ffmpeg path doesn't rotate yet).
+  const animObjs = (animated && !cutout)
+    ? fcanvas.getObjects().filter(o => o.animUrl && Math.abs(o.angle || 0) < 1)
+    : [];
+  const k512 = 512 / STUDIO_PX;
+  const animOverlays = animObjs.map(o => ({
+    url: o.animUrl,
+    x: Math.round((o.left - o.getScaledWidth() / 2) * k512),
+    y: Math.round((o.top - o.getScaledHeight() / 2) * k512),
+    w: Math.round(o.getScaledWidth() * k512),
+    h: Math.round(o.getScaledHeight() * k512),
+  }));
   // The editor canvas sits on an opaque #000 background so the dock looks right.
   // For a VIDEO export we hide the base frame and the overlay PNG MUST be
   // transparent — otherwise that black fills the canvas and the server stamps
   // it over every frame (the "static sticker on black" bug: the animated video
   // is hidden behind the black). Null the bg for the export, then restore it.
   const _prevBg = fcanvas.backgroundColor;
+  const _animVis = animObjs.map(o => o.visible !== false);
   let png;
   try {
     if (base) base.visible = false;
+    animObjs.forEach(o => { o.visible = false; });
     if (animated) fcanvas.backgroundColor = null;
     fcanvas.renderAll();
     png = fcanvas.toDataURL({ format: 'png', multiplier: 512 / STUDIO_PX });
   } catch (e) {
     if (base) base.visible = baseVis;
+    animObjs.forEach((o, i) => { o.visible = _animVis[i]; });
     fcanvas.backgroundColor = _prevBg; fcanvas.renderAll();
     prog.textContent = '❌ Export blocked (image security): ' + e.message;
     return;
   }
   if (base) base.visible = baseVis;
+  animObjs.forEach((o, i) => { o.visible = _animVis[i]; });
   fcanvas.backgroundColor = _prevBg; fcanvas.renderAll();
   btn.disabled = true;
   try {
@@ -4248,6 +4312,7 @@ async function studioExport() {
       const body = { overlay_b64: png, emoji: chosenEmoji,
                      trim_start: trimStart, trim_end: trimEnd,
                      cutout: !!cutout, hq: !!hqMatte };
+      if (animOverlays.length) body.anim_overlays = animOverlays;
       const crop = cropToSourcePixels();
       if (crop) Object.assign(body, { crop_x: crop.x, crop_y: crop.y, crop_w: crop.w, crop_h: crop.h });
       const r = await api(`/api/sticker_drafts/${DRAFT_ID}/compose_video`, {
@@ -4307,27 +4372,31 @@ async function assetSearch() {
     st.textContent = 'Tap a sticker to drop it on the canvas';
     grid.innerHTML = items.map(it => {
       const u = (it.url || '').replace(/['"]/g, '');
+      const a = (it.anim_url || '').replace(/['"]/g, '');
       const p = (it.preview || '').replace(/['"]/g, '');
       const t = (it.title || '').replace(/['"]/g, '');
-      return '<button class="asset-cell" data-url="' + u + '" title="' + t + '" '
+      return '<button class="asset-cell" data-url="' + u + '" data-anim="' + a + '" title="' + t + '" '
         + "style=\"border:0;padding:0;cursor:pointer;aspect-ratio:1/1;border-radius:8px;"
         + "background:#0d0f14 center/contain no-repeat;background-image:url('" + p + "')\"></button>";
     }).join('');
     grid.querySelectorAll('.asset-cell').forEach(el =>
-      el.addEventListener('click', () => addAssetOverlay(el.dataset.url, el)));
+      el.addEventListener('click', () => addAssetOverlay(el.dataset.url, el, el.dataset.anim)));
   } catch (e) {
     const m = '' + e;
     st.textContent = /not configured|key|banned|rejected/i.test(m)
       ? 'Stickers need the Giphy key (GIPHY_API_KEY).' : 'Search failed: ' + m;
   }
 }
-async function addAssetOverlay(url, el) {
+async function addAssetOverlay(url, el, animUrl) {
   if (!url) return;
   const st = document.getElementById('asset-status');
   if (el) el.style.opacity = '.5';
   try {
     await ensureStudio();
     const img = await _addImage('/api/stickers/asset_proxy?u=' + encodeURIComponent(url), { cover: false });
+    // Remember the animated source: on a video export this layer is sent as a
+    // looping GIF overlay (it keeps animating) instead of being flattened.
+    if (img && animUrl) img.animUrl = animUrl;
     if (st) st.textContent = img ? '✓ Added — drag / resize on the canvas' : 'Could not add that one.';
     if (img && tg && tg.HapticFeedback) { try { tg.HapticFeedback.impactOccurred('light'); } catch (_) {} }
   } catch (e) { if (st) st.textContent = '❌ ' + e; }

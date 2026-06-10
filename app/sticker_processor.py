@@ -723,6 +723,7 @@ async def make_video_overlay_sticker(
     crop: tuple[int, int, int, int] | None = None,
     cutout: bool = False,
     hq: bool = False,
+    anim_overlays: list[dict] | None = None,
     progress_cb: "Callable[[float], None] | None" = None,
 ) -> tuple[bool, str | None]:
     """v2.7-A — composite a static 512² overlay PNG (the Studio's text / emoji /
@@ -768,7 +769,27 @@ async def make_video_overlay_sticker(
     # overlay input is held across the whole clip (overlay eof_action=repeat).
     fc = (f"[0:v]{base_vf}[bg];"
           f"[1:v]scale={S}:{S}[ov];"
-          f"[bg][ov]overlay=0:0[out]")
+          f"[bg][ov]overlay=0:0[v1]")
+    # ANIMATED overlays (Giphy stickers): each GIF becomes its own looping
+    # input (-stream_loop -1, bounded by the output -t), scaled to its placed
+    # size and overlaid at its placed position — so the sticker itself keeps
+    # animating instead of being a frozen frame baked into the flat PNG.
+    anim_inputs: list[str] = []
+    cur = "v1"
+    valid_aos = [ao for ao in (anim_overlays or [])
+                 if ao.get("path") and Path(str(ao["path"])).exists()]
+    for ai, ao in enumerate(valid_aos):
+        anim_inputs += ["-stream_loop", "-1", "-i", str(ao["path"])]
+        idx = 2 + ai
+        w = max(8, min(S, int(ao.get("w") or 128)))
+        h = max(8, min(S, int(ao.get("h") or 128)))
+        x = max(-S, min(S, int(ao.get("x") or 0)))
+        y = max(-S, min(S, int(ao.get("y") or 0)))
+        nxt = f"va{ai}"
+        fc += (f";[{idx}:v]scale={w}:{h},format=rgba[a{ai}];"
+               f"[{cur}][a{ai}]overlay={x}:{y}[{nxt}]")
+        cur = nxt
+    fc += f";[{cur}]null[out]"
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     loop = asyncio.get_running_loop()
@@ -780,6 +801,7 @@ async def make_video_overlay_sticker(
             "ffmpeg", "-y",
             "-ss", f"{start:.3f}", "-i", str(src),
             "-i", str(overlay_png),
+            *anim_inputs,
             "-t", f"{duration:.3f}",
             "-filter_complex", fc,
             "-map", "[out]",

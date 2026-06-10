@@ -2807,6 +2807,14 @@ _EDIT_HTML = r"""<!doctype html>
     body.studio-active #studio-stage{display:flex;}
     #studio-stage .canvas-container{touch-action:none;}
     #studio-stage canvas{touch-action:none;border-radius:4px;}
+    /* Video drafts: the live preview plays BEHIND a transparent Fabric canvas
+       so Text/Image/Stickers animate (last known working). Static drafts keep
+       the opaque base. (Emoji + the Configure rail use the video-wrap view.) */
+    #studio-frame{position:relative;line-height:0;}
+    #studio-frame .canvas-container{position:relative;z-index:1;}
+    #studio-vid{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+                border-radius:4px;z-index:0;display:none;background:#000;}
+    body.studio-video #studio-vid{display:block;}
     #studio-panel select,#studio-panel input[type=text]{padding:6px 8px;
         border-radius:var(--radius);border:1px solid var(--border);
         background:var(--surf3);color:var(--text);font-size:14px;}
@@ -2905,7 +2913,10 @@ _EDIT_HTML = r"""<!doctype html>
       </div>
     </div>
     <div id="studio-stage" data-tier="pro">
-      <canvas id="studio-canvas" width="320" height="320"></canvas>
+      <div id="studio-frame">
+        <video id="studio-vid" muted playsinline loop preload="auto"></video>
+        <canvas id="studio-canvas" width="320" height="320"></canvas>
+      </div>
     </div>
     <div class="meta simple-only" style="margin-top:6px">
       ✨ Pick a shape &amp; emoji below, then Make. Want trim &amp; crop? Switch to <b>⚡ Pro</b>.
@@ -3176,7 +3187,13 @@ function setTab(tab) {
   if (mk) mk.textContent = studio
     ? (_editorPackKind === 'video' ? '🎬 Export animated' : '📤 Export sticker')
     : '✨ Make sticker';
-  if (studio) { try { ensureStudio(); } catch (_) {} }       // build canvas once
+  if (studio) {
+    try { ensureStudio(); } catch (_) {}                     // build canvas once
+    if (_isVideoKind) {                                       // keep the stacked live video rolling
+      const sv = document.getElementById('studio-vid');
+      if (sv) sv.play().catch(() => {});
+    }
+  }
   // On the Cutout tab for video, mirror the cutout flag so the main Make
   // button produces the same animated per-frame cutout as the in-panel button.
   if (tab === 'cutout' && _editorPackKind === 'video') {
@@ -4164,7 +4181,7 @@ async function ensureStudio() {
   const cv = document.getElementById('studio-canvas');
   cv.width = STUDIO_PX; cv.height = STUDIO_PX;
   fcanvas = new fabric.Canvas('studio-canvas', {
-    backgroundColor: '#000', preserveObjectStacking: true,
+    backgroundColor: _isVideoKind ? null : '#000', preserveObjectStacking: true,
     width: STUDIO_PX, height: STUDIO_PX,
   });
   // Sticker maker: scale only from corners (uniform) — hide the middle handles
@@ -4183,10 +4200,23 @@ async function ensureStudio() {
   fcanvas.on('object:scaling', _updateOverlaySnapshot);
   fcanvas.on('object:rotating', _updateOverlaySnapshot);
   _restoring = true;                       // don't snapshot the initial base add
-  const url = await _studioBaseDataUrl();
-  if (url) await _addImage(url, { role: 'base', cover: true, toBack: true, silent: true });
+  if (_isVideoKind) {
+    // Live preview behind the transparent compositor → Text/Image/Stickers
+    // animate. (Last known working; Emoji + the Configure rail use video-wrap.)
+    document.body.classList.add('studio-video');
+    const frame = document.getElementById('studio-frame');
+    if (frame) { frame.style.width = STUDIO_PX + 'px'; frame.style.height = STUDIO_PX + 'px'; }
+    const sv = document.getElementById('studio-vid');
+    if (sv && _previewBlobUrl) {
+      if (sv.src !== _previewBlobUrl) sv.src = _previewBlobUrl;
+      sv.play().catch(() => {});
+    }
+  } else {
+    const url = await _studioBaseDataUrl();
+    if (url) await _addImage(url, { role: 'base', cover: true, toBack: true, silent: true });
+  }
   _restoring = false;
-  _snap();                                 // history seed = base only
+  _snap();                                 // history seed = base (static) or empty (video)
 }
 
 function _studioActiveText() {

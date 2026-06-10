@@ -4406,6 +4406,7 @@ button.warn { background: #ff9500; color: #fff; }
       <button data-sec=home onclick="stkSection('home')">🏠 Home</button>
       <button data-sec=add onclick="stkSection('add')">＋ Add</button>
       <button data-sec=stickers onclick="stkSection('stickers')">🎞 Stickers</button>
+      <button id=stk-editor-btn onclick="stkOpenLastEditor(this)" title="Open the editor on your last-edited sticker">🎨 Editor</button>
     </div>
 
     <div class=stk-sec data-section=stickers>
@@ -5865,6 +5866,32 @@ async function streamerSignOut() {
 }
 
 // Sticker Maker top-nav: switch the active section (remembered per device).
+// "🎨 Editor" nav button → jump straight into the canvas editor on the last
+// sticker you edited (falls back to the most-recent draft; to Add if none).
+async function stkOpenLastEditor(btn) {
+  if (btn) btn.disabled = true;
+  let drafts = [];
+  try { drafts = ((await api('/api/sticker_drafts')) || {}).drafts || []; }
+  catch (e) { drafts = []; }
+  if (btn) btn.disabled = false;
+  if (!drafts.length) { stkSection('add'); return; }   // nothing to edit yet → Add
+  let last = null;
+  try { last = JSON.parse(localStorage.getItem('smdl_stk_last_edit') || 'null'); } catch (e) {}
+  let target = null, kind = '';
+  if (last && last.id != null) {
+    target = drafts.find(d => String(d.id) === String(last.id));
+    if (target) kind = last.kind || '';
+  }
+  if (!target) {
+    target = drafts.slice().sort((a, b) =>
+      String(b.uploaded_at || '').localeCompare(String(a.uploaded_at || '')))[0];
+    kind = (target && target.mime_type && target.mime_type.indexOf('video') === 0) ? 'video' : 'static';
+  }
+  if (target && target.id != null) {
+    location.href = '/stickers/' + target.id + '/edit' + (kind ? '?kind=' + encodeURIComponent(kind) : '');
+  } else { stkSection('add'); }
+}
+
 function stkSection(sec) {
   if (sec === 'pack') sec = 'home';   // migrate old saved/deep-linked section
   const valid = ['home', 'add', 'stickers'];

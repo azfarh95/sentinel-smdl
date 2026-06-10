@@ -52,6 +52,7 @@ DOWNLOADS_DIR = os.environ.get("DOWNLOADS_DIR", "/downloads")
 # are owner-only. SVG is intentionally excluded (XSS via inline <script>).
 from pathlib import Path as _Path
 _BRANDING_DIR = _Path(DB_PATH).parent / "branding"
+_FEEDBACK_DIR = _Path(DB_PATH).parent / "feedback"   # user feedback media (code-readable)
 _LOGO_STEM = "app_logo"
 _LOGO_MIME_EXT = {
     "image/png": "png",
@@ -513,6 +514,122 @@ async def whoami(request: Request):
         "is_owner": is_owner,
         "allowed_users_count": len(_allowed_users()),
     }
+
+
+# ── User feedback (home module) — text + optional screenshot/screen-recording ─
+# Any verified user submits; the owner reads them on the home page. Stored in
+# the jobs.db `feedback` table + media under /data/feedback, so it's readable
+# from code too.
+_FEEDBACK_MIME_EXT = {
+    "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg",
+    "image/webp": "webp", "image/gif": "gif",
+    "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
+}
+_FEEDBACK_MAX_BYTES = 25 * 1024 * 1024  # 25 MB — a short screen-recording
+
+
+async def _ensure_feedback_table():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS feedback (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id     INTEGER,
+                username    TEXT,
+                message     TEXT NOT NULL DEFAULT '',
+                media_name  TEXT,
+                media_mime  TEXT,
+                created_at  TEXT NOT NULL
+            )
+        """)
+        await db.commit()
+
+
+class _FeedbackBody(BaseModel):
+    message: str = ""
+    data_url: Optional[str] = None
+
+
+@router.post("/api/miniapp/feedback")
+async def feedback_submit(body: _FeedbackBody, request: Request):
+    """Submit improvement feedback — a note plus an optional screenshot or short
+    screen-recording (data URL). Open to any verified user."""
+    p = await _verify(request)
+    uid = int(p["user"]["id"])
+    msg = (body.message or "").strip()[:4000]
+    raw = None
+    media_mime = None
+    if body.data_url:
+        if not body.data_url.startswith("data:"):
+            raise HTTPException(status_code=400, detail="expected a data: URL")
+        try:
+            header, b64 = body.data_url.split(",", 1)
+            media_mime = header[5:].split(";", 1)[0].strip().lower()
+        except Exception:
+            raise HTTPException(status_code=400, detail="malformed data URL")
+        if media_mime not in _FEEDBACK_MIME_EXT:
+            raise HTTPException(status_code=400, detail="unsupported media (image or short video only)")
+        import base64 as _b64
+        try:
+            raw = _b64.b64decode(b64, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="bad base64 payload")
+        if len(raw) > _FEEDBACK_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="media exceeds 25 MB")
+    if not msg and raw is None:
+        raise HTTPException(status_code=400, detail="feedback is empty")
+    await _ensure_feedback_table()
+    now = datetime.now(timezone.utc).isoformat()
+    uname = ((p.get("user") or {}).get("username")
+             or (p.get("user") or {}).get("first_name") or "")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO feedback (chat_id, username, message, media_mime, created_at) "
+            "VALUES (?,?,?,?,?)", (uid, uname, msg, media_mime, now))
+        await db.commit()
+        fid = cur.lastrowid
+    if raw is not None:
+        name = f"{fid}.{_FEEDBACK_MIME_EXT[media_mime]}"
+        try:
+            _FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+            (_FEEDBACK_DIR / name).write_bytes(raw)
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("UPDATE feedback SET media_name=? WHERE id=?", (name, fid))
+                await db.commit()
+        except Exception as ex:
+            logger.warning("feedback media save failed: %s", ex)
+    return {"ok": True, "id": fid}
+
+
+@router.get("/api/miniapp/feedback")
+async def feedback_list_route(request: Request, limit: int = 100):
+    """Owner-only: all submitted feedback, newest first."""
+    p = await _verify(request)
+    _require_owner(p)
+    await _ensure_feedback_table()
+    limit = max(1, min(int(limit or 100), 500))
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            "SELECT * FROM feedback ORDER BY id DESC LIMIT ?", (limit,))).fetchall()
+    return {"ok": True, "feedback": [dict(r) for r in rows]}
+
+
+@router.get("/api/miniapp/feedback/media/{fid}")
+async def feedback_media(fid: int, request: Request):
+    """Owner-only: serve a feedback attachment."""
+    p = await _verify(request)
+    _require_owner(p)
+    await _ensure_feedback_table()
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute(
+            "SELECT media_name, media_mime FROM feedback WHERE id=?", (fid,))).fetchone()
+    if not row or not row[0]:
+        raise HTTPException(status_code=404, detail="no media")
+    path = _FEEDBACK_DIR / row[0]
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="media file missing")
+    from fastapi.responses import FileResponse
+    return FileResponse(str(path), media_type=row[1] or "application/octet-stream")
 
 
 SHARE_SIZE_THRESHOLD = 50 * 1024 * 1024  # 50 MB
@@ -3728,6 +3845,18 @@ body.sidebar-collapsed .sidebar-toggle { padding: 6px 0; font-size: 12px; }
 .home-cluster-tile .meta { flex: 1; min-width: 0; }
 .home-cluster-tile .name { font-size: 16px; font-weight: 600; margin-bottom: 3px; }
 .home-cluster-tile .desc { font-size: 12px; color: var(--muted); line-height: 1.4; }
+/* 💬 Feedback module (home) */
+.fb-card { background: var(--surface); border: 1px solid var(--separator); border-radius: 14px; padding: 14px; margin-top: 14px; }
+.fb-title { font-size: 16px; font-weight: 600; }
+.fb-card textarea { width: 100%; box-sizing: border-box; background: var(--bg); border: 1px solid var(--separator); border-radius: 10px; color: inherit; padding: 9px 11px; font: inherit; font-size: 14px; resize: vertical; }
+.fb-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.fb-attach { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; padding: 7px 12px; border: 1px solid var(--separator); border-radius: 999px; cursor: pointer; }
+.fb-attach input { display: none; }
+.fb-card #fb-send { background: var(--accent); color: #fff; border: 0; border-radius: 999px; padding: 8px 18px; font-weight: 600; cursor: pointer; }
+.fb-card #fb-send:disabled { opacity: .6; }
+.fb-item { border: 1px solid var(--separator); border-radius: 10px; padding: 10px; margin-bottom: 8px; }
+.fb-item-head { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.fb-item img, .fb-item video { max-width: 100%; border-radius: 8px; margin-top: 6px; display: block; }
 /* Sub-sidebar (flyout) — slides in to the right of the main 56px-wide
    icon strip when a cluster icon is tapped. Position: fixed so it floats
    above page content without shifting the layout. */
@@ -4284,6 +4413,23 @@ button.warn { background: #ff9500; color: #fff; }
          by loadHomeRows() on goto('home'); each row degrades to a "Start here"
          empty state so a cold beta user always has a next tap. -->
     <div id=home-rows class=home-rows></div>
+
+    <div class=fb-card id=fb-card>
+      <div class=fb-title>💬 Feedback &amp; ideas</div>
+      <div class=meta style="margin:2px 0 9px">Spotted a bug or have an idea? Send it — attach a screenshot or a short screen-recording.</div>
+      <textarea id=fb-msg rows=3 placeholder="What's working, what's not, what you'd love to see…"></textarea>
+      <div class=fb-row>
+        <label class=fb-attach>📎 Attach<input type=file id=fb-file accept="image/*,video/*"></label>
+        <span id=fb-file-name class=meta></span>
+        <span style="flex:1"></span>
+        <button id=fb-send onclick="fbSubmit(this)">Send</button>
+      </div>
+      <div id=fb-status class=meta style="margin-top:6px"></div>
+      <div id=fb-inbox style="display:none;margin-top:14px;border-top:1px solid var(--separator);padding-top:12px">
+        <div class=fb-title style="font-size:14px">📨 All feedback <span class=meta style="font-weight:400">(owner)</span></div>
+        <div id=fb-list style="margin-top:8px"></div>
+      </div>
+    </div>
   </div>
 
   <!-- First-run welcome (one-time, dismissable). Shown by maybeShowWelcome()
@@ -8148,6 +8294,60 @@ async function saveSettings(prefix) {
 let isOwner = false;
 let adminBootstrapped = false;
 
+// ── 💬 Feedback module ────────────────────────────────────────────────────
+let _fbFile = null;
+document.getElementById('fb-file')?.addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  _fbFile = f || null;
+  const n = document.getElementById('fb-file-name');
+  if (n) n.textContent = f ? ('📎 ' + f.name) : '';
+});
+async function fbSubmit(btn) {
+  const ta = document.getElementById('fb-msg');
+  const st = document.getElementById('fb-status');
+  const msg = (ta.value || '').trim();
+  if (!msg && !_fbFile) { st.textContent = 'Add a note or a screenshot first.'; return; }
+  if (_fbFile && _fbFile.size > 25 * 1024 * 1024) { st.textContent = 'File too big (max 25 MB).'; return; }
+  btn.disabled = true; st.textContent = 'Sending…';
+  let data_url = null;
+  try {
+    if (_fbFile) data_url = await new Promise((res, rej) => {
+      const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(_fbFile);
+    });
+    await api('/api/miniapp/feedback', { method: 'POST', body: JSON.stringify({ message: msg, data_url }) });
+    st.textContent = '✓ Thanks — sent!';
+    ta.value = ''; _fbFile = null;
+    const fi = document.getElementById('fb-file'); if (fi) fi.value = '';
+    const n = document.getElementById('fb-file-name'); if (n) n.textContent = '';
+    if (isOwner) fbLoadInbox();
+  } catch (e) { st.textContent = 'Failed: ' + (e && e.message || e); }
+  finally { btn.disabled = false; }
+}
+async function fbLoadInbox() {
+  if (!isOwner) return;
+  const box = document.getElementById('fb-inbox'); const list = document.getElementById('fb-list');
+  if (!box || !list) return;
+  box.style.display = 'block';
+  try {
+    const r = await api('/api/miniapp/feedback');
+    const items = (r && r.feedback) || [];
+    if (!items.length) { list.innerHTML = '<div class=meta>No feedback yet.</div>'; return; }
+    list.innerHTML = items.map(f => {
+      const when = String(f.created_at || '').replace('T', ' ').slice(0, 16);
+      const who = f.username ? ('@' + f.username) : ('user ' + f.chat_id);
+      let media = '';
+      if (f.media_name) {
+        const src = '/api/miniapp/feedback/media/' + f.id;
+        media = (String(f.media_mime || '').indexOf('video') === 0)
+          ? ('<video src="' + src + '" controls preload=metadata></video>')
+          : ('<img src="' + src + '" loading=lazy>');
+      }
+      return '<div class=fb-item><div class=fb-item-head>' + esc(who) + ' · ' + esc(when) +
+             '</div><div>' + esc(f.message || '') + '</div>' + media + '</div>';
+    }).join('');
+  } catch (e) { list.innerHTML = '<div class=meta>Failed to load: ' + esc(String(e && e.message || e)) + '</div>'; }
+}
+
 async function bootstrapWhoami() {
   try {
     const j = await api('/api/miniapp/whoami');
@@ -8159,6 +8359,7 @@ async function bootstrapWhoami() {
       const el = document.getElementById(id);
       if (el) el.classList.toggle('show', isOwner);
     });
+    if (isOwner) { try { fbLoadInbox(); } catch (_) {} }   // owner: load the feedback inbox
   } catch(e) { /* owner-flag is best-effort; admin surfaces stay hidden on failure */ }
 }
 

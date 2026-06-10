@@ -4133,7 +4133,7 @@ button.warn { background: #ff9500; color: #fff; }
         <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div>
         <div class=meta>
           <div class=name>📥 Get</div>
-          <div class=desc>Downloads · Search<span class=admin-only> · Library · Files</span></div>
+          <div class=desc>Downloads · Search<span class=admin-only> · Scraper · Library · Files</span></div>
         </div>
       </div>
       <div class=home-cluster-tile data-tile=cluster-make onclick="clusterEnter('make')">
@@ -4154,7 +4154,7 @@ button.warn { background: #ff9500; color: #fff; }
         <div class=ico><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
         <div class=meta>
           <div class=name>⚙️ Admin</div>
-          <div class=desc>Server · Scraper · Settings</div>
+          <div class=desc>Server · Settings</div>
         </div>
       </div>
     </div>
@@ -4868,6 +4868,7 @@ const _CLUSTERS = {
   get:   { label: '📥 Get', pages: [
     ['downloads', 'Downloads', '⬇️', 'Paste a URL to download'],
     ['search',    'Search',    '🔎', 'Find across everything'],
+    ['scraper',   'Scraper',   '🕷️', 'Profile scrape jobs',      'owner'],
     ['library',   'Library',   '📚', 'Your downloaded media', 'owner'],
     ['files',     'Files',     '📁', 'Browse the file store', 'owner'],
   ]},
@@ -4880,7 +4881,6 @@ const _CLUSTERS = {
   ]},
   admin: { label: '⚙️ Admin', pages: [
     ['admin',     'Server',    '🖥️', 'Status & server controls', 'owner'],
-    ['scraper',   'Scraper',   '🕷️', 'Profile scrape jobs',      'owner'],
     ['settings',  'Settings',  '⚙️', 'Preferences & config',     'owner'],
   ]},
 };
@@ -9229,6 +9229,14 @@ text-align:center;padding:12px;font-weight:600}
 .msg{font-size:13px;margin:8px 0 0;min-height:16px}
 .msg.ok{color:#5fd38a}.msg.err{color:#ff8b8b}
 .row{margin:0 0 10px}
+.conn-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid #26262a}
+.conn-row:first-of-type{border-top:0}
+.conn-meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.conn-name{font-weight:600}
+.conn-meta .muted{margin:0}
+.conn-btn{background:#1e2b40;color:#5b9dff;border:1px solid #2c425f;border-radius:8px;
+padding:8px 14px;font-size:13px;font-weight:600;text-decoration:none;width:auto;white-space:nowrap}
+.conn-btn.linked{background:#10331c;color:#5fd38a;border-color:#1f5c33}
 </style></head><body>
 <h1>Account</h1>
 
@@ -9236,6 +9244,34 @@ text-align:center;padding:12px;font-weight:600}
   <p class=lbl>Session</p>
   <p class=val><span class="badge none" id=kind-badge>checking…</span></p>
   <p class=muted id=scope-line></p>
+</div>
+
+<div class=card id=connections-card style="display:none">
+  <p class=lbl>Connections</p>
+  <div class=conn-row>
+    <div class=conn-meta><span class=conn-name>🎮 Twitch</span><span class=muted>For the Streamer opt-in console</span></div>
+    <a class=conn-btn href="/auth/twitch/start?next=/account">Connect</a>
+  </div>
+  <div class=conn-row>
+    <div class=conn-meta><span class=conn-name>🔵 Google</span><span class=muted>Google sign-in</span></div>
+    <a class=conn-btn href="/auth/google/start?next=/account">Connect</a>
+  </div>
+  <p class=muted style="margin-top:10px">Connecting opens the provider's sign-in. The Streamer console lives under <b>Make → Streamer</b>.</p>
+</div>
+
+<div class=card id=keys-card style="display:none">
+  <p class=lbl>Keys · Real-Debrid</p>
+  <p class=muted id=rd-state style="margin:0 0 10px">checking…</p>
+  <div class=row id=rd-input-row><input id=rd-token type=password autocomplete=off autocapitalize=off autocorrect=off spellcheck=false placeholder="Real-Debrid API token"></div>
+  <button class=primary id=btn-rd-save>Save token</button>
+  <p class="msg" id=rd-msg></p>
+  <p class=muted style="margin-top:8px">Get yours at real-debrid.com/apitoken. Powers premium download unlocking.</p>
+</div>
+
+<div class=card id=plan-card style="display:none">
+  <p class=lbl>Plan</p>
+  <p class=val><span class="badge owner" id=plan-badge>—</span></p>
+  <a class=ghost href="/app/entitlements" style="text-align:left;padding:10px 0 0">Manage plan / Upgrade →</a>
 </div>
 
 <div class=card id=logout-card style="display:none">
@@ -9287,6 +9323,40 @@ function renderSession(s) {
     scope.textContent = "Paste the owner key below to sign in.";
     logoutCard.style.display = "none";
   }
+  _showOwnerCards(kind === "owner");
+  if (kind === "owner") {
+    var pb = document.getElementById("plan-badge");
+    if (pb) { pb.textContent = "Owner · full access"; pb.className = "badge owner"; }
+    loadRdStatus();
+  }
+}
+
+function _showOwnerCards(show) {
+  ["connections-card", "keys-card", "plan-card"].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.style.display = show ? "" : "none";
+  });
+}
+
+function loadRdStatus() {
+  fetch("/api/miniapp/stremio/rd-token", { headers: hdrs(), credentials: "include", cache: "no-store" })
+    .then(function (r) { return r.json(); })
+    .then(function (s) {
+      var el = document.getElementById("rd-state");
+      var inputRow = document.getElementById("rd-input-row");
+      var saveBtn = document.getElementById("btn-rd-save");
+      if (el) {
+        if (s && s.set) {
+          el.innerHTML = "✅ Configured" + (s.masked ? (" (" + s.masked + ")") : "")
+            + (s.source === "env" ? " · via env" : "");
+        } else { el.textContent = "Not configured"; }
+      }
+      // A token from an env var can't be overridden by the file UI — hide the input.
+      var editable = !s || s.editable !== false;
+      if (inputRow) inputRow.style.display = editable ? "" : "none";
+      if (saveBtn) saveBtn.style.display = editable ? "" : "none";
+    })
+    .catch(function () {});
 }
 
 function loadSession() {
@@ -9334,6 +9404,38 @@ document.getElementById("btn-login").addEventListener("click", function () {
     })
     .catch(function () { m.className = "msg err"; m.textContent = "Network error."; });
 });
+
+(function () {
+  var rdBtn = document.getElementById("btn-rd-save");
+  if (!rdBtn) return;
+  rdBtn.addEventListener("click", function () {
+    var t = document.getElementById("rd-token").value.trim();
+    var m = document.getElementById("rd-msg");
+    if (!t) { m.className = "msg err"; m.textContent = "Paste your RD token."; return; }
+    m.className = "msg"; m.textContent = "Saving…";
+    fetch("/api/miniapp/stremio/rd-token", {
+      method: "POST",
+      headers: hdrs({ "Content-Type": "application/json" }),
+      credentials: "include",
+      body: JSON.stringify({ token: t }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.ok) {
+          var acc = j.account || {};
+          m.className = "msg ok";
+          m.textContent = acc.ok
+            ? ("Saved · " + (acc.username || "") + (acc.is_premium ? (" · premium " + acc.days_left + "d") : ""))
+            : "Saved (could not validate token).";
+          document.getElementById("rd-token").value = "";
+          loadRdStatus();
+        } else {
+          m.className = "msg err"; m.textContent = (j && j.error) || "Save failed.";
+        }
+      })
+      .catch(function () { m.className = "msg err"; m.textContent = "Network error."; });
+  });
+})();
 
 loadSession();
 </script>

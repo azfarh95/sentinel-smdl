@@ -9,11 +9,27 @@ Aggregated into the central docs site. See the
 for why this lives under `infra` (not `ai`). This page is the
 **dev-facing companion** to the [repo README](https://github.com/azfarh95/sentinel-smdl).
 
-## Status — 2026-05-20 sticker maker shipped
+## Status — 2026-06-11
 
 - v1 — yt-dlp + Telegram delivery (2026-04 → 2026-05)
 - v2 — per-user scoping + admin tab + OneDrive + /start handshake (2026-05-16)
 - **Sticker maker Mini App** — video/GIF → MiniApp editor → personal pack (2026-05-20)
+- **v2.6 — unified sticker pack model** — static+video mixed packs, multiple named
+  packs, send-a-sticker import (clone one / whole set).
+- **v2.7 — Sticker Studio** — animated Giphy/Tenor overlays composited per-frame,
+  per-frame video cutout (transparent animated subject), HQ matting, library
+  search/tags/presets. Spec: [smdl-stickers-v27](https://docs.az-sentinel.xyz/planning/smdl-stickers-v27/).
+- **v3.6 — Live TV (IPTV)** — reliability-ranked channel pick, EPG search +
+  reminders + series-link, server-side favorites + For-You rows, rolling-HLS **DVR
+  buffer** (pause/rewind any live channel). Spec: [smdl-livetv-v36](https://docs.az-sentinel.xyz/planning/smdl-livetv-v36/).
+- **Media IA revamp** — bottom tab bar + cluster home, Account hub
+  (Connections/Keys/Plan), monetization/upgrade loop, cross-user Trending row.
+  Plan: [media-licensing-entitlements](https://docs.az-sentinel.xyz/planning/media-licensing-entitlements/).
+- **Streams** — per-user isolation + consent-gated recording + online/offline filter.
+- **Projector** (design): [smdl-projector-v1](https://docs.az-sentinel.xyz/planning/smdl-projector-v1/).
+
+> Canonical specs + roadmap live on the docs site (links above) and in `ROADMAP.md`;
+> this page is the dev-facing companion.
 
 ## Repo layout
 

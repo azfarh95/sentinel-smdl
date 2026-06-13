@@ -2881,6 +2881,7 @@ _BROWSE_HTML = r"""<!doctype html>
 
   <div class="section-h" style="margin-top:18px; display:flex; gap:14px; padding:14px; flex-wrap:wrap;">
     <a href="/iptv/recordings" style="color:#5ac8fa; text-decoration:none;">📼 Recordings</a>
+    <a href="#" id="drawer-lineups" style="color:#5ac8fa; text-decoration:none;">🗂 Lineups</a>
     <a href="#" id="drawer-personalize" style="color:#5ac8fa; text-decoration:none;">⚙ Personalize</a>
     <a href="/app" style="color:#5ac8fa; text-decoration:none; margin-left:auto;">← Back to SMDL</a>
   </div>
@@ -2932,6 +2933,7 @@ _BROWSE_HTML = r"""<!doctype html>
   <!-- v3.6-C: For-You — personalized rows from watch history -->
   <section id="foryou-row" style="display:none"></section>
 
+  <div id="lineup-banner" style="display:none;align-items:center;gap:8px;margin:10px 0 0;padding:9px 12px;border-radius:9px;background:var(--card,#1a1a1e);border:1px solid var(--accent,#5ac8fa);font-size:13px"></div>
   <div class="section-h result-h" id="result-h" style="display:flex;align-items:center;gap:8px">
     <span id="result-h-label" style="flex:1">Channels</span>
     <button id="fav-reorder-btn" style="display:none;font-size:12px;padding:4px 11px;border-radius:8px;border:1px solid var(--line,#333);background:var(--card,#1a1a1e);color:inherit;cursor:pointer">↕ Reorder</button>
@@ -2988,6 +2990,25 @@ _BROWSE_HTML = r"""<!doctype html>
       <div style="display:flex; gap:8px; margin-top:16px">
         <button id="fav-reorder-save">Save order</button>
         <button class="ghost" id="fav-reorder-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lineups manager — create / rename / delete custom channel lineups,
+       and enter View (filter the grid) or Edit-channels mode. -->
+  <div class="import-modal" id="lineups-modal">
+    <div class="import-card">
+      <h3 style="margin:0 0 4px">🗂 Lineups</h3>
+      <div class="pz-hint" style="margin-bottom:8px">Group channels into custom lineups. <b>View</b> filters the grid to a lineup; <b>Channels</b> lets you tap <b>+ lineup</b> on any channel to add it.</div>
+      <div id="lineups-list" style="max-height:48vh;overflow:auto"></div>
+      <div style="display:flex;gap:6px;margin-top:10px">
+        <input type="text" id="lineup-new-name" maxlength="60" placeholder="New lineup name…"
+               onkeydown="if(event.key==='Enter')document.getElementById('lineup-new-btn').click()"
+               style="flex:1;padding:8px 11px;border-radius:9px;border:1px solid var(--line,#333);background:var(--card,#1a1a1e);color:inherit;font-size:13px">
+        <button id="lineup-new-btn">＋ Create</button>
+      </div>
+      <div style="display:flex; gap:8px; margin-top:16px">
+        <button class="ghost" id="lineups-close">Close</button>
       </div>
     </div>
   </div>
@@ -3161,6 +3182,12 @@ const state = (() => {
 function _persistState() {
   try { localStorage.setItem(STATE_KEY, JSON.stringify(state)); } catch {}
 }
+// v3.6-D: lineups. Mode is transient (reset on reload — deliberately NOT
+// persisted in `state`, so a reload returns to the normal grid).
+let _lineups = [];
+let _activeLineupIds = new Set();   // channels of the lineup being viewed/edited
+let _lineupViewId = null;           // active "view" lineup → filters the grid
+let _lineupEditId = null;           // active "edit" lineup → membership toggles on cards
 // Deep-link support: /iptv?tab=live (e.g. the off-air player's "See what's
 // live" button) overrides the persisted tab on load.
 try {
@@ -3488,7 +3515,7 @@ async function loadChannels() {
       if (state.q) params.set('q', state.q);
       // favorites_only, the fav-tab, and the live-tab need a wider fetch — a
       // match outside the first 300 by (country,name) would be invisible.
-      const wide = state.favorites_only || state.tab === 'fav' || state.tab === 'live';
+      const wide = state.favorites_only || state.tab === 'fav' || state.tab === 'live' || !!_lineupViewId;
       params.set('limit', wide ? '20000' : '300');
       data = await api('/api/iptv/v2/channels?' + params.toString());
     }
@@ -3524,6 +3551,9 @@ async function loadChannels() {
     channels.sort((a, b) =>
       (_favPos.has(a.id) ? _favPos.get(a.id) : 1e9) - (_favPos.has(b.id) ? _favPos.get(b.id) : 1e9));
   }
+  // v3.6-D: a lineup VIEW filters the grid to that lineup's channels. (Edit mode
+  // shows the normal grid so any channel can be added; toggles mark membership.)
+  if (_lineupViewId) channels = channels.filter(c => _activeLineupIds.has(c.id));
   document.getElementById('result-h-label').textContent =
     `Channels · ${channels.length}${channels.length >= 300 ? '+' : ''}${state.favorites_only ? ' ⭐' : ''}`;
   // Show the ↕ Reorder entry only on the Favorites tab with >1 favorite.
@@ -3594,6 +3624,33 @@ async function loadChannels() {
       // If we're in "favorites only" view, un-starring removes the card.
       if (state.favorites_only && !on) card.style.display = 'none';
     });
+    // v3.6-D: in lineup-EDIT mode, each card gets a membership toggle.
+    if (_lineupEditId) {
+      const _paint = (b, inL) => {
+        b.textContent = inL ? '✓ in lineup' : '+ lineup';
+        b.classList.toggle('on', inL);
+        b.style.background = inL ? 'var(--accent,#5ac8fa)' : 'var(--card,#1a1a1e)';
+        b.style.color = inL ? '#fff' : 'inherit';
+      };
+      const lbtn = document.createElement('button');
+      lbtn.className = 'lineup-toggle';
+      lbtn.style.cssText = 'position:absolute;left:6px;bottom:6px;font-size:11px;padding:2px 8px;border-radius:7px;border:1px solid var(--line,#333);cursor:pointer;z-index:2';
+      _paint(lbtn, _activeLineupIds.has(ch.id));
+      lbtn.addEventListener('click', async (e) => {
+        e.stopPropagation(); e.preventDefault();
+        const on = !_activeLineupIds.has(ch.id);
+        lbtn.disabled = true;
+        try {
+          const r = await api('/api/iptv/lineups/' + _lineupEditId + '/channel',
+            {method:'POST', body: JSON.stringify({channel_id: ch.id, on: on})});
+          _activeLineupIds = new Set(r.channel_ids || []);
+          const lu = _lineupById(_lineupEditId); if (lu) lu.channel_ids = [..._activeLineupIds];
+          _paint(lbtn, _activeLineupIds.has(ch.id));
+        } catch (err) { toast('Lineup update failed'); }
+        lbtn.disabled = false;
+      });
+      card.appendChild(lbtn);
+    }
     card.addEventListener('click', () => location.href = `/iptv/play/${encodeURIComponent(ch.id)}`);
     card.tabIndex = 0;
     card.setAttribute('role', 'link');
@@ -4307,6 +4364,105 @@ document.getElementById('fav-reorder-save')?.addEventListener('click', async fun
 });
 _favReModal?.addEventListener('click', function(e){ if (e.target === _favReModal) closeFavReorder(); });
 document.getElementById('fav-reorder-btn')?.addEventListener('click', openFavReorder);
+
+// ── Lineups manager (v3.6-D) ────────────────────────────────────
+const _lineupsModal = document.getElementById('lineups-modal');
+function _lineupById(id) { return _lineups.find(function(l){ return String(l.id) === String(id); }); }
+async function _loadLineups() {
+  try { const r = await api('/api/iptv/lineups'); _lineups = r.lineups || []; } catch (e) { _lineups = []; }
+  return _lineups;
+}
+async function openLineups() {
+  if (!_lineupsModal) return;
+  await _loadLineups();
+  _renderLineupsList();
+  _lineupsModal.classList.add('show');
+}
+function closeLineups() { _lineupsModal && _lineupsModal.classList.remove('show'); }
+function _renderLineupsList() {
+  const host = document.getElementById('lineups-list');
+  if (!host) return;
+  host.innerHTML = '';
+  if (!_lineups.length) { host.innerHTML = '<div class="pz-hint">No lineups yet — create one below.</div>'; return; }
+  _lineups.forEach(function(lu){
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:9px 8px;border:1px solid var(--line,#333);border-radius:9px;margin-bottom:6px;background:var(--card,#1a1a1e);flex-wrap:wrap';
+    const nm = document.createElement('span');
+    nm.style.cssText = 'flex:1;min-width:110px;font-size:13px;font-weight:600';
+    nm.textContent = lu.name + ' ';
+    const ct = document.createElement('span');
+    ct.style.cssText = 'opacity:.6;font-weight:400;font-size:12px';
+    ct.textContent = (lu.channel_ids || []).length + ' ch';
+    nm.appendChild(ct);
+    const view = document.createElement('button'); view.textContent = '👁 View'; view.style.cssText = 'font-size:12px;padding:3px 9px';
+    view.addEventListener('click', function(){ _enterLineupView(lu.id); });
+    const edit = document.createElement('button'); edit.textContent = '✎ Channels'; edit.style.cssText = 'font-size:12px;padding:3px 9px';
+    edit.addEventListener('click', function(){ _enterLineupEdit(lu.id); });
+    const ren = document.createElement('button'); ren.className = 'ghost'; ren.textContent = '✏'; ren.title = 'Rename'; ren.style.cssText = 'font-size:12px;padding:3px 9px';
+    ren.addEventListener('click', async function(){
+      const nn = prompt('Rename lineup:', lu.name); if (nn == null) return;
+      const t = nn.trim(); if (!t) return;
+      try { await api('/api/iptv/lineups/' + lu.id, {method:'POST', body: JSON.stringify({name: t})}); await _loadLineups(); _renderLineupsList(); _renderLineupBanner(); }
+      catch (e) { toast('Rename failed'); }
+    });
+    const del = document.createElement('button'); del.className = 'ghost'; del.textContent = '🗑'; del.title = 'Delete'; del.style.cssText = 'font-size:12px;padding:3px 9px;color:#f88';
+    del.addEventListener('click', async function(){
+      if (!confirm('Delete lineup "' + lu.name + '"?')) return;
+      try { await api('/api/iptv/lineups/' + lu.id + '/delete', {method:'POST', body:'{}'});
+        if (String(_lineupViewId) === String(lu.id) || String(_lineupEditId) === String(lu.id)) _exitLineupMode();
+        await _loadLineups(); _renderLineupsList(); }
+      catch (e) { toast('Delete failed'); }
+    });
+    row.appendChild(nm); row.appendChild(view); row.appendChild(edit); row.appendChild(ren); row.appendChild(del);
+    host.appendChild(row);
+  });
+}
+function _syncTabButtons() {
+  document.querySelectorAll('.quick-tabs .qt').forEach(function(b){ b.classList.toggle('active', b.dataset.tab === state.tab); });
+}
+function _enterLineupView(id) {
+  const lu = _lineupById(id); if (!lu) return;
+  _activeLineupIds = new Set(lu.channel_ids || []);
+  _lineupViewId = id; _lineupEditId = null;
+  state.tab = 'all'; state.favorites_only = false; _persistState(); _syncTabButtons();
+  closeLineups(); _renderLineupBanner(); loadChannels();
+}
+function _enterLineupEdit(id) {
+  const lu = _lineupById(id); if (!lu) return;
+  _activeLineupIds = new Set(lu.channel_ids || []);
+  _lineupEditId = id; _lineupViewId = null;
+  state.tab = 'all'; state.favorites_only = false; _persistState(); _syncTabButtons();
+  closeLineups(); _renderLineupBanner(); loadChannels();
+}
+function _exitLineupMode() {
+  _lineupViewId = null; _lineupEditId = null; _activeLineupIds = new Set();
+  _renderLineupBanner(); loadChannels();
+}
+function _renderLineupBanner() {
+  const b = document.getElementById('lineup-banner'); if (!b) return;
+  const id = _lineupEditId || _lineupViewId;
+  if (!id) { b.style.display = 'none'; b.innerHTML = ''; return; }
+  const lu = _lineupById(id);
+  b.style.display = 'flex'; b.innerHTML = '';
+  const span = document.createElement('span'); span.style.cssText = 'flex:1;min-width:0';
+  span.textContent = (_lineupEditId ? '✎ Editing: ' : '👁 Viewing: ') + (lu ? lu.name : id)
+    + (_lineupEditId ? ' — tap + lineup on channels' : '');
+  const x = document.createElement('button'); x.textContent = _lineupEditId ? 'Done' : '✕ Exit';
+  x.style.cssText = 'font-size:12px;padding:3px 11px'; x.addEventListener('click', _exitLineupMode);
+  b.appendChild(span); b.appendChild(x);
+}
+document.getElementById('lineups-close')?.addEventListener('click', closeLineups);
+_lineupsModal?.addEventListener('click', function(e){ if (e.target === _lineupsModal) closeLineups(); });
+document.getElementById('lineup-new-btn')?.addEventListener('click', async function(){
+  const el = document.getElementById('lineup-new-name'); const name = (el.value || '').trim();
+  if (!name) { toast('Enter a lineup name'); return; }
+  try { await api('/api/iptv/lineups', {method:'POST', body: JSON.stringify({name: name, channel_ids: []})});
+    el.value = ''; await _loadLineups(); _renderLineupsList(); toast('Lineup created'); }
+  catch (e) { toast('Create failed'); }
+});
+document.getElementById('drawer-lineups')?.addEventListener('click', function(e){
+  e.preventDefault(); openLineups(); _autoCloseDrawerIfMobile();
+});
 
 (async () => {
   applyAccent();

@@ -100,7 +100,7 @@ async def web_manifest():
 # cached offline shell when offline); cache-first for static/icon assets. The
 # offline shell is embedded so it works on the very first offline load.
 _SW_JS = """
-const CACHE = 'sentinel-tv-v4';
+const CACHE = 'sentinel-tv-v5';
 const OFFLINE_URL = '/offline.html';
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.add(OFFLINE_URL)).then(() => self.skipWaiting()));
@@ -139,7 +139,13 @@ async def service_worker():
         _SW_JS,
         media_type="application/javascript",
         headers={
-            "Cache-Control": "no-cache",
+            # sw.js best practice (jakearchibald.com/caching-best-practices,
+            # popeindustries/sw-tips): no-store is the part Cloudflare honors
+            # (defeats its Browser-Cache-TTL override that otherwise rewrites
+            # this to max-age=14400 and delays SW updates ~4h); no-cache/max-age=0
+            # are the revalidation semantics browsers want. Pair with
+            # register(..., {updateViaCache:'none'}) on the client.
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Service-Worker-Allowed": "/",
         },
     )

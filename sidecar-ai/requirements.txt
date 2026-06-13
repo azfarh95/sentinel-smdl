@@ -8,3 +8,7 @@ uvicorn[standard]==0.34.0
 # (hipBLAS) via a separate engine, added in a later phase. Pinned to the version
 # de-risked on this host (10.4x realtime on CPU, base int8).
 faster-whisper==1.2.1
+# Phase 3 search — CPU embeddings (fastembed = ONNX, reuses onnxruntime; no torch)
+# + sqlite-vec for the vector index. Both CPU, so search never touches the GPU.
+fastembed==0.8.0
+sqlite-vec==0.1.9

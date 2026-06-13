@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import broker, config, engine, gpu, summarize
+from . import broker, config, embed, engine, gpu, store, summarize
 from .engine import Segment
 
 logging.basicConfig(level=logging.INFO,
@@ -75,7 +75,16 @@ async def healthz():
         "qwen_model": config.QWEN_MODEL if summarize.enabled() else None,
         "vram_free_gb": gpu.free_vram_gb(),
         "min_vram_gb": config.MIN_VRAM_GB,
+        "embed_model": config.EMBED_MODEL,
+        "index": _safe_stats(),
     }
+
+
+def _safe_stats() -> dict:
+    try:
+        return store.stats()
+    except Exception:  # noqa: BLE001
+        return {"segments": None, "media": None}
 
 
 class SummarizeRequest(BaseModel):
@@ -172,8 +181,67 @@ async def transcribe(req: TranscribeRequest):
     }
 
 
+class IndexRequest(BaseModel):
+    path: str = Field(..., description="media path to transcribe + index (under downloads root)")
+    model: str | None = Field(None, description="whisper model size; default from env")
+    language: str | None = Field(None, description="force transcription language")
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(..., description="natural-language search query")
+    k: int = Field(10, ge=1, le=100, description="number of hits to return")
+    path: str | None = Field(None, description="restrict the search to one media path")
+
+
+@app.post("/index")
+async def index_endpoint(req: IndexRequest):
+    """Transcribe (CPU) → embed (CPU) → store. No GPU touched, so this is safe to
+    run across the library while FLUX/Qwen/a game hold the card."""
+    real = _resolve_media_path(req.path)
+
+    def _run() -> dict:
+        eng = engine.resolve("auto")
+        result = eng.transcribe(real, model_size=(req.model or config.MODEL).strip(),
+                                language=req.language)
+        if not result.segments:
+            store.index_segments(req.path, [], [], result.language)
+            return {"indexed": 0, "language": result.language, "empty": True}
+        vectors = embed.embed_passages([s.text for s in result.segments])
+        n = store.index_segments(req.path, result.segments, vectors, result.language)
+        return {"indexed": n, "language": result.language,
+                "duration": result.duration, "realtime_factor": result.realtime_factor}
+
+    try:
+        out = await run_in_threadpool(_run)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("index failed")
+        raise HTTPException(500, f"index failed: {e}")
+    logger.info("indexed path=%s segments=%s", req.path, out.get("indexed"))
+    return {"ok": True, "path": req.path, **out}
+
+
+@app.post("/search")
+async def search_endpoint(req: SearchRequest):
+    """Semantic search across indexed transcripts → timestamped hits (CPU)."""
+    def _run() -> list[dict]:
+        qv = embed.embed_query(req.query)
+        return store.search(qv, k=req.k, media_path=req.path)
+
+    try:
+        hits = await run_in_threadpool(_run)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("search failed")
+        raise HTTPException(500, f"search failed: {e}")
+    return {"ok": True, "query": req.query, "count": len(hits), "hits": hits}
+
+
 @app.on_event("startup")
 async def _startup():
+    # Initialise the search store (idempotent).
+    try:
+        store.init()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("store init skipped: %s", e)
     # Preload the default model so the first /transcribe isn't penalised by the
     # ~1-2 s model load. Best-effort: a download hiccup must not crash the boot.
     try:

@@ -35,6 +35,12 @@ BEAM_SIZE = _int("MEDIA_AI_BEAM_SIZE", 1)
 # music-only clips (correctly, instead of hallucinating lyrics).
 VAD_FILTER = (os.environ.get("MEDIA_AI_VAD", "true").strip().lower() != "false")
 
+# ── Search (Phase 3 — CPU embeddings + sqlite-vec) ───────────────────────────
+# bge-small-en-v1.5: 384-dim, CPU via onnxruntime (no torch, no GPU). Embedding
+# the library never contends for the card.
+EMBED_MODEL = os.environ.get("MEDIA_AI_EMBED_MODEL", "BAAI/bge-small-en-v1.5").strip()
+DB_PATH = os.environ.get("MEDIA_AI_DB_PATH", "/data/media_ai.db").strip()
+
 # ── GPU broker (the "GPU when the broker says free" path; Phase 1 = off) ──────
 # CPU is the default engine and needs no GPU. When a GPU engine is added
 # (whisper.cpp/hipBLAS, since CTranslate2 has no ROCm), it will acquire a lease

@@ -286,6 +286,15 @@ app.include_router(auth_twitch.router)
 app.include_router(streamer_consent.router)
 app.include_router(pwa_routes.router)
 
+# Serve same-origin static assets — notably the editor's bundled Fabric.js, so
+# it never depends on a third-party CDN the Telegram WebView / a mobile network
+# can block (a blocked CDN → undefined `fabric` → dead Studio canvas = black).
+from fastapi.staticfiles import StaticFiles as _StaticFiles  # noqa: E402
+import os as _os_static  # noqa: E402
+_STATIC_DIR = _os_static.path.join(_os_static.path.dirname(__file__), "..", "static")
+if _os_static.path.isdir(_STATIC_DIR):
+    app.mount("/static", _StaticFiles(directory=_STATIC_DIR), name="static")
+
 
 # ── Edition gate ────────────────────────────────────────────────────
 #

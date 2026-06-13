@@ -5767,7 +5767,7 @@ async function stickersFromDownloadPath(encPath, btn) {
       body: JSON.stringify({ file_path }),
     });
     showOk('Draft created — opening editor');
-    location.href = '/stickers/' + r.id + '/edit?kind=video';
+    location.href = '/stickers/' + r.id + '/edit?kind=video&_cb=' + Date.now();
   } catch (e) {
     showErr('Make sticker failed: ' + e);
     if (btn) { btn.disabled = false; btn.textContent = '🎬'; }
@@ -6048,7 +6048,7 @@ async function stkOpenLastEditor(btn) {
     kind = (target && target.mime_type && target.mime_type.indexOf('video') === 0) ? 'video' : 'static';
   }
   if (target && target.id != null) {
-    location.href = '/stickers/' + target.id + '/edit' + (kind ? '?kind=' + encodeURIComponent(kind) : '');
+    location.href = '/stickers/' + target.id + '/edit' + (kind ? '?kind=' + encodeURIComponent(kind) + '&' : '?') + '_cb=' + Date.now();
   } else { stkSection('add'); }
 }
 
@@ -6547,7 +6547,7 @@ async function loadStickers() {
       primary.textContent = '✂️ Edit & crop';
       primary.title = 'Scrubber · crop · shapes · cutout';
       primary.addEventListener('click', () => {
-        location.href = '/stickers/' + d.id + '/edit?kind=' + encodeURIComponent(_stickersKind);
+        location.href = '/stickers/' + d.id + '/edit?kind=' + encodeURIComponent(_stickersKind) + '&_cb=' + Date.now();
       });
     }
     const delBtn = document.createElement('button');
@@ -6817,7 +6817,7 @@ async function stickersEditInEditor(btn) {
     const r = await api('/api/sticker_pack/sticker/to_draft', { method: 'POST',
       body: JSON.stringify({ file_id }) });
     const kind = r.is_video ? 'video' : 'static';
-    location.href = '/stickers/' + r.id + '/edit?kind=' + kind;
+    location.href = '/stickers/' + r.id + '/edit?kind=' + kind + '&_cb=' + Date.now();
   } catch (e) { showErr('Couldn\\'t open editor: ' + e); }
 }
 

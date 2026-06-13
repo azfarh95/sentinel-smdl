@@ -2932,7 +2932,10 @@ _BROWSE_HTML = r"""<!doctype html>
   <!-- v3.6-C: For-You — personalized rows from watch history -->
   <section id="foryou-row" style="display:none"></section>
 
-  <div class="section-h result-h" id="result-h">Channels</div>
+  <div class="section-h result-h" id="result-h" style="display:flex;align-items:center;gap:8px">
+    <span id="result-h-label" style="flex:1">Channels</span>
+    <button id="fav-reorder-btn" style="display:none;font-size:12px;padding:4px 11px;border-radius:8px;border:1px solid var(--line,#333);background:var(--card,#1a1a1e);color:inherit;cursor:pointer">↕ Reorder</button>
+  </div>
   <div class="grid" id="grid"><div class="loading">Loading…</div></div>
 
   <!-- Owner-only import modal (toggled by Admin panel below) -->
@@ -2971,6 +2974,20 @@ _BROWSE_HTML = r"""<!doctype html>
       <div style="display:flex; gap:8px; margin-top:16px">
         <button id="pz-save">Save</button>
         <button class="ghost" id="pz-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reorder favorites sheet — drag the ≡ handle or use ↑/↓; persists via
+       /api/iptv/favorites/reorder so the order follows you across surfaces. -->
+  <div class="import-modal" id="fav-reorder-modal">
+    <div class="import-card">
+      <h3 style="margin:0 0 4px">↕ Reorder favorites</h3>
+      <div class="pz-hint" style="margin-bottom:8px">Drag the ≡ handle, or use ↑ / ↓. Order syncs across your devices.</div>
+      <div id="fav-reorder-list" style="max-height:55vh;overflow:auto"></div>
+      <div style="display:flex; gap:8px; margin-top:16px">
+        <button id="fav-reorder-save">Save order</button>
+        <button class="ghost" id="fav-reorder-close">Close</button>
       </div>
     </div>
   </div>
@@ -3053,11 +3070,29 @@ let _favorites = (() => {
 function _saveFavorites() {
   try { localStorage.setItem(FAV_KEY, JSON.stringify([..._favorites])); } catch {}
 }
+// v3.6-D: ordered-favorites model. The Set above answers membership; this array
+// holds the user's chosen order (drives the ⭐ tab render + the reorder sheet).
+// Server persists it via /api/iptv/favorites sort_order; _syncFavorites adopts
+// the server order, and the reorder sheet writes it back.
+const FAV_ORDER_KEY = 'smdl_iptv_fav_order_v1';
+let _favOrder = (() => {
+  try { const a = JSON.parse(localStorage.getItem(FAV_ORDER_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+  catch { return []; }
+})();
+function _saveFavOrder() { try { localStorage.setItem(FAV_ORDER_KEY, JSON.stringify(_favOrder)); } catch {} }
+// Append any starred-but-unordered ids; drop any ordered-but-unstarred ids.
+function _reconcileFavOrder() {
+  const seen = new Set(_favOrder);
+  for (const id of _favorites) if (!seen.has(id)) { _favOrder.push(id); seen.add(id); }
+  _favOrder = _favOrder.filter(id => _favorites.has(id));
+}
+_reconcileFavOrder(); _saveFavOrder();
 function isFavorite(cid) { return _favorites.has(cid); }
 function toggleFavorite(cid) {
   const on = !_favorites.has(cid);
-  if (on) _favorites.add(cid); else _favorites.delete(cid);
-  _saveFavorites();
+  if (on) { _favorites.add(cid); if (!_favOrder.includes(cid)) _favOrder.push(cid); }
+  else { _favorites.delete(cid); _favOrder = _favOrder.filter(x => x !== cid); }
+  _saveFavorites(); _saveFavOrder();
   // v3.6-C: mirror to the server so favorites follow you across surfaces.
   try { api('/api/iptv/favorites', {method:'POST', body: JSON.stringify({channel_id: cid, on: on})}).catch(function(){}); } catch (e) {}
 }
@@ -3066,11 +3101,20 @@ function toggleFavorite(cid) {
 async function _syncFavorites() {
   try {
     const r = await api('/api/iptv/favorites');
+    const rows = r.favorites || [];
     let changed = false;
-    (r.favorites || []).forEach(function(f) {
+    rows.forEach(function(f) {
       if (f.channel_id && !_favorites.has(f.channel_id)) { _favorites.add(f.channel_id); changed = true; }
     });
     if (changed) _saveFavorites();
+    // Adopt the server's saved order (it persists sort_order); keep any
+    // local-only favorites the server doesn't know yet appended after.
+    if (rows.length) {
+      const serverOrder = rows.map(function(f){ return f.channel_id; }).filter(function(id){ return _favorites.has(id); });
+      const extras = _favOrder.filter(function(id){ return _favorites.has(id) && serverOrder.indexOf(id) === -1; });
+      _favOrder = serverOrder.concat(extras);
+    }
+    _reconcileFavOrder(); _saveFavOrder();
   } catch (e) {}
   try {
     if (!localStorage.getItem('smdl_iptv_fav_migrated')) {
@@ -3475,9 +3519,16 @@ async function loadChannels() {
   // know which channels you've starred. Apply after the fetch.
   if (state.favorites_only || state.tab === 'fav') {
     channels = channels.filter(c => isFavorite(c.id));
+    // v3.6-D: render in the user's saved favorite order (unknown ids sink last).
+    const _favPos = new Map(_favOrder.map((id, i) => [id, i]));
+    channels.sort((a, b) =>
+      (_favPos.has(a.id) ? _favPos.get(a.id) : 1e9) - (_favPos.has(b.id) ? _favPos.get(b.id) : 1e9));
   }
-  document.getElementById('result-h').textContent =
+  document.getElementById('result-h-label').textContent =
     `Channels · ${channels.length}${channels.length >= 300 ? '+' : ''}${state.favorites_only ? ' ⭐' : ''}`;
+  // Show the ↕ Reorder entry only on the Favorites tab with >1 favorite.
+  const _reBtn = document.getElementById('fav-reorder-btn');
+  if (_reBtn) _reBtn.style.display = (state.tab === 'fav' && channels.length > 1) ? '' : 'none';
   if (!channels.length) {
     grid.innerHTML = (state.tab === 'live')
       ? `<div class="empty">Nothing live right now.<br>
@@ -4160,6 +4211,102 @@ _pzModal?.addEventListener('click', e => { if (e.target === _pzModal) closePerso
 document.getElementById('drawer-personalize')?.addEventListener('click', e => {
   e.preventDefault(); openPersonalize(); _autoCloseDrawerIfMobile();
 });
+
+// ── Reorder favorites sheet (v3.6-D) ────────────────────────────
+// Works on a copy of _favOrder; only Save commits + persists to the server.
+const _favReModal = document.getElementById('fav-reorder-modal');
+let _favReOrder = [];        // working copy while the sheet is open
+let _favReNames = {};        // channel_id → display name
+async function openFavReorder() {
+  if (!_favReModal) return;
+  try {
+    const r = await api('/api/iptv/favorites');
+    (r.favorites || []).forEach(function(f){ if (f.channel_id) _favReNames[f.channel_id] = f.channel_name || f.channel_id; });
+  } catch (e) {}
+  // also harvest names from the currently-rendered grid (covers local-only favs)
+  document.querySelectorAll('#grid .card').forEach(function(card){
+    const id = card.dataset.channelId, nm = card.querySelector('.name');
+    if (id && nm && !_favReNames[id]) _favReNames[id] = nm.textContent;
+  });
+  _reconcileFavOrder(); _saveFavOrder();
+  _favReOrder = _favOrder.slice();
+  _renderFavReorder();
+  _favReModal.classList.add('show');
+}
+function _renderFavReorder() {
+  const host = document.getElementById('fav-reorder-list');
+  if (!host) return;
+  host.innerHTML = '';
+  if (!_favReOrder.length) { host.innerHTML = '<div class="pz-hint">No favorites yet.</div>'; return; }
+  _favReOrder.forEach(function(id, idx) {
+    const row = document.createElement('div');
+    row.className = 'fav-re-row';
+    row.dataset.id = id;
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:9px 8px;border:1px solid var(--line,#333);border-radius:9px;margin-bottom:6px;background:var(--card,#1a1a1e);touch-action:none';
+    const handle = document.createElement('span');
+    handle.textContent = '≡';
+    handle.style.cssText = 'cursor:grab;font-size:18px;opacity:.55;padding:0 4px;touch-action:none';
+    const name = document.createElement('span');
+    name.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px';
+    name.textContent = _favReNames[id] || id;
+    const up = document.createElement('button');
+    up.textContent = '↑'; up.style.cssText = 'padding:2px 10px;font-size:14px'; up.disabled = idx === 0;
+    up.addEventListener('click', function(){ _favReMove(idx, idx - 1); });
+    const down = document.createElement('button');
+    down.textContent = '↓'; down.style.cssText = 'padding:2px 10px;font-size:14px'; down.disabled = idx === _favReOrder.length - 1;
+    down.addEventListener('click', function(){ _favReMove(idx, idx + 1); });
+    row.appendChild(handle); row.appendChild(name); row.appendChild(up); row.appendChild(down);
+    _wireFavReDrag(row, handle);
+    host.appendChild(row);
+  });
+}
+function _favReMove(from, to) {
+  if (to < 0 || to >= _favReOrder.length) return;
+  const x = _favReOrder.splice(from, 1)[0];
+  _favReOrder.splice(to, 0, x);
+  _renderFavReorder();
+}
+// Pointer-drag: move the actual DOM row during drag (no mid-drag re-render),
+// rebuild the order from the DOM on drop. touch-action:none stops the gesture
+// scrolling the sheet on mobile.
+function _wireFavReDrag(row, handle) {
+  handle.addEventListener('pointerdown', function(e){
+    e.preventDefault();
+    const host = document.getElementById('fav-reorder-list');
+    try { handle.setPointerCapture(e.pointerId); } catch (err) {}
+    row.classList.add('dragging'); row.style.opacity = '0.55';
+    function onMove(ev){
+      const rows = Array.prototype.slice.call(host.querySelectorAll('.fav-re-row:not(.dragging)'));
+      let after = null;
+      for (const r of rows) {
+        const rect = r.getBoundingClientRect();
+        if (ev.clientY < rect.top + rect.height / 2) { after = r; break; }
+      }
+      if (after) host.insertBefore(row, after); else host.appendChild(row);
+    }
+    function onUp(){
+      row.classList.remove('dragging'); row.style.opacity = '';
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      _favReOrder = Array.prototype.slice.call(host.querySelectorAll('.fav-re-row')).map(function(r){ return r.dataset.id; });
+      _renderFavReorder();
+    }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  });
+}
+function closeFavReorder() { _favReModal && _favReModal.classList.remove('show'); }
+document.getElementById('fav-reorder-close')?.addEventListener('click', closeFavReorder);
+document.getElementById('fav-reorder-save')?.addEventListener('click', async function(){
+  _favOrder = _favReOrder.slice();
+  _saveFavOrder();
+  try { await api('/api/iptv/favorites/reorder', {method:'POST', body: JSON.stringify({ordered_ids: _favOrder})}); } catch (e) {}
+  closeFavReorder();
+  toast('Favorite order saved', 1600);
+  loadChannels();
+});
+_favReModal?.addEventListener('click', function(e){ if (e.target === _favReModal) closeFavReorder(); });
+document.getElementById('fav-reorder-btn')?.addEventListener('click', openFavReorder);
 
 (async () => {
   applyAccent();

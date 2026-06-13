@@ -2786,7 +2786,10 @@ _EDIT_HTML = r"""<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Make Sticker</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/fabric@5.3.0/dist/fabric.min.js"></script>
+  <!-- Fabric.js served SAME-ORIGIN (was a jsdelivr CDN that the Telegram
+       WebView / a mobile network can block → undefined `fabric` → dead, BLACK
+       Studio canvas). Bundled at static/fabric.min.js. -->
+  <script src="/static/fabric.min.js?v=5.3.0"></script>
   <style>
     :root { color-scheme: dark light; }
     /* ── Theme tokens (overridden per skin) ──────────────────────────── */
@@ -4389,6 +4392,13 @@ function _addImage(url, opts = {}) {
 // preview dock; the tools are bottom-nav tabs.
 async function ensureStudio() {
   if (_studioBuilt) return;
+  // Guard: if the canvas engine didn't load, surface it instead of a silent
+  // black canvas (don't latch _studioBuilt → a reload can retry).
+  if (typeof fabric === 'undefined') {
+    const st = document.getElementById('studio-stage');
+    if (st) st.innerHTML = '<div style="padding:26px 16px;text-align:center;color:#f88;font-size:13px;line-height:1.5">⚠ Editor engine failed to load.<br>Reopen the editor or pull down to refresh.</div>';
+    return;
+  }
   _studioBuilt = true;
   // Size the square canvas to the (full-width) dock, capped at 320.
   const stage = document.getElementById('studio-stage');
@@ -4795,4 +4805,8 @@ async def edit_page(draft_id: int):
     # No initData check here — the page itself loads the draft via the
     # JSON API which IS auth-guarded. Mirrors how /app works in miniapp.py.
     html = _EDIT_HTML.replace("{{DRAFT_ID}}", str(int(draft_id)))
-    return HTMLResponse(html)
+    # no-store: the editor must never be cached by Cloudflare or the Telegram
+    # WebView — a stale copy = an old editor (e.g. the CDN-fabric build that
+    # black-screened the Mini App). Mirrors /app + /account.
+    return HTMLResponse(html, headers={"Cache-Control": "no-store, must-revalidate",
+                                       "Pragma": "no-cache"})

@@ -46,7 +46,25 @@ GPU_BROKER_URL = os.environ.get("MEDIA_AI_GPU_BROKER_URL", "http://host.docker.i
 # mirrored as COINBOX_GPU_BROKER_TOKEN in .env.local). No new secret.
 GPU_BROKER_TOKEN = os.environ.get("MEDIA_AI_GPU_BROKER_TOKEN", "").strip()
 
-# ── Qwen summary (Phase 2; off until wired) ──────────────────────────────────
-# llama-swap fronts the on-demand Qwen at :1234 (OpenAI-compatible). Summary/
-# chapters acquire an 'llm' broker lease before calling it.
+# ── Qwen summary (Phase 2) ───────────────────────────────────────────────────
+# llama-swap fronts the on-demand Qwen at :1234 (OpenAI-compatible, TTL evict).
+# Summary/chapters check the broker GPU gate (broker.gpu_gate) before calling it
+# — media-ai is an LLM-class consumer, it does NOT lease (only FLUX leases).
+# Unset QWEN_URL ⇒ summary stays dark (enabled() is False).
 QWEN_URL = os.environ.get("MEDIA_AI_QWEN_URL", "").rstrip("/")
+QWEN_MODEL = os.environ.get("MEDIA_AI_QWEN_MODEL", "qwen/qwen3.6-27b").strip()
+# Generous: a COLD 27B load through llama-swap (≈16 GB GGUF + mmproj into VRAM)
+# measured >3 min before the first token on this box; warm calls are seconds.
+# On-demand load is the price of being a good GPU citizen (TTL-evict frees the
+# card for FLUX/gaming), so the timeout must cover a cold load + generation.
+# Phase 4 invokes summary asynchronously so a user never blocks on a cold load.
+QWEN_TIMEOUT = float(os.environ.get("MEDIA_AI_QWEN_TIMEOUT", "300"))
+QWEN_MAX_TOKENS = _int("MEDIA_AI_QWEN_MAX_TOKENS", 1200)
+
+# Physical VRAM-headroom preflight (app/gpu.py). The broker is blind to GPU users
+# that don't lease (e.g. a resident ComfyUI/FLUX model), so before loading the
+# 27B we also check actual free VRAM via ComfyUI /system_stats and defer when
+# there isn't enough. Unset GPU_STATS_URL ⇒ check skipped (degrade-dark).
+GPU_STATS_URL = os.environ.get("MEDIA_AI_GPU_STATS_URL", "").rstrip("/")
+# 27B Q4_K_M ≈ 16 GB + KV/overhead. Defer if free VRAM is below this.
+MIN_VRAM_GB = float(os.environ.get("MEDIA_AI_MIN_VRAM_GB", "17"))

@@ -20,7 +20,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import config, engine
+from . import broker, config, engine, gpu, summarize
+from .engine import Segment
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -70,8 +71,76 @@ async def healthz():
         "models_dir": config.MODELS_DIR,
         "downloads_dir": config.DOWNLOADS_DIR,
         "gpu_broker_enabled": config.GPU_BROKER_ENABLED,
-        "qwen_wired": bool(config.QWEN_URL),
+        "summary_enabled": summarize.enabled(),
+        "qwen_model": config.QWEN_MODEL if summarize.enabled() else None,
+        "vram_free_gb": gpu.free_vram_gb(),
+        "min_vram_gb": config.MIN_VRAM_GB,
     }
+
+
+class SummarizeRequest(BaseModel):
+    path: str | None = Field(None, description="media path to transcribe first (under downloads root)")
+    transcript: str | None = Field(None, description="plain transcript text (alternative to path)")
+    segments: list[dict] | None = Field(None, description="pre-computed segments [{start,end,text}]")
+    model: str | None = Field(None, description="whisper model size when transcribing from path")
+    language: str | None = Field(None, description="force transcription language")
+
+
+def _segments_from_request(req: "SummarizeRequest") -> tuple[list[Segment], str | None]:
+    """Resolve the request into transcript segments + detected language. Order of
+    precedence: explicit segments > plain transcript > transcribe a media path."""
+    if req.segments:
+        return ([Segment(float(s.get("start", 0)), float(s.get("end", 0)),
+                          str(s.get("text", "")).strip()) for s in req.segments],
+                req.language)
+    if req.transcript and req.transcript.strip():
+        return ([Segment(0.0, 0.0, req.transcript.strip())], req.language)
+    if req.path:
+        real = _resolve_media_path(req.path)
+        eng = engine.resolve("auto")
+        result = eng.transcribe(real, model_size=(req.model or config.MODEL).strip(),
+                                language=req.language)
+        return result.segments, result.language
+    raise HTTPException(400, "provide one of: segments, transcript, or path")
+
+
+@app.post("/summarize")
+async def summarize_endpoint(req: SummarizeRequest):
+    if not summarize.enabled():
+        raise HTTPException(503, "summary not configured (MEDIA_AI_QWEN_URL unset)")
+    # Resolve the transcript (may run CPU transcription — no GPU yet).
+    segments, lang = await run_in_threadpool(_segments_from_request, req)
+
+    # GPU GATE (no-collision contract). Two layers, BOTH must pass:
+    #  1. Broker policy — defers on a leased FLUX render / gaming.
+    #  2. Physical VRAM headroom — catches GPU users the broker can't see
+    #     (a resident ComfyUI/FLUX model holding the card without a lease).
+    allowed, reason = await run_in_threadpool(broker.gpu_gate)
+    if allowed:
+        vram_ok, vram_reason = await run_in_threadpool(gpu.vram_gate)
+        if not vram_ok:
+            allowed, reason = False, vram_reason
+    if not allowed:
+        logger.info("summary deferred — %s", reason)
+        return {"ok": False, "deferred": True, "reason": reason,
+                "segment_count": len(segments), "language": lang}
+
+    logger.info("summarize segments=%d (%s)", len(segments), reason)
+    try:
+        out = await run_in_threadpool(summarize.summarize, segments, detected_language=lang)
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        # A model-load failure (llama-swap can't fit Qwen — usually a GPU the
+        # broker can't see) is a DEFERRAL, not a server error: nothing crashed,
+        # the load just couldn't proceed. Surface it as deferred so callers retry.
+        if "health check timed out" in msg or "loading model" in msg.lower():
+            logger.info("summary deferred — Qwen load failed (gpu busy): %s", msg)
+            return {"ok": False, "deferred": True,
+                    "reason": "qwen could not load (gpu busy / insufficient VRAM)",
+                    "detail": msg, "segment_count": len(segments), "language": lang}
+        logger.exception("summarize failed")
+        raise HTTPException(502, f"summary failed: {e}")
+    return {"ok": True, "gpu_gate": reason, "segment_count": len(segments), **out}
 
 
 @app.post("/transcribe")

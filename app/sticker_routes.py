@@ -26,6 +26,8 @@ import asyncio
 import json
 import logging
 import os
+import secrets
+import threading
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
@@ -41,6 +43,7 @@ from . import database as _db
 from . import sticker_processor as _sp
 from . import sticker_telegram as _st
 from . import sticker_jobs as _sj
+from . import flux_forge as _ff   # text→image (FLUX via host ComfyUI; degrade-dark)
 from .sticker_jobs import StickerBuildError
 from . import miniapp as _mini   # reuse _verify, _is_owner
 
@@ -1239,6 +1242,159 @@ async def upload_draft(request: Request,
         "height":      meta.get("height"),
         "bytes":       written,
     }
+
+
+# ── Text→image sticker (✨ Generate) ─────────────────────────────────────────
+# A prompt becomes a FLUX render (host ComfyUI, ~50 s) → an image draft the user
+# finishes in the existing editor (cutout / die-cut outline / make-static).
+#
+# OWNER-ONLY + degrade-dark. The 24 GB GPU is a scarce shared resource arbitrated
+# by the watchdog broker; we never expose anon/community GPU here (mirrors
+# Coinbox's "no anon GPU — ever"). The feature is hidden unless SMDL_COMFY_URL is
+# set (the OSS image has no GPU and stays dark).
+#
+# ASYNC by design: a synchronous ~50 s response dies on the CF tunnel / mobile
+# (~44 s 502, the exact failure Coinbox hit). So /from_prompt returns a gen_id
+# immediately and the client polls /api/sticker_forge/gen/{gen_id}. The render
+# is serialised by _forge_lock (one in-flight at a time → 429 if busy), and the
+# GPU broker lease keeps it from fighting Qwen / a game for the card.
+
+_forge_lock = threading.Lock()           # at most one in-flight render
+_forge_gens: dict[str, dict] = {}        # gen_id → {status, draft_id, error}
+_FORGE_GENS_MAX = 200                     # cap the in-memory map (drop oldest)
+
+
+class FromPromptBody(BaseModel):
+    prompt: str
+
+
+def _png_dimensions(png: bytes) -> tuple[int | None, int | None]:
+    """Read width/height from a PNG's IHDR (bytes 16..24). Best-effort — the
+    editor falls back to client-side decode, so a miss is harmless."""
+    try:
+        if png[:8] == b"\x89PNG\r\n\x1a\n" and png[12:16] == b"IHDR":
+            w = int.from_bytes(png[16:20], "big")
+            h = int.from_bytes(png[20:24], "big")
+            return w, h
+    except Exception:
+        pass
+    return None, None
+
+
+async def _mint_image_draft(user_id: int, png: bytes) -> int:
+    """Persist FLUX PNG bytes as a sticker draft, mirroring upload_draft: insert
+    the row, write the file into the canonical `<id>.png` slot, patch file_path."""
+    user_dir = DRAFTS_DIR / str(user_id)
+    user_dir.mkdir(parents=True, exist_ok=True)
+    w, h = _png_dimensions(png)
+    draft_id = await _db.sticker_draft_insert(
+        user_id=user_id,
+        telegram_file_id=_WEB_UPLOAD_SENTINEL,
+        file_path="",
+        mime_type="image/png",
+        duration_s=None,
+        width=w,
+        height=h,
+    )
+    final_path = draft_path(user_id, draft_id, ".png")
+    final_path.write_bytes(png)
+    import aiosqlite
+    async with aiosqlite.connect(_db.DB_PATH) as dbh:
+        await dbh.execute(
+            "UPDATE sticker_drafts SET file_path = ? WHERE id = ?",
+            (str(final_path), draft_id),
+        )
+        await dbh.commit()
+    return draft_id
+
+
+def _forge_set(gen_id: str, **fields) -> None:
+    _forge_gens[gen_id] = {**_forge_gens.get(gen_id, {}), **fields}
+    # Bound the map so a long-lived process doesn't leak gen entries.
+    if len(_forge_gens) > _FORGE_GENS_MAX:
+        for stale in list(_forge_gens.keys())[:-_FORGE_GENS_MAX]:
+            _forge_gens.pop(stale, None)
+
+
+async def _run_forge_gen(gen_id: str, user_id: int, prompt: str) -> None:
+    """Background render: broker-lease → FLUX → mint draft. Releases the lease +
+    the single-render lock regardless of outcome."""
+    loop = asyncio.get_running_loop()
+    seed = secrets.randbelow(2 ** 31)
+    leased = False
+    try:
+        leased = await loop.run_in_executor(None, _ff.broker_lease, "acquire")
+        if not leased:
+            _forge_set(gen_id, status="failed",
+                       error="GPU busy (held by another consumer) — try again shortly")
+            return
+        png = await loop.run_in_executor(None, _ff.generate, prompt, seed)
+        draft_id = await _mint_image_draft(user_id, png)
+        _forge_set(gen_id, status="done", draft_id=draft_id, error=None)
+        logger.info("forge gen %s OK u=%s d=%s bytes=%d", gen_id, user_id, draft_id, len(png))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("forge gen %s failed: %s", gen_id, e)
+        _forge_set(gen_id, status="failed", error=str(e)[:300])
+    finally:
+        if leased:
+            await loop.run_in_executor(None, _ff.broker_lease, "release")
+        if _forge_lock.locked():
+            _forge_lock.release()
+
+
+@router.get("/api/sticker_forge/status")
+async def forge_status(request: Request) -> dict:
+    """Whether the ✨ Generate feature is available to THIS caller. The frontend
+    hides the entry unless `enabled` is true (configured AND owner)."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    is_owner = _mini._is_owner(int(payload["user"]["id"]))
+    configured = _ff.enabled()
+    return {
+        "ok": True,
+        "configured": configured,
+        "owner": is_owner,
+        "enabled": configured and is_owner,
+        "max_prompt": _ff.FORGE_MAX_PROMPT,
+    }
+
+
+@router.post("/api/sticker_drafts/from_prompt")
+async def from_prompt(body: FromPromptBody, request: Request) -> dict:
+    """Kick off a text→image render and return a gen_id IMMEDIATELY (async — a
+    synchronous ~50 s reply dies on the CF tunnel). Owner-only, no anon GPU."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    _mini._require_owner(payload)          # 403 for non-owner — scarce GPU
+    if not _ff.enabled():
+        raise HTTPException(503, "image generation is not configured on this server")
+    user_id = int(payload["user"]["id"])
+    prompt = (body.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(400, "prompt required")
+    if len(prompt) > _ff.FORGE_MAX_PROMPT:
+        raise HTTPException(400, f"prompt too long (max {_ff.FORGE_MAX_PROMPT})")
+
+    # One render at a time — bounds GPU contention; the bg task releases the lock.
+    if not _forge_lock.acquire(blocking=False):
+        raise HTTPException(429, "a generation is already running — try again in a moment")
+    gen_id = uuid.uuid4().hex
+    _forge_set(gen_id, status="pending", draft_id=None, error=None)
+    asyncio.create_task(_run_forge_gen(gen_id, user_id, prompt))
+    return {"ok": True, "gen_id": gen_id, "status": "pending"}
+
+
+@router.get("/api/sticker_forge/gen/{gen_id}")
+async def forge_gen_status(gen_id: str, request: Request) -> dict:
+    """Poll a render. status ∈ {pending, done, failed}; on done, `draft_id` is
+    the new image draft to open in the editor."""
+    payload = await _mini._verify(request)
+    _mini.require_scope(payload, "smdl.stickers")
+    _mini._require_owner(payload)
+    g = _forge_gens.get(gen_id)
+    if g is None:
+        raise HTTPException(404, "gen not found")
+    return {"ok": True, "gen_id": gen_id, **g}
 
 
 # ── Lookup any sticker set + clone individual stickers ────────────────────

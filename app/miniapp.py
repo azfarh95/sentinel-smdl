@@ -4631,6 +4631,20 @@ button.warn { background: #ff9500; color: #fff; }
         <div id=stk-gif-status class=meta style="font-size:11px;margin-top:6px;color:var(--muted)"></div>
         <div class=meta style="font-size:10px;margin-top:4px;color:var(--muted)">Tap a GIF to turn it into a sticker. Powered by GIPHY &amp; Tenor.</div>
       </div>
+      <div id=stk-forge-card class=card style="display:none;margin-top:10px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <span style="font-weight:600">✨ Generate with AI</span>
+          <span style="flex:1"></span>
+          <span class=meta style="font-size:10px;color:var(--muted)">FLUX · ~1 min</span>
+        </div>
+        <textarea id=stk-forge-prompt rows=2 placeholder="Describe a sticker — e.g. a cute red panda mascot, thick white outline, vibrant"
+                  style="width:100%;box-sizing:border-box;padding:8px 11px;border-radius:9px;border:1px solid var(--separator);background:var(--surface);color:var(--fg);font-size:13px;resize:vertical"></textarea>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+          <button id=stk-forge-btn onclick="stkForgeGenerate()">✨ Generate</button>
+          <span id=stk-forge-status class=meta style="font-size:11px;color:var(--muted)"></span>
+        </div>
+        <div class=meta style="font-size:10px;margin-top:6px;color:var(--muted)">Makes an image draft you finish in the editor — cut out the background, add a die-cut outline, then make the sticker.</div>
+      </div>
       <h2 style="margin:16px 4px 8px;font-size:15px;color:var(--muted);font-weight:600">Drafts</h2>
       <div id=stickers-drafts>
         <div class=empty>Drop a video above, or send one to <b>@Sentinel_Media_bot</b>, to start a draft.</div>
@@ -6049,6 +6063,7 @@ function stkSection(sec) {
   try { localStorage.setItem('smdl_stk_section', sec); } catch (e) {}
   // Lazy-load trending GIFs the first time the Add section is opened.
   if (sec === 'add' && !_stkGifInit) { _stkGifInit = true; _stkGifSyncPills(); stkGifSearch(); }
+  if (sec === 'add') stkForgeInit();
 }
 
 // ── GIF library (Giphy / Tenor) → sticker ────────────────────────────────
@@ -6121,6 +6136,65 @@ async function stkGifImport(url, el) {
     if (st) st.textContent = '❌ ' + e;
   } finally {
     if (el) el.style.opacity = '';
+  }
+}
+
+// ── ✨ Generate (text→image FLUX sticker; owner-only, degrade-dark) ─────────
+// from_prompt is async (a ~1 min synchronous reply dies on the CF tunnel): it
+// returns a gen_id we poll until the image draft exists, then open the editor
+// so the user can cut out the background + add a die-cut outline before making.
+let _stkForgeInit = false;
+let _stkForgePoll = null;
+async function stkForgeInit() {
+  if (_stkForgeInit) return;
+  _stkForgeInit = true;
+  try {
+    const s = await api('/api/sticker_forge/status');
+    const card = document.getElementById('stk-forge-card');
+    if (card && s && s.enabled) card.style.display = '';   // owner + configured only
+  } catch (e) { /* feature stays hidden */ }
+}
+async function stkForgeGenerate() {
+  const promptEl = document.getElementById('stk-forge-prompt');
+  const btn = document.getElementById('stk-forge-btn');
+  const st  = document.getElementById('stk-forge-status');
+  const prompt = (promptEl && promptEl.value || '').trim();
+  if (!prompt) { if (st) st.textContent = 'Type a prompt first.'; return; }
+  if (btn) btn.disabled = true;
+  if (st) st.textContent = '🎨 Generating… (~1 min — keep this open)';
+  try {
+    const r = await api('/api/sticker_drafts/from_prompt', { method: 'POST', body: JSON.stringify({ prompt: prompt }) });
+    const genId = r && r.gen_id;
+    if (!genId) throw new Error('no gen id returned');
+    const t0 = Date.now();
+    clearInterval(_stkForgePoll);
+    _stkForgePoll = setInterval(async () => {
+      try {
+        const g = await api('/api/sticker_forge/gen/' + encodeURIComponent(genId));
+        if (g.status === 'done') {
+          clearInterval(_stkForgePoll);
+          if (btn) btn.disabled = false;
+          if (st) st.innerHTML = '✓ Image ready — see <b>Drafts</b> below, then tap <b>✨ Make sticker</b>.';
+          try { await loadStickers(); } catch (e) {}
+          const dEl = document.getElementById('stickers-drafts');
+          if (dEl && dEl.scrollIntoView) dEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } else if (g.status === 'failed') {
+          clearInterval(_stkForgePoll);
+          if (btn) btn.disabled = false;
+          if (st) st.textContent = '❌ ' + (g.error || 'generation failed');
+        } else {
+          const secs = Math.round((Date.now() - t0) / 1000);
+          if (st) st.textContent = '🎨 Generating… ' + secs + 's';
+        }
+      } catch (e) {
+        clearInterval(_stkForgePoll);
+        if (btn) btn.disabled = false;
+        if (st) st.textContent = '❌ ' + e;
+      }
+    }, 2500);
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    if (st) st.textContent = '❌ ' + e;
   }
 }
 
@@ -6433,6 +6507,7 @@ async function loadStickers() {
   }
   draftsEl.innerHTML = '';
   for (const d of drafts) {
+    const isImg = (d.mime_type || '').indexOf('image/') === 0;
     const div = document.createElement('div');
     div.className = 'card';
     div.style.cssText = 'display:flex;gap:10px;align-items:center;margin-bottom:8px;padding:10px;';
@@ -6442,24 +6517,73 @@ async function loadStickers() {
     const err = d.error
       ? '<div style="color:#f88;font-size:11px;margin-top:2px">' + esc(d.error) + '</div>'
       : '';
+    const thumbStyle = 'width:80px;height:80px;object-fit:cover;background:#000;border-radius:8px;flex:0 0 auto';
+    // Image drafts (e.g. ✨ Generate output) render in an <img>; a PNG dropped
+    // into a <video> shows up BLACK. Video drafts keep the <video> preview.
+    const thumbHtml = isImg
+      ? '<img class=stk-thumb data-draft-id="' + d.id + '" style="' + thumbStyle + '">'
+      : '<video class=stk-thumb data-draft-id="' + d.id + '" muted playsinline style="' + thumbStyle + '"></video>';
+    const typeLabel = isImg ? '🖼️ image' : _fmtStickerDur(d.duration_s);
     div.innerHTML =
-      '<video data-draft-id="' + d.id + '" muted playsinline ' +
-      'style="width:80px;height:80px;object-fit:cover;background:#000;border-radius:8px;flex:0 0 auto"></video>' +
+      thumbHtml +
       '<div style="flex:1;font-size:13px;min-width:0">' +
-      '<div>' + _fmtStickerDur(d.duration_s) + ' · ' + (d.width || '?') + '×' + (d.height || '?') + status + '</div>' +
+      '<div>' + typeLabel + ' · ' + (d.width || '?') + '×' + (d.height || '?') + status + '</div>' +
       '<div style="color:var(--muted);font-size:11px;margin-top:2px">' + esc(_fmtStickerExpires(d.expires_at)) + '</div>' +
       err +
-      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' +
-      '<button onclick="location.href=\\'/stickers/' + d.id + '/edit?kind=' + _stickersKind + '\\'" title="Scrubber · crop · shapes · cutout">✂️ Edit &amp; crop</button>' +
-      '<button class=sec onclick="stickersDeleteDraft(' + d.id + ')">Delete</button>' +
-      '</div></div>';
+      '<div class=stk-draft-actions style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div>' +
+      '</div>';
+    // Actions wired via addEventListener (no inline-onclick quote-escaping —
+    // see the non-raw-string gotcha that mangled \\' before).
+    const actions = div.querySelector('.stk-draft-actions');
+    const primary = document.createElement('button');
+    if (isImg) {
+      // Static image → make a die-cut sticker directly. The video editor is
+      // built for video sources (timeline/scrubber) and can't show a still.
+      // Static make already does background cutout → 512² webp → pack-add.
+      primary.textContent = '✨ Make sticker';
+      primary.title = 'Cut out the background → die-cut sticker, added to your pack';
+      primary.addEventListener('click', () => stkMakeImageSticker(d.id, primary));
+    } else {
+      primary.textContent = '✂️ Edit & crop';
+      primary.title = 'Scrubber · crop · shapes · cutout';
+      primary.addEventListener('click', () => {
+        location.href = '/stickers/' + d.id + '/edit?kind=' + encodeURIComponent(_stickersKind);
+      });
+    }
+    const delBtn = document.createElement('button');
+    delBtn.className = 'sec';
+    delBtn.textContent = 'Delete';
+    delBtn.addEventListener('click', () => stickersDeleteDraft(d.id));
+    actions.appendChild(primary);
+    actions.appendChild(delBtn);
     draftsEl.appendChild(div);
-    const videoEl = div.querySelector('video');
+    const mediaEl = div.querySelector('.stk-thumb');
     fetch('/api/sticker_drafts/' + d.id + '/preview', {
       headers: { 'X-Init-Data': initData },
     }).then(r => r.ok ? r.blob() : null)
-      .then(b => { if (b) videoEl.src = URL.createObjectURL(b); })
+      .then(b => { if (b && mediaEl) mediaEl.src = URL.createObjectURL(b); })
       .catch(() => {});
+  }
+}
+
+// Make a die-cut sticker straight from a generated/static image draft (no video
+// editor). Static + background cutout runs inline (cheap) and adds it to the
+// user's pack; reuses the default emoji from the Home tab.
+async function stkMakeImageSticker(draftId, btn) {
+  const emojiEl = document.getElementById('stickers-default-emoji');
+  const emoji = (emojiEl && emojiEl.value || '🎬').trim() || '🎬';
+  if (btn) { btn.disabled = true; btn.textContent = '✨ Making…'; }
+  try {
+    const r = await api('/api/sticker_drafts/' + draftId + '/make', {
+      method: 'POST',
+      body: JSON.stringify({ emoji: emoji, pack_kind: 'static', cutout: true }),
+    });
+    showOk('✓ Sticker added to your pack');
+    try { await loadStickers(); } catch (e) {}
+    try { stickersLoadPackContents(); } catch (e) {}
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Make sticker'; }
+    showErr('Make failed: ' + e);
   }
 }
 

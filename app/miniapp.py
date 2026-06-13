@@ -4507,6 +4507,16 @@ button.warn { background: #ff9500; color: #fff; }
     <div id=library-more style="text-align:center;margin-top:12px"></div>
   </div>
 
+  <div class=page id=page-ai-search>
+    <div class=page-header><h1>🗣️ AI Search</h1></div>
+    <div class=card style="margin-bottom:14px">
+      <input id=ai-q placeholder="Search what was said in your media…" autocomplete=off
+             style="width:100%;box-sizing:border-box;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px">
+      <div style="margin-top:8px;text-align:right"><button class=small id=ai-go>Search</button></div>
+    </div>
+    <div id=ai-results><div class=empty>Search the transcripts of your downloaded media. Index a download from its Library entry first.</div></div>
+  </div>
+
   <div class=page id=page-files>
     <div class=page-header>
       <h1>Files</h1>
@@ -5048,6 +5058,46 @@ function api(path, opts = {}) {
 function showOk(t) { const m = document.getElementById('msg'); m.className = 'msg ok'; m.textContent = t; setTimeout(()=>m.className='', 3500); }
 function showErr(t) { const m = document.getElementById('msg'); m.className = 'msg err'; m.textContent = String(t); setTimeout(()=>m.className='', 5500); }
 
+// ── AI Search (Phase 4 UI): semantic search over media-ai transcripts ─────────
+let _aiBound = false;
+function initAiSearch() {
+  if (_aiBound) return;
+  _aiBound = true;
+  const go = document.getElementById('ai-go');
+  const q = document.getElementById('ai-q');
+  if (go) go.addEventListener('click', doAiSearch);
+  if (q) q.addEventListener('keydown', e => { if (e.key === 'Enter') doAiSearch(); });
+}
+function _aiFmtTs(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  const m = Math.floor(s / 60), ss = s % 60;
+  return (m < 10 ? '0' : '') + m + ':' + (ss < 10 ? '0' : '') + ss;
+}
+function doAiSearch() {
+  const q = (document.getElementById('ai-q').value || '').trim();
+  const box = document.getElementById('ai-results');
+  if (q.length < 2) { box.innerHTML = '<div class=empty>Type at least 2 characters.</div>'; return; }
+  box.innerHTML = '<div class=empty><span class=spin></span> Searching…</div>';
+  api('/api/media-ai/search', { method: 'POST', body: JSON.stringify({ query: q, k: 15 }) })
+    .then(r => renderAiHits(r.hits || []))
+    .catch(e => { box.innerHTML = ''; showErr(e); });
+}
+function renderAiHits(hits) {
+  const box = document.getElementById('ai-results');
+  if (!hits.length) { box.innerHTML = '<div class=empty>No matches. Index a download first (Library → an item → Index for search).</div>'; return; }
+  box.innerHTML = hits.map(h => {
+    const name = (h.media_path || '').split('/').pop();
+    const pct = Math.round((h.score || 0) * 100);
+    return `<div class=card style="margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+        <span style="font-weight:600;font-size:13px;word-break:break-all">${esc(name)}</span>
+        <span style="color:var(--muted);font-size:12px;white-space:nowrap">${_aiFmtTs(h.start)} · ${pct}%</span>
+      </div>
+      <div style="margin-top:4px;font-size:13px;line-height:1.4">${esc(h.text || '')}</div>
+    </div>`;
+  }).join('');
+}
+
 // ── Entitlement preview ("view as") + paywall upgrade sheet ───────────────
 // The owner can simulate a community plan to watch the paywall gates fire on
 // their own box. The banner reads the cookie directly — it's not a secret; the
@@ -5156,6 +5206,7 @@ const _CLUSTERS = {
     ['search',    'Search',    '🔎', 'Find across everything'],
     ['scraper',   'Scraper',   '🕷️', 'Profile scrape jobs',      'owner'],
     ['library',   'Library',   '📚', 'Your downloaded media', 'owner'],
+    ['ai-search', 'AI Search', '🗣️', 'Search what was said', 'owner'],
     ['files',     'Files',     '📁', 'Browse the file store', 'owner'],
   ]},
   make:  { label: '🎨 Make', pages: [
@@ -5424,6 +5475,7 @@ function goto(page) {
   else if (page === 'search') { const si = document.getElementById('search-input'); if (si) si.focus(); }
   else if (page === 'notifications') loadNotifications();
   else if (page === 'library') loadLibrary(libKind);
+  else if (page === 'ai-search') initAiSearch();
   else if (page === 'watchlist') loadWatchlist();
   else if (page === 'files') loadFiles(filesCwd);
   else if (page === 'scraper') loadScraper();
@@ -9317,7 +9369,7 @@ initPreviewGestures();
 // tab via ?tab=<name>. Deep-links are how external entry points (the
 // bot's "Open sticker editor" button, a redirected /stickers URL, etc.)
 // route into the SPA without duplicating Mini App surfaces.
-const _bootTabs = new Set(['home','downloads','notifications','search','watchlist','library','stickers','streamer','files','scraper','settings','admin']);
+const _bootTabs = new Set(['home','downloads','notifications','search','watchlist','library','ai-search','stickers','streamer','files','scraper','settings','admin']);
 let _bootTab = 'home';
 let _bootImport = '';
 try {

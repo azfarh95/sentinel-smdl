@@ -2415,7 +2415,7 @@ _BROWSE_HTML = r"""<!doctype html>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {
-        navigator.serviceWorker.register('/sw.js').catch(function () {});
+        navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(function () {});
       });
     }
   </script>

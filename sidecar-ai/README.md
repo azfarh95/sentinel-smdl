@@ -58,3 +58,14 @@ Part of the suite compose (`metamcp-local`), `media` profile:
 docker compose --profile media build media-ai
 docker compose --profile media up -d media-ai
 ```
+
+## Tests
+
+Pure-logic + store round-trip tests (no GPU, no embedding model needed):
+
+```bash
+pip install pytest && pytest tests/ -q   # 14 tests: JSON extraction, transcript
+                                         # formatting, empty short-circuit, sqlite-vec
+                                         # round-trip, broker + VRAM gates
+```
+

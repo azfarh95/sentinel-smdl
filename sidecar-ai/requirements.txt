@@ -1,0 +1,10 @@
+# media-ai sidecar — transcription/summary/search service.
+# Heavy ML deps live HERE, never in the SMDL image (degrade-dark: the OSS SMDL
+# build has no AI dependency; this is a separate build context / image).
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+# CTranslate2 Whisper — CPU (int8) now; CUDA later. AMD/ROCm is NOT supported by
+# CTranslate2, so the "GPU when the broker says free" path uses whisper.cpp
+# (hipBLAS) via a separate engine, added in a later phase. Pinned to the version
+# de-risked on this host (10.4x realtime on CPU, base int8).
+faster-whisper==1.2.1

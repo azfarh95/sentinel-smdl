@@ -9799,6 +9799,12 @@ padding:8px 14px;font-size:13px;font-weight:600;text-decoration:none;width:auto;
   <p class=muted style="margin-top:8px">Get yours at real-debrid.com/apitoken. Powers premium download unlocking.</p>
 </div>
 
+<div class=card id=cookies-card style="display:none">
+  <p class=lbl>Cookies · downloader logins</p>
+  <p class=muted style="margin:0 0 10px">Refresh login cookies for sub-only / age-gated downloads. On your phone: open the site in <b>Kiwi</b> or <b>Firefox</b> with the "Get cookies.txt LOCALLY" extension, log in, export — then paste or upload below, or send the .txt to the bot.</p>
+  <div id=cookies-list><p class=muted>checking…</p></div>
+</div>
+
 <div class=card id=plan-card style="display:none">
   <p class=lbl>Plan</p>
   <p class=val><span class="badge owner" id=plan-badge>—</span></p>
@@ -9859,11 +9865,12 @@ function renderSession(s) {
     var pb = document.getElementById("plan-badge");
     if (pb) { pb.textContent = "Owner · full access"; pb.className = "badge owner"; }
     loadRdStatus();
+    loadCookies();
   }
 }
 
 function _showOwnerCards(show) {
-  ["connections-card", "keys-card", "plan-card"].forEach(function (id) {
+  ["connections-card", "keys-card", "cookies-card", "plan-card"].forEach(function (id) {
     var el = document.getElementById(id);
     if (el) el.style.display = show ? "" : "none";
   });
@@ -9967,6 +9974,103 @@ document.getElementById("btn-login").addEventListener("click", function () {
       .catch(function () { m.className = "msg err"; m.textContent = "Network error."; });
   });
 })();
+
+// ── Cookies · per-platform downloader logins (owner-only) ──────────────────
+function _cookieFresh(p) {
+  if (!p.present) return { cls: "none", label: "not set" };
+  if (p.expires_in_days == null) return { cls: "guest", label: "session cookies" };
+  var d = p.expires_in_days;
+  if (d <= 0) return { cls: "none", label: "expired" };
+  if (d <= 3) return { cls: "none", label: "expires in " + d + "d" };
+  return { cls: "owner", label: "fresh · " + d + "d left" };
+}
+
+function _cookieRow(p) {
+  var f = _cookieFresh(p);
+  var wrap = document.createElement("div");
+  wrap.className = "conn-row";
+  wrap.style.cssText = "flex-direction:column;align-items:stretch;gap:8px";
+
+  var head = document.createElement("div");
+  head.style.cssText = "display:flex;align-items:center;gap:8px";
+  var name = document.createElement("span");
+  name.className = "conn-name"; name.textContent = p.platform;
+  var badge = document.createElement("span");
+  badge.className = "badge " + f.cls; badge.textContent = f.label;
+  var spacer = document.createElement("span"); spacer.style.flex = "1";
+  var toggle = document.createElement("button");
+  toggle.className = "conn-btn"; toggle.textContent = "Update";
+  head.appendChild(name); head.appendChild(badge); head.appendChild(spacer); head.appendChild(toggle);
+
+  var ed = document.createElement("div");
+  ed.style.cssText = "display:none;flex-direction:column;gap:6px";
+  var ta = document.createElement("textarea");
+  ta.placeholder = "Paste cookies.txt for " + p.platform + "…";
+  ta.style.cssText = "width:100%;box-sizing:border-box;min-height:80px;font-size:12px;font-family:monospace";
+  var btnRow = document.createElement("div");
+  btnRow.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:wrap";
+  var saveBtn = document.createElement("button");
+  saveBtn.className = "primary"; saveBtn.textContent = "Save paste";
+  var fileLabel = document.createElement("label");
+  fileLabel.className = "conn-btn"; fileLabel.textContent = "⬆ Upload file"; fileLabel.style.cursor = "pointer";
+  var fileInput = document.createElement("input");
+  fileInput.type = "file"; fileInput.accept = ".txt,text/plain"; fileInput.style.display = "none";
+  fileLabel.appendChild(fileInput);
+  var msg = document.createElement("p"); msg.className = "msg"; msg.style.margin = "0";
+  btnRow.appendChild(saveBtn); btnRow.appendChild(fileLabel);
+  ed.appendChild(ta); ed.appendChild(btnRow); ed.appendChild(msg);
+
+  toggle.addEventListener("click", function () {
+    ed.style.display = (ed.style.display === "none") ? "flex" : "none";
+  });
+  function _done(res, m) {
+    if (res.ok && res.j && res.j.ok) {
+      m.className = "msg ok";
+      m.textContent = "✅ Saved (" + ((res.j.status && res.j.status.count) || "?") + " cookies).";
+      loadCookies();
+      return true;
+    }
+    m.className = "msg err"; m.textContent = (res.j && res.j.detail) || "Save failed.";
+    return false;
+  }
+  saveBtn.addEventListener("click", function () {
+    var t = ta.value.trim();
+    if (!t) { msg.className = "msg err"; msg.textContent = "Paste the cookies.txt first."; return; }
+    msg.className = "msg"; msg.textContent = "Saving…";
+    fetch("/api/cookies/" + encodeURIComponent(p.platform), {
+      method: "POST", headers: hdrs({ "Content-Type": "application/json" }),
+      credentials: "include", body: JSON.stringify({ text: t }),
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) { _done(res, msg); })
+      .catch(function () { msg.className = "msg err"; msg.textContent = "Network error."; });
+  });
+  fileInput.addEventListener("change", function () {
+    var fl = fileInput.files && fileInput.files[0];
+    if (!fl) return;
+    msg.className = "msg"; msg.textContent = "Uploading…";
+    var fd = new FormData(); fd.append("file", fl);
+    fetch("/api/cookies/" + encodeURIComponent(p.platform) + "/upload", {
+      method: "POST", headers: hdrs(), credentials: "include", body: fd,
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) { _done(res, msg); })
+      .catch(function () { msg.className = "msg err"; msg.textContent = "Network error."; });
+  });
+
+  wrap.appendChild(head); wrap.appendChild(ed);
+  return wrap;
+}
+
+function loadCookies() {
+  var list = document.getElementById("cookies-list");
+  if (!list) return;
+  fetch("/api/cookies/status", { headers: hdrs(), credentials: "include", cache: "no-store" })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      list.innerHTML = "";
+      (j.platforms || []).forEach(function (p) { list.appendChild(_cookieRow(p)); });
+    })
+    .catch(function () { list.innerHTML = '<p class="msg err">Could not load cookie status.</p>'; });
+}
 
 loadSession();
 </script>

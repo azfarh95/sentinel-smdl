@@ -1802,6 +1802,53 @@ async def build() -> Application:
     _app.add_handler(CommandHandler("stickers",    handle_stickers_cmd))
     _app.add_handler(CommandHandler("pack",        handle_pack_cmd))
     _app.add_handler(CommandHandler("delete_data", handle_delete_data_cmd))
+    # Owner-only: a cookies.txt document refreshes the downloader's per-platform
+    # login cookies (/cookies/<platform>.txt). Platform from the caption or the
+    # filename (e.g. "youtube_cookies.txt"). Registered before the media handler;
+    # a .txt never matches the sticker filters, but keep intent unambiguous.
+    async def handle_cookie_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        lang = get_lang(chat_id or 0)
+        if chat_id is None or not _is_owner(chat_id):
+            await msg.reply_text(t("owner_only", lang))
+            return
+        doc = getattr(msg, "document", None)
+        if doc is None:
+            return
+        from . import cookies_admin as _ck
+        hint = ((msg.caption or "") + " " + (doc.file_name or "")).strip()
+        platform = _ck.platform_from_hint(hint)
+        if platform is None:
+            await msg.reply_text(
+                "Which site are these cookies for? Re-send the .txt with a caption "
+                "naming one of:\n" + ", ".join(_ck.PLATFORMS))
+            return
+        if (doc.file_size or 0) > 2 * 1024 * 1024:
+            await msg.reply_text("⚠ That file is too large for a cookies.txt.")
+            return
+        try:
+            tg_file = await ctx.bot.get_file(doc.file_id)
+            data = bytes(await tg_file.download_as_bytearray())
+        except Exception as e:  # noqa: BLE001
+            await msg.reply_text(f"⚠ Couldn't fetch that file: {e}")
+            return
+        try:
+            st = _ck.save(platform, data.decode("utf-8", errors="replace"))
+        except ValueError as e:
+            await msg.reply_text(f"⚠ {e}")
+            return
+        exp = st.get("expires_in_days")
+        tail = f" · soonest expiry {exp}d" if exp is not None else ""
+        await msg.reply_text(
+            f"✅ Refreshed {platform} cookies — {st.get('count')} cookies{tail}.")
+
+    _app.add_handler(MessageHandler(
+        (filters.Document.FileExtension("txt") | filters.Document.MimeType("text/plain"))
+        & filters.ChatType.PRIVATE,
+        handle_cookie_document,
+    ))
+
     # Incoming Telegram stickers → clone into the user's pack. Registered
     # BEFORE the media handler (a sticker never matches the media filters, but
     # keep it first so intent is unambiguous).

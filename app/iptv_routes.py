@@ -4532,6 +4532,16 @@ _PLAY_HTML = r"""<!doctype html>
       background:rgba(0,0,0,.55); color:#fff; font-size:19px; line-height:1;
       cursor:pointer; -webkit-tap-highlight-color:transparent;
     }
+    /* Custom in-frame fullscreen control — the native <video> one calls the
+       broken Fullscreen API. Top-right to clear the bottom native control bar;
+       shown only while a player is up, hidden in pseudo-fullscreen (✕ exits). */
+    #fs-corner {
+      position:absolute; top:8px; right:8px; z-index:30;
+      width:34px; height:34px; border-radius:8px; border:0;
+      background:rgba(0,0,0,.5); color:#fff; font-size:15px; line-height:1;
+      cursor:pointer; display:none; -webkit-tap-highlight-color:transparent;
+    }
+    #player-stage:not(.idle):not(.msg):not(.fs) #fs-corner { display:block; }
     /* Compact action bar — primary Play is prominent; the rest are small
        wrapping ghost chips so the controls don't dominate the page. */
     .actions { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin-bottom:6px; }
@@ -4647,7 +4657,8 @@ _PLAY_HTML = r"""<!doctype html>
 
 <div class="wrap">
   <div id="player-stage" class="idle">
-    <video id="inline-video" controls playsinline></video>
+    <video id="inline-video" controls controlsList="nofullscreen" playsinline></video>
+    <button id="fs-corner" type="button" aria-label="Fullscreen" title="Fullscreen">⛶</button>
   </div>
 
   <div class="channel-h" id="header">
@@ -5540,6 +5551,12 @@ document.getElementById('fullscreen-btn')?.addEventListener('click', () => {
   if (!stage || stage.classList.contains('idle')) {
     return toast('Start playback first', 1800);
   }
+  toggleFullscreen();
+});
+
+// In-frame fullscreen control (replaces the native one, which can't be hooked).
+document.getElementById('fs-corner')?.addEventListener('click', (e) => {
+  e.stopPropagation();
   toggleFullscreen();
 });
 

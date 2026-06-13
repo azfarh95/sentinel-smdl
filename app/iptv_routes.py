@@ -4518,6 +4518,20 @@ _PLAY_HTML = r"""<!doctype html>
       aspect-ratio:auto; background:transparent; overflow:visible;
     }
     #player-stage.msg > #off-air-msg { margin:0 !important; }
+    /* Pseudo-fullscreen — the HTML5 Fullscreen API no-ops in Telegram's
+       WebView, so fill the viewport via fixed positioning instead. A floating
+       ✕ exits; the Telegram SDK fullscreen (Bot API 8.0+) hides TG chrome. */
+    #player-stage.fs {
+      position:fixed; inset:0; z-index:99999; width:100vw; height:100vh;
+      aspect-ratio:auto; border-radius:0; margin:0;
+    }
+    #player-stage.fs > video { object-fit:contain; background:#000; }
+    #fs-exit {
+      position:absolute; top:max(10px,env(safe-area-inset-top)); right:12px;
+      z-index:100000; width:40px; height:40px; border-radius:50%; border:0;
+      background:rgba(0,0,0,.55); color:#fff; font-size:19px; line-height:1;
+      cursor:pointer; -webkit-tap-highlight-color:transparent;
+    }
     /* Compact action bar — primary Play is prominent; the rest are small
        wrapping ghost chips so the controls don't dominate the page. */
     .actions { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin-bottom:6px; }
@@ -5176,6 +5190,47 @@ function armFullscreenOnGesture() {
   stage.addEventListener('pointerdown', handler, { once: true });
 }
 
+// Reliable fullscreen for the Telegram WebView: native requestFullscreen()
+// no-ops there, so toggle a CSS pseudo-fullscreen (fixed, fills the viewport).
+// Also ask the Telegram SDK to fullscreen the Mini App (hides TG chrome,
+// Bot API 8.0+) and try native fullscreen for desktop/iOS-video, both
+// best-effort. A floating ✕ + the TG BackButton exit.
+function _tgWebApp() { try { return window.Telegram && window.Telegram.WebApp; } catch (_) { return null; } }
+function enterFullscreen() {
+  const stage = document.getElementById('player-stage');
+  if (!stage || stage.classList.contains('idle')) return;
+  stage.classList.add('fs');
+  const tg = _tgWebApp();
+  try { if (tg && tg.requestFullscreen) tg.requestFullscreen(); } catch (_) {}
+  const target = document.getElementById('inline-frame') || document.getElementById('inline-video') || stage;
+  const fs = target && (target.requestFullscreen || target.webkitRequestFullscreen || target.webkitEnterFullscreen);
+  try { const p = fs && fs.call(target); if (p && p.then) p.catch(() => {}); } catch (_) {}
+  try { if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {}); } catch (_) {}
+  if (!document.getElementById('fs-exit')) {
+    const x = document.createElement('button');
+    x.id = 'fs-exit'; x.type = 'button'; x.textContent = '✕';
+    x.setAttribute('aria-label', 'Exit fullscreen');
+    x.addEventListener('click', (e) => { e.stopPropagation(); exitFullscreen(); });
+    stage.appendChild(x);
+  }
+  try { if (tg && tg.BackButton) { tg.BackButton.show(); tg.BackButton.onClick(exitFullscreen); } } catch (_) {}
+}
+function exitFullscreen() {
+  const stage = document.getElementById('player-stage');
+  if (stage) stage.classList.remove('fs');
+  const tg = _tgWebApp();
+  try { if (tg && tg.exitFullscreen) tg.exitFullscreen(); } catch (_) {}
+  try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen(); } catch (_) {}
+  try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (_) {}
+  const x = document.getElementById('fs-exit'); if (x) x.remove();
+  try { if (tg && tg.BackButton) { tg.BackButton.offClick(exitFullscreen); tg.BackButton.hide(); } } catch (_) {}
+}
+function toggleFullscreen() {
+  const stage = document.getElementById('player-stage');
+  if (stage && stage.classList.contains('fs')) exitFullscreen();
+  else enterFullscreen();
+}
+
 // Some youtube-live channels (RTM, BERNAMA, …) cycle their live feed on
 // and off air. When the pre-flight says the channel isn't broadcasting,
 // show a clear message in the player area instead of a broken player.
@@ -5485,7 +5540,7 @@ document.getElementById('fullscreen-btn')?.addEventListener('click', () => {
   if (!stage || stage.classList.contains('idle')) {
     return toast('Start playback first', 1800);
   }
-  goFullscreenLandscape();
+  toggleFullscreen();
 });
 
 document.getElementById('pip-btn')?.addEventListener('click', async () => {

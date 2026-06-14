@@ -87,9 +87,52 @@ async def media_ai_summarize(body: SummarizeBody, request: Request) -> dict:
     if not (body.path or body.transcript):
         raise HTTPException(status_code=400, detail="provide path or transcript")
     try:
-        return await asyncio.to_thread(media_ai.summarize, path=body.path, transcript=body.transcript)
+        res = await asyncio.to_thread(media_ai.summarize, path=body.path, transcript=body.transcript)
     except media_ai.MediaAIError as e:
         raise HTTPException(status_code=502, detail=str(e))
+    # Enrich with a signed play_url so summary chapters can jump-to-play.
+    if body.path and isinstance(res, dict):
+        _add_play_url(res, body.path)
+    return res
+
+
+def _add_play_url(obj: dict, media_path: str) -> None:
+    import os
+    try:
+        from .file_serve import sign_share_url
+        url = sign_share_url(media_path.replace("\\", "/"))
+        if url:
+            obj["play_url"] = url
+    except Exception:  # noqa: BLE001
+        pass
+    obj["name"] = os.path.basename(media_path.replace("\\", "/"))
+
+
+class StatusPathsBody(BaseModel):
+    paths: list[str] = Field(default_factory=list)
+
+
+@router.post("/api/media-ai/status-batch")
+async def media_ai_status_batch(body: StatusPathsBody, request: Request) -> dict:
+    await _owner(request)
+    _require_enabled()
+    try:
+        return await asyncio.to_thread(media_ai.status_paths, body.paths)
+    except media_ai.MediaAIError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/media-ai/transcript")
+async def media_ai_transcript(request: Request, path: str) -> dict:
+    await _owner(request)
+    _require_enabled()
+    try:
+        res = await asyncio.to_thread(media_ai.transcript, path)
+    except media_ai.MediaAIError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if isinstance(res, dict):
+        _add_play_url(res, path)
+    return res
 
 
 @router.post("/api/media-ai/search")

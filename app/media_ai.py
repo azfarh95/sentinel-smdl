@@ -91,3 +91,12 @@ def index(path: str, model: str | None = None) -> dict:
 
 def search(query: str, k: int = 10, path: str | None = None) -> dict:
     return _post("/search", {"query": query, "k": k, "path": path}, TIMEOUT_FAST)
+
+
+def status_paths(paths: list) -> dict:
+    return _post("/status", {"paths": paths}, TIMEOUT_FAST)
+
+
+def transcript(path: str) -> dict:
+    import urllib.parse
+    return _get("/transcript?path=" + urllib.parse.quote(path), TIMEOUT_TRANSCRIBE)

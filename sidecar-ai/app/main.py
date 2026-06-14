@@ -20,7 +20,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import broker, config, embed, engine, gpu, store, summarize
+import asyncio
+
+from . import autoindex, broker, config, embed, engine, gpu, store, summarize, translate
 from .engine import Segment
 
 logging.basicConfig(level=logging.INFO,
@@ -52,11 +54,72 @@ def _resolve_media_path(rel_or_abs: str) -> str:
     return real
 
 
+def _transcribe_cached(real: str, key: str, model_size: str,
+                       language: str | None, fresh: bool = False) -> dict:
+    """Transcript for `real`, served from cache when the file is unchanged
+    (mtime+size). `key` is the cache key = the caller's relative path (the same
+    value used as media_path for index/search/status). BLOCKING (CPU)."""
+    st = os.stat(real)
+    mtime, size = st.st_mtime, st.st_size
+    if not fresh:
+        cached = store.get_transcript(key, mtime, size)
+        if cached:
+            return cached
+    eng = engine.resolve("auto")
+    result = eng.transcribe(real, model_size=model_size, language=language)
+
+    # Non-English → translate to English so it's searchable by an English query
+    # (the embed model is English-only) and readable by the owner. Original text
+    # kept per-segment as text_orig. Fail-soft: on no-op/failure we keep originals.
+    seg_dicts = [s.__dict__ for s in result.segments]
+    text_parts = [s.text for s in result.segments]
+    translated_from = None
+    if result.language and result.language != "en" and translate.enabled() and result.segments:
+        en_texts = translate.to_english(text_parts, result.language)
+        if en_texts != text_parts:
+            translated_from = result.language
+            seg_dicts = [{"start": s.start, "end": s.end, "text": en, "text_orig": s.text}
+                         for s, en in zip(result.segments, en_texts)]
+            text_parts = en_texts
+
+    out = {
+        "language": result.language,
+        "translated_from": translated_from,
+        "language_probability": result.language_probability,
+        "duration": result.duration,
+        "text": " ".join(text_parts).strip(),
+        "segments": seg_dicts,
+        "transcribe_seconds": result.transcribe_seconds,
+        "realtime_factor": result.realtime_factor,
+        "engine": result.engine, "model": result.model,
+        "cached": False,
+    }
+    store.put_transcript(key, mtime, size, out)
+    return out
+
+
+def _do_index(real: str, key: str, model_size: str, language: str | None) -> dict:
+    """Transcribe (cached) → embed → store. Shared by /index and the autoindex
+    sweep. BLOCKING (CPU)."""
+    tx = _transcribe_cached(real, key, model_size, language)
+    segs = tx.get("segments", [])
+    lang = tx.get("language")
+    if not segs:
+        store.index_segments(key, [], [], lang)
+        return {"indexed": 0, "language": lang, "empty": True, "cached": tx.get("cached")}
+    seg_objs = [Segment(s["start"], s["end"], s["text"]) for s in segs]
+    vectors = embed.embed_passages([s["text"] for s in segs])
+    n = store.index_segments(key, seg_objs, vectors, lang)
+    return {"indexed": n, "language": lang, "duration": tx.get("duration"),
+            "cached": tx.get("cached")}
+
+
 class TranscribeRequest(BaseModel):
     path: str = Field(..., description="file path relative to (or under) the downloads root")
     model: str | None = Field(None, description="whisper model size; default from env")
     language: str | None = Field(None, description="force language (e.g. 'en'); default = auto-detect")
     engine: str = Field("auto", description="auto|cpu|gpu (gpu reserved; falls back to cpu)")
+    fresh: bool = Field(False, description="bypass the cache and re-transcribe")
 
 
 @app.get("/healthz")
@@ -106,10 +169,9 @@ def _segments_from_request(req: "SummarizeRequest") -> tuple[list[Segment], str 
         return ([Segment(0.0, 0.0, req.transcript.strip())], req.language)
     if req.path:
         real = _resolve_media_path(req.path)
-        eng = engine.resolve("auto")
-        result = eng.transcribe(real, model_size=(req.model or config.MODEL).strip(),
-                                language=req.language)
-        return result.segments, result.language
+        tx = _transcribe_cached(real, req.path, (req.model or config.MODEL).strip(), req.language)
+        segs = [Segment(s["start"], s["end"], s["text"]) for s in tx["segments"]]
+        return segs, tx["language"]
     raise HTTPException(400, "provide one of: segments, transcript, or path")
 
 
@@ -117,7 +179,18 @@ def _segments_from_request(req: "SummarizeRequest") -> tuple[list[Segment], str 
 async def summarize_endpoint(req: SummarizeRequest):
     if not summarize.enabled():
         raise HTTPException(503, "summary not configured (MEDIA_AI_QWEN_URL unset)")
-    # Resolve the transcript (may run CPU transcription — no GPU yet).
+
+    # Summary cache (path-based only): a stored summary skips the GPU entirely.
+    cache_key = mtime = size = None
+    if req.path and not req.transcript and not req.segments:
+        real = _resolve_media_path(req.path)
+        st = os.stat(real)
+        cache_key, mtime, size = req.path, st.st_mtime, st.st_size
+        cached = await run_in_threadpool(store.get_summary, cache_key, mtime, size)
+        if cached:
+            return {"ok": True, "cached": True, **cached}
+
+    # Resolve the transcript (cached CPU transcription — no GPU yet).
     segments, lang = await run_in_threadpool(_segments_from_request, req)
 
     # GPU GATE (no-collision contract). Two layers, BOTH must pass:
@@ -149,6 +222,8 @@ async def summarize_endpoint(req: SummarizeRequest):
                     "detail": msg, "segment_count": len(segments), "language": lang}
         logger.exception("summarize failed")
         raise HTTPException(502, f"summary failed: {e}")
+    if cache_key and not out.get("empty"):
+        await run_in_threadpool(store.put_summary, cache_key, mtime, size, out)
     return {"ok": True, "gpu_gate": reason, "segment_count": len(segments), **out}
 
 
@@ -156,29 +231,38 @@ async def summarize_endpoint(req: SummarizeRequest):
 async def transcribe(req: TranscribeRequest):
     real = _resolve_media_path(req.path)
     model_size = (req.model or config.MODEL).strip()
-    eng = engine.resolve(req.engine)
-    logger.info("transcribe path=%s model=%s engine=%s", req.path, model_size, eng.name)
+    logger.info("transcribe path=%s model=%s fresh=%s", req.path, model_size, req.fresh)
     try:
-        result = await run_in_threadpool(
-            eng.transcribe, real, model_size=model_size, language=req.language
-        )
+        out = await run_in_threadpool(_transcribe_cached, real, req.path,
+                                      model_size, req.language, req.fresh)
     except Exception as e:  # noqa: BLE001
         logger.exception("transcribe failed")
         raise HTTPException(500, f"transcription failed: {e}")
-    return {
-        "ok": True,
-        "path": req.path,
-        "engine": result.engine,
-        "model": result.model,
-        "language": result.language,
-        "language_probability": result.language_probability,
-        "duration": result.duration,
-        "transcribe_seconds": result.transcribe_seconds,
-        "realtime_factor": result.realtime_factor,
-        "segment_count": len(result.segments),
-        "text": result.text,
-        "segments": [s.__dict__ for s in result.segments],
-    }
+    return {"ok": True, "path": req.path, "segment_count": len(out.get("segments", [])), **out}
+
+
+@app.get("/transcript")
+async def transcript_endpoint(path: str, fresh: bool = False):
+    """Full transcript for a media path (cached; transcribes on a miss). Powers the
+    transcript viewer."""
+    real = _resolve_media_path(path)
+    try:
+        out = await run_in_threadpool(_transcribe_cached, real, path, config.MODEL, None, fresh)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("transcript failed")
+        raise HTTPException(500, f"transcript failed: {e}")
+    return {"ok": True, "path": path, "segment_count": len(out.get("segments", [])), **out}
+
+
+class StatusRequest(BaseModel):
+    paths: list[str] = Field(default_factory=list, description="media paths to report status for")
+
+
+@app.post("/status")
+async def status_endpoint(req: StatusRequest):
+    """Per-path indexed/transcribed/summarized flags for UI badges."""
+    out = await run_in_threadpool(store.media_status, req.paths)
+    return {"ok": True, "status": out}
 
 
 class IndexRequest(BaseModel):
@@ -199,20 +283,9 @@ async def index_endpoint(req: IndexRequest):
     run across the library while FLUX/Qwen/a game hold the card."""
     real = _resolve_media_path(req.path)
 
-    def _run() -> dict:
-        eng = engine.resolve("auto")
-        result = eng.transcribe(real, model_size=(req.model or config.MODEL).strip(),
-                                language=req.language)
-        if not result.segments:
-            store.index_segments(req.path, [], [], result.language)
-            return {"indexed": 0, "language": result.language, "empty": True}
-        vectors = embed.embed_passages([s.text for s in result.segments])
-        n = store.index_segments(req.path, result.segments, vectors, result.language)
-        return {"indexed": n, "language": result.language,
-                "duration": result.duration, "realtime_factor": result.realtime_factor}
-
     try:
-        out = await run_in_threadpool(_run)
+        out = await run_in_threadpool(_do_index, real, req.path,
+                                      (req.model or config.MODEL).strip(), req.language)
     except Exception as e:  # noqa: BLE001
         logger.exception("index failed")
         raise HTTPException(500, f"index failed: {e}")
@@ -235,6 +308,12 @@ async def search_endpoint(req: SearchRequest):
     return {"ok": True, "query": req.query, "count": len(hits), "hits": hits}
 
 
+async def _autoindex_one(rel: str) -> dict:
+    """Index a single relative path (used by the autoindex sweep)."""
+    real = _resolve_media_path(rel)
+    return await run_in_threadpool(_do_index, real, rel, config.MODEL, None)
+
+
 @app.on_event("startup")
 async def _startup():
     # Initialise the search store (idempotent).
@@ -242,6 +321,8 @@ async def _startup():
         store.init()
     except Exception as e:  # noqa: BLE001
         logger.warning("store init skipped: %s", e)
+    # Background auto-index sweep (no-op unless MEDIA_AI_AUTOINDEX=true).
+    asyncio.create_task(autoindex.run_loop(_autoindex_one))
     # Preload the default model so the first /transcribe isn't penalised by the
     # ~1-2 s model load. Best-effort: a download hiccup must not crash the boot.
     try:

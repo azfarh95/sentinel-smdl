@@ -4277,8 +4277,10 @@ button.warn { background: #ff9500; color: #fff; }
            background: rgba(0,0,0,.55); color: #fff; width: 30px; height: 30px;
            border-radius: 50%; font-size: 13px; line-height: 30px; padding: 0; }
 .lib-sum:active { background: rgba(0,0,0,.85); }
+.lib-sum.done { background: rgba(90,210,122,.9); }
 .ai-hit { cursor: pointer; }
 .ai-hit:active { background: var(--bg); }
+mark { background: rgba(90,210,122,.35); color: inherit; border-radius: 3px; padding: 0 1px; }
 .lib-ai.busy { opacity: .6; }
 .lib-ai.done { background: rgba(90,210,122,.9); }
 .lib-body { padding: 8px 10px; }
@@ -4512,6 +4514,7 @@ button.warn { background: #ff9500; color: #fff; }
   <div class=page id=page-library>
     <div class=page-header>
       <h1>Library</h1>
+      <button class="small sec" onclick="indexAllVisible()" title="Index visible video/audio for AI search">🔎 Index all</button>
       <button class="small sec" onclick="loadLibrary(libKind, true)" title="Rescan">🔄</button>
     </div>
     <div class=lib-tabs id=lib-tabs></div>
@@ -4526,6 +4529,7 @@ button.warn { background: #ff9500; color: #fff; }
              style="width:100%;box-sizing:border-box;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px">
       <div style="margin-top:8px;text-align:right"><button class=small id=ai-go>Search</button></div>
     </div>
+    <div id=ai-stats class=meta style="font-size:12px;margin:-4px 2px 10px;color:var(--muted)"></div>
     <div id=ai-results><div class=empty>Search the transcripts of your downloaded media. Index a download from its Library entry first.</div></div>
   </div>
 
@@ -5094,16 +5098,41 @@ function initAiSearch() {
     if (!hit || !hit.dataset.u) return;
     openPreview(hit.dataset.u, hit.dataset.n, parseInt(hit.dataset.t || '0', 10));
   });
+  refreshAiStats();
+}
+function refreshAiStats() {
+  const el = document.getElementById('ai-stats');
+  if (!el) return;
+  api('/api/media-ai/status').then(r => {
+    const ix = (r && r.index) || {};
+    if (ix.media == null) { el.textContent = ''; return; }
+    el.textContent = ix.media + ' file' + (ix.media === 1 ? '' : 's') + ' · ' +
+      ix.segments + ' segments indexed' +
+      (ix.summarized ? ' · ' + ix.summarized + ' summarised' : '');
+  }).catch(() => { el.textContent = ''; });
 }
 function _aiFmtTs(s) {
   s = Math.max(0, Math.floor(s || 0));
   const m = Math.floor(s / 60), ss = s % 60;
   return (m < 10 ? '0' : '') + m + ':' + (ss < 10 ? '0' : '') + ss;
 }
+// Highlight query terms in transcript text. Backslash-free (no regex) so it can't
+// hit the non-raw-string mangling gotcha; word-level substring match.
+function _hl(text, q) {
+  const terms = (q || '').toLowerCase().split(' ').filter(t => t.length >= 2);
+  const t = String(text || '');
+  if (!terms.length) return esc(t);
+  return t.split(' ').map(w => {
+    const bare = w.toLowerCase();
+    return terms.some(term => bare.indexOf(term) >= 0) ? '<mark>' + esc(w) + '</mark>' : esc(w);
+  }).join(' ');
+}
+let _aiLastQuery = '';
 function doAiSearch() {
   const q = (document.getElementById('ai-q').value || '').trim();
   const box = document.getElementById('ai-results');
   if (q.length < 2) { box.innerHTML = '<div class=empty>Type at least 2 characters.</div>'; return; }
+  _aiLastQuery = q;
   box.innerHTML = '<div class=empty><span class=spin></span> Searching…</div>';
   api('/api/media-ai/search', { method: 'POST', body: JSON.stringify({ query: q, k: 15 }) })
     .then(r => renderAiHits(r.hits || []))
@@ -5112,7 +5141,9 @@ function doAiSearch() {
 function renderAiHits(hits) {
   const box = document.getElementById('ai-results');
   if (!hits.length) { box.innerHTML = '<div class=empty>No matches. Index a download first (Library → tap 🔎 on an item).</div>'; return; }
-  box.innerHTML = hits.map(h => {
+  const head = '<div class=meta style="font-size:12px;color:var(--muted);margin:0 2px 8px">' +
+    hits.length + ' result' + (hits.length === 1 ? '' : 's') + '</div>';
+  box.innerHTML = head + hits.map(h => {
     const name = h.name || (h.media_path || '').split('/').pop();
     const pct = Math.round((h.score || 0) * 100);
     const playable = !!h.play_url;
@@ -5125,7 +5156,7 @@ function renderAiHits(hits) {
         <span style="font-weight:600;font-size:13px;word-break:break-all">${esc(name)}</span>
         <span style="color:var(--muted);font-size:12px;white-space:nowrap">${playable ? '▶ ' : ''}${_aiFmtTs(h.start)} · ${pct}%</span>
       </div>
-      <div style="margin-top:4px;font-size:13px;line-height:1.4">${esc(h.text || '')}</div>` +
+      <div style="margin-top:4px;font-size:13px;line-height:1.4">${_hl(h.text, _aiLastQuery)}</div>` +
     '</div>';
   }).join('');
 }
@@ -5147,28 +5178,99 @@ function bindLibAi() {
       aiSummarize(decodeURIComponent(sm.dataset.p || ''), decodeURIComponent(sm.dataset.n || '')); return; }
   }, true);
 }
-function aiIndexPath(path, btn) {
-  if (!path) return;
-  if (btn && btn.classList.contains('busy')) return;
+function aiIndexPath(path, btn, quiet) {
+  if (!path) return Promise.resolve();
+  if (btn && btn.classList.contains('busy')) return Promise.resolve();
   if (btn) { btn.classList.add('busy'); btn.textContent = '⏳'; }
-  api('/api/media-ai/index', { method: 'POST', body: JSON.stringify({ path: path }) })
+  return api('/api/media-ai/index', { method: 'POST', body: JSON.stringify({ path: path }) })
     .then(r => {
       if (btn) { btn.classList.remove('busy'); btn.classList.add('done'); btn.textContent = '✓'; }
       const n = r.indexed || 0;
-      showOk(r.empty ? 'No speech found to index' : ('Indexed ' + n + ' segment' + (n === 1 ? '' : 's') + ' — now searchable'));
+      if (!quiet) showOk(r.empty ? 'No speech found to index' : ('Indexed ' + n + ' segment' + (n === 1 ? '' : 's') + ' — now searchable'));
+      return r;
     })
     .catch(e => {
       if (btn) { btn.classList.remove('busy'); btn.textContent = '🔎'; }
-      showErr(e);
+      if (!quiet) showErr(e);
+      throw e;
     });
+}
+
+// Mark Library cards that are already indexed/summarised (badge refresh after a
+// page render). Best-effort; a failure just leaves the buttons in their default
+// state.
+function refreshLibAiBadges() {
+  const grid = document.getElementById('library-grid');
+  if (!grid) return;
+  const btns = Array.from(grid.querySelectorAll('.lib-ai'));
+  const paths = btns.map(b => decodeURIComponent(b.dataset.p || '')).filter(Boolean);
+  if (!paths.length) return;
+  api('/api/media-ai/status-batch', { method: 'POST', body: JSON.stringify({ paths: paths }) })
+    .then(r => {
+      const st = (r && r.status) || {};
+      grid.querySelectorAll('.lib-ai').forEach(b => {
+        const s = st[decodeURIComponent(b.dataset.p || '')];
+        if (s && s.indexed) { b.classList.add('done'); b.textContent = '✓';
+          b.title = 'Indexed (' + s.segments + ' segments) — tap to re-index'; }
+      });
+      grid.querySelectorAll('.lib-sum').forEach(b => {
+        const s = st[decodeURIComponent(b.dataset.p || '')];
+        if (s && s.summarized) { b.classList.add('done'); b.title = 'Summary ready'; }
+      });
+    }).catch(() => {});
+}
+
+// Index every not-yet-indexed video/audio card currently on screen, sequentially
+// (CPU; keeps load bounded). Skips items already marked done.
+async function indexAllVisible() {
+  const grid = document.getElementById('library-grid');
+  if (!grid) return;
+  const btns = Array.from(grid.querySelectorAll('.lib-ai:not(.done)'));
+  if (!btns.length) { showOk('Nothing new to index on screen'); return; }
+  showOk('Indexing ' + btns.length + ' item(s) for search…');
+  let ok = 0;
+  for (const b of btns) {
+    const p = decodeURIComponent(b.dataset.p || '');
+    if (!p) continue;
+    try { await aiIndexPath(p, b, true); ok++; } catch (e) {}
+  }
+  showOk('Indexed ' + ok + ' / ' + btns.length + ' — try AI Search');
 }
 
 // Per-item AI summary + chapters (Qwen, GPU-gated). Synchronous with clear
 // messaging: a cold model load can take a few minutes; warm is seconds; if the
 // GPU is busy the sidecar returns {deferred:true} and we say so.
+let _aiCtx = {};       // { path, name, play_url } for the open summary/transcript modal
+let _aiSumBound = false;
 function closeAiSum() { const m = document.getElementById('ai-sum-modal'); if (m) m.style.display = 'none'; }
+function _parseTs(s) {
+  if (typeof s === 'number') return Math.floor(s);
+  let sec = 0;
+  for (const p of String(s || '0').split(':')) sec = sec * 60 + (parseInt(p, 10) || 0);
+  return sec;
+}
+// Delegated clicks inside the modal body: a chapter/transcript line jumps to play;
+// the "Full transcript" button swaps the body to the transcript. Bound once (the
+// body element persists; only its innerHTML changes).
+function bindAiSum() {
+  if (_aiSumBound) return;
+  const b = document.getElementById('ai-sum-body');
+  if (!b) return;
+  _aiSumBound = true;
+  b.addEventListener('click', function(e) {
+    if (e.target.closest('#ai-view-tx')) { aiViewTranscript(_aiCtx.path, _aiCtx.name); return; }
+    const ch = e.target.closest('.ai-chap');
+    if (ch && _aiCtx.play_url) {
+      closeAiSum();
+      openPreview(encodeURIComponent(_aiCtx.play_url), encodeURIComponent(_aiCtx.name || ''),
+                  parseInt(ch.dataset.t || '0', 10));
+    }
+  });
+}
 function aiSummarize(path, name) {
   if (!path) return;
+  _aiCtx = { path: path, name: name, play_url: '' };
+  bindAiSum();
   const m = document.getElementById('ai-sum-modal');
   const t = document.getElementById('ai-sum-title');
   const b = document.getElementById('ai-sum-body');
@@ -5178,28 +5280,70 @@ function aiSummarize(path, name) {
   api('/api/media-ai/summarize', { method: 'POST', body: JSON.stringify({ path: path }) })
     .then(r => {
       if (!b) return;
-      if (r && r.deferred) {
-        b.innerHTML = '<div class=empty>⏳ GPU is busy right now — ' + esc(r.reason || 'try again shortly') + '.</div>';
+      r = r || {};
+      _aiCtx.play_url = r.play_url || '';
+      if (r.deferred) {
+        b.innerHTML = '<div class=empty>⏳ GPU is busy right now — ' + esc(r.reason || 'try again shortly') + '.</div>' + _txBtn();
         return;
       }
-      renderAiSummary(b, r || {});
+      renderAiSummary(b, r);
     })
-    .catch(e => { if (b) b.innerHTML = '<div class=empty>Summary failed: ' + esc(String(e)) + '</div>'; });
+    .catch(e => { if (b) b.innerHTML = '<div class=empty>Summary failed: ' + esc(String(e)) + '</div>' + _txBtn(); });
+}
+function _txBtn() { return '<button class=sec id=ai-view-tx style="width:100%;margin-top:14px">📄 Full transcript</button>'; }
+function _chapRow(label, sec, accent, text) {
+  return '<div class=ai-chap data-t="' + sec + '" style="display:flex;gap:10px;margin:5px 0' +
+    (_aiCtx.play_url ? ';cursor:pointer' : '') + '">' +
+    '<span style="' + (accent ? 'color:var(--link,#5ad27a);' : 'color:var(--muted);') +
+      'font-variant-numeric:tabular-nums;min-width:46px">' + esc(label) + '</span>' +
+    '<span>' + esc(text || '') + '</span></div>';
 }
 function renderAiSummary(b, r) {
   let html = '';
   if (r.summary) html += '<div style="margin-bottom:12px">' + esc(r.summary) + '</div>';
   const chapters = r.chapters || [];
   if (chapters.length) {
-    html += '<div style="font-weight:600;margin:10px 0 4px">Chapters</div>';
-    html += chapters.map(c => '<div style="display:flex;gap:10px;margin:4px 0">' +
-      '<span style="color:var(--muted);font-variant-numeric:tabular-nums;min-width:46px">' + esc(c.start || '') + '</span>' +
-      '<span>' + esc(c.title || '') + '</span></div>').join('');
+    html += '<div style="font-weight:600;margin:10px 0 4px">Chapters' +
+      (_aiCtx.play_url ? ' <span style="color:var(--muted);font-weight:400;font-size:12px">(tap to play)</span>' : '') + '</div>';
+    html += chapters.map(c => _chapRow(c.start || '', _parseTs(c.start), true, c.title || '')).join('');
   }
   const topics = (r.topics || []);
   if (topics.length) html += '<div style="margin-top:14px;color:var(--muted);font-size:12px">' + topics.map(esc).join(' · ') + '</div>';
   if (!html) html = '<div class=empty>No speech found to summarise.</div>';
-  b.innerHTML = html;
+  b.innerHTML = html + _txBtn();
+}
+function aiViewTranscript(path, name) {
+  if (!path) return;
+  const t = document.getElementById('ai-sum-title');
+  const b = document.getElementById('ai-sum-body');
+  if (t) t.textContent = '📄 ' + (name || 'Transcript');
+  if (b) b.innerHTML = '<div class=empty><span class=spin></span> Loading transcript…</div>';
+  api('/api/media-ai/transcript?path=' + encodeURIComponent(path))
+    .then(r => {
+      if (!b) return;
+      r = r || {};
+      if (r.play_url) _aiCtx.play_url = r.play_url;
+      _aiCtx.segs = r.segments || [];
+      if (!_aiCtx.segs.length) { b.innerHTML = '<div class=empty>No transcript — no speech detected in this file.</div>'; return; }
+      b.innerHTML = '<input id=tx-find placeholder="Find in transcript…" autocomplete=off style="width:100%;box-sizing:border-box;padding:8px;margin-bottom:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px"><div id=tx-lines></div>';
+      renderTxLines('');
+      const fi = document.getElementById('tx-find');
+      if (fi) fi.addEventListener('input', function() { renderTxLines(fi.value); });
+    })
+    .catch(e => { if (b) b.innerHTML = '<div class=empty>Transcript failed: ' + esc(String(e)) + '</div>'; });
+}
+function renderTxLines(q) {
+  const el = document.getElementById('tx-lines');
+  if (!el) return;
+  const segs = _aiCtx.segs || [];
+  const ql = (q || '').toLowerCase().trim();
+  const rows = ql ? segs.filter(s => (s.text || '').toLowerCase().indexOf(ql) >= 0) : segs;
+  if (!rows.length) { el.innerHTML = '<div class=empty>No lines match.</div>'; return; }
+  el.innerHTML = rows.map(s =>
+    '<div class=ai-chap data-t="' + Math.floor(s.start || 0) + '" style="display:flex;gap:10px;margin:5px 0' +
+      (_aiCtx.play_url ? ';cursor:pointer' : '') + '">' +
+      '<span style="color:var(--muted);font-variant-numeric:tabular-nums;min-width:46px">' + _aiFmtTs(s.start) + '</span>' +
+      '<span>' + _hl(s.text || '', ql) + '</span></div>').join('');
 }
 
 // ── Entitlement preview ("view as") + paywall upgrade sheet ───────────────
@@ -5829,6 +5973,7 @@ async function loadLibrary(kind, force) {
         _libItems.map(renderLibCard).join('') + '</div>';
     }
     renderLibMore();
+    refreshLibAiBadges();
   } catch (e) {
     grid.innerHTML = '<div class=empty>Library failed to load: ' + esc(String(e)) + '</div>';
   } finally {
@@ -5862,6 +6007,7 @@ async function loadMoreLibrary() {
     const gridInner = document.querySelector('#library-grid .lib-grid');
     if (gridInner) gridInner.insertAdjacentHTML('beforeend', items.map(renderLibCard).join(''));
     renderLibMore();
+    refreshLibAiBadges();
   } catch (e) {
     if (more) more.innerHTML = '<div class=meta>Load more failed: ' + esc(String(e)) + '</div>';
   } finally {

@@ -20,7 +20,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import broker, config, embed, engine, gpu, store, summarize, translate
+import asyncio
+
+from . import autoindex, broker, config, embed, engine, gpu, store, summarize, translate
 from .engine import Segment
 
 logging.basicConfig(level=logging.INFO,
@@ -94,6 +96,22 @@ def _transcribe_cached(real: str, key: str, model_size: str,
     }
     store.put_transcript(key, mtime, size, out)
     return out
+
+
+def _do_index(real: str, key: str, model_size: str, language: str | None) -> dict:
+    """Transcribe (cached) → embed → store. Shared by /index and the autoindex
+    sweep. BLOCKING (CPU)."""
+    tx = _transcribe_cached(real, key, model_size, language)
+    segs = tx.get("segments", [])
+    lang = tx.get("language")
+    if not segs:
+        store.index_segments(key, [], [], lang)
+        return {"indexed": 0, "language": lang, "empty": True, "cached": tx.get("cached")}
+    seg_objs = [Segment(s["start"], s["end"], s["text"]) for s in segs]
+    vectors = embed.embed_passages([s["text"] for s in segs])
+    n = store.index_segments(key, seg_objs, vectors, lang)
+    return {"indexed": n, "language": lang, "duration": tx.get("duration"),
+            "cached": tx.get("cached")}
 
 
 class TranscribeRequest(BaseModel):
@@ -265,21 +283,9 @@ async def index_endpoint(req: IndexRequest):
     run across the library while FLUX/Qwen/a game hold the card."""
     real = _resolve_media_path(req.path)
 
-    def _run() -> dict:
-        tx = _transcribe_cached(real, req.path, (req.model or config.MODEL).strip(), req.language)
-        segs = tx.get("segments", [])
-        lang = tx.get("language")
-        if not segs:
-            store.index_segments(req.path, [], [], lang)
-            return {"indexed": 0, "language": lang, "empty": True, "cached": tx.get("cached")}
-        seg_objs = [Segment(s["start"], s["end"], s["text"]) for s in segs]
-        vectors = embed.embed_passages([s["text"] for s in segs])
-        n = store.index_segments(req.path, seg_objs, vectors, lang)
-        return {"indexed": n, "language": lang, "duration": tx.get("duration"),
-                "cached": tx.get("cached")}
-
     try:
-        out = await run_in_threadpool(_run)
+        out = await run_in_threadpool(_do_index, real, req.path,
+                                      (req.model or config.MODEL).strip(), req.language)
     except Exception as e:  # noqa: BLE001
         logger.exception("index failed")
         raise HTTPException(500, f"index failed: {e}")
@@ -302,6 +308,12 @@ async def search_endpoint(req: SearchRequest):
     return {"ok": True, "query": req.query, "count": len(hits), "hits": hits}
 
 
+async def _autoindex_one(rel: str) -> dict:
+    """Index a single relative path (used by the autoindex sweep)."""
+    real = _resolve_media_path(rel)
+    return await run_in_threadpool(_do_index, real, rel, config.MODEL, None)
+
+
 @app.on_event("startup")
 async def _startup():
     # Initialise the search store (idempotent).
@@ -309,6 +321,8 @@ async def _startup():
         store.init()
     except Exception as e:  # noqa: BLE001
         logger.warning("store init skipped: %s", e)
+    # Background auto-index sweep (no-op unless MEDIA_AI_AUTOINDEX=true).
+    asyncio.create_task(autoindex.run_loop(_autoindex_one))
     # Preload the default model so the first /transcribe isn't penalised by the
     # ~1-2 s model load. Best-effort: a download hiccup must not crash the boot.
     try:

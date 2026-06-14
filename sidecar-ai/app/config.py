@@ -47,6 +47,19 @@ DB_PATH = os.environ.get("MEDIA_AI_DB_PATH", "/data/media_ai.db").strip()
 TRANSLATE_URL = os.environ.get("MEDIA_AI_TRANSLATE_URL", "").rstrip("/")
 TRANSLATE_TIMEOUT = float(os.environ.get("MEDIA_AI_TRANSLATE_TIMEOUT", "30"))
 
+# ── Auto-index sweep (Phase E — auto-transcribe new long-form, decoupled) ─────
+# A background loop indexes new video/audio under AUTOINDEX_DIRS that isn't yet
+# transcribed — so the library becomes searchable without manual tapping. Scoped
+# to long-form subdirs + a min size so short music reels aren't swept; bounded
+# per cycle. CPU-only. Off unless MEDIA_AI_AUTOINDEX=true.
+AUTOINDEX = os.environ.get("MEDIA_AI_AUTOINDEX", "false").strip().lower() == "true"
+AUTOINDEX_INTERVAL = _int("MEDIA_AI_AUTOINDEX_INTERVAL", 600)
+AUTOINDEX_DIRS = [d.strip() for d in
+                  os.environ.get("MEDIA_AI_AUTOINDEX_DIRS", "youtube,Stremio,iptv,live").split(",")
+                  if d.strip()]
+AUTOINDEX_MAX_PER_CYCLE = _int("MEDIA_AI_AUTOINDEX_MAX", 5)
+AUTOINDEX_MIN_BYTES = _int("MEDIA_AI_AUTOINDEX_MIN_BYTES", 2_000_000)
+
 # ── GPU broker (the "GPU when the broker says free" path; Phase 1 = off) ──────
 # CPU is the default engine and needs no GPU. When a GPU engine is added
 # (whisper.cpp/hipBLAS, since CTranslate2 has no ROCm), it will acquire a lease

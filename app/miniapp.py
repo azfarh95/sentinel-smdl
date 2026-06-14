@@ -4269,6 +4269,18 @@ button.warn { background: #ff9500; color: #fff; }
 .lib-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .lib-kind-tag { position: absolute; left: 6px; top: 6px; background: rgba(0,0,0,.55);
                 color: #fff; font-size: 11px; padding: 1px 6px; border-radius: 4px; }
+.lib-ai { position: absolute; right: 6px; top: 6px; z-index: 2; border: none; cursor: pointer;
+          background: rgba(0,0,0,.55); color: #fff; width: 30px; height: 30px;
+          border-radius: 50%; font-size: 14px; line-height: 30px; padding: 0; }
+.lib-ai:active { background: rgba(0,0,0,.85); }
+.lib-sum { position: absolute; right: 42px; top: 6px; z-index: 2; border: none; cursor: pointer;
+           background: rgba(0,0,0,.55); color: #fff; width: 30px; height: 30px;
+           border-radius: 50%; font-size: 13px; line-height: 30px; padding: 0; }
+.lib-sum:active { background: rgba(0,0,0,.85); }
+.ai-hit { cursor: pointer; }
+.ai-hit:active { background: var(--bg); }
+.lib-ai.busy { opacity: .6; }
+.lib-ai.done { background: rgba(90,210,122,.9); }
 .lib-body { padding: 8px 10px; }
 .lib-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden;
             text-overflow: ellipsis; }
@@ -4776,6 +4788,14 @@ button.warn { background: #ff9500; color: #fff; }
   </div>
 </div>
 
+<div id=ai-sum-modal style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.62);align-items:center;justify-content:center" onclick="if(event.target===this)closeAiSum()">
+  <div style="background:var(--surface);border:1px solid var(--separator);border-radius:14px;max-width:440px;width:92%;max-height:82vh;overflow:auto;padding:20px;box-shadow:0 12px 44px rgba(0,0,0,.5)">
+    <div id=ai-sum-title style="font-size:16px;font-weight:600;margin-bottom:12px;word-break:break-all">📝 Summary</div>
+    <div id=ai-sum-body style="font-size:13px;line-height:1.5"></div>
+    <button class=sec style="width:100%;margin-top:16px" onclick=closeAiSum()>Close</button>
+  </div>
+</div>
+
 <div class=preview-modal id=preview-modal>
   <div class=preview-head>
     <div class=name id=preview-name></div>
@@ -5067,6 +5087,13 @@ function initAiSearch() {
   const q = document.getElementById('ai-q');
   if (go) go.addEventListener('click', doAiSearch);
   if (q) q.addEventListener('keydown', e => { if (e.key === 'Enter') doAiSearch(); });
+  // Tap a hit → open the file and seek to the spoken moment.
+  const box = document.getElementById('ai-results');
+  if (box) box.addEventListener('click', function(e) {
+    const hit = e.target.closest('.ai-hit');
+    if (!hit || !hit.dataset.u) return;
+    openPreview(hit.dataset.u, hit.dataset.n, parseInt(hit.dataset.t || '0', 10));
+  });
 }
 function _aiFmtTs(s) {
   s = Math.max(0, Math.floor(s || 0));
@@ -5084,18 +5111,95 @@ function doAiSearch() {
 }
 function renderAiHits(hits) {
   const box = document.getElementById('ai-results');
-  if (!hits.length) { box.innerHTML = '<div class=empty>No matches. Index a download first (Library → an item → Index for search).</div>'; return; }
+  if (!hits.length) { box.innerHTML = '<div class=empty>No matches. Index a download first (Library → tap 🔎 on an item).</div>'; return; }
   box.innerHTML = hits.map(h => {
-    const name = (h.media_path || '').split('/').pop();
+    const name = h.name || (h.media_path || '').split('/').pop();
     const pct = Math.round((h.score || 0) * 100);
-    return `<div class=card style="margin-bottom:8px">
-      <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+    const playable = !!h.play_url;
+    const attrs = playable
+      ? ' class="card ai-hit" data-u="' + encodeURIComponent(h.play_url) +
+        '" data-n="' + encodeURIComponent(name) + '" data-t="' + Math.floor(h.start || 0) + '"'
+      : ' class=card';
+    return '<div' + attrs + ' style="margin-bottom:8px">' +
+      `<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
         <span style="font-weight:600;font-size:13px;word-break:break-all">${esc(name)}</span>
-        <span style="color:var(--muted);font-size:12px;white-space:nowrap">${_aiFmtTs(h.start)} · ${pct}%</span>
+        <span style="color:var(--muted);font-size:12px;white-space:nowrap">${playable ? '▶ ' : ''}${_aiFmtTs(h.start)} · ${pct}%</span>
       </div>
-      <div style="margin-top:4px;font-size:13px;line-height:1.4">${esc(h.text || '')}</div>
-    </div>`;
+      <div style="margin-top:4px;font-size:13px;line-height:1.4">${esc(h.text || '')}</div>` +
+    '</div>';
   }).join('');
+}
+
+// Library "🔎 Index for AI search" — capture-phase delegation on the grid so the
+// button beats the card's own tap handler (openPreview) without per-card wiring.
+let _libAiBound = false;
+function bindLibAi() {
+  if (_libAiBound) return;
+  const grid = document.getElementById('library-grid');
+  if (!grid) return;
+  _libAiBound = true;
+  grid.addEventListener('click', function(e) {
+    const ix = e.target.closest('.lib-ai');
+    if (ix) { e.stopPropagation(); e.preventDefault();
+      aiIndexPath(decodeURIComponent(ix.dataset.p || ''), ix); return; }
+    const sm = e.target.closest('.lib-sum');
+    if (sm) { e.stopPropagation(); e.preventDefault();
+      aiSummarize(decodeURIComponent(sm.dataset.p || ''), decodeURIComponent(sm.dataset.n || '')); return; }
+  }, true);
+}
+function aiIndexPath(path, btn) {
+  if (!path) return;
+  if (btn && btn.classList.contains('busy')) return;
+  if (btn) { btn.classList.add('busy'); btn.textContent = '⏳'; }
+  api('/api/media-ai/index', { method: 'POST', body: JSON.stringify({ path: path }) })
+    .then(r => {
+      if (btn) { btn.classList.remove('busy'); btn.classList.add('done'); btn.textContent = '✓'; }
+      const n = r.indexed || 0;
+      showOk(r.empty ? 'No speech found to index' : ('Indexed ' + n + ' segment' + (n === 1 ? '' : 's') + ' — now searchable'));
+    })
+    .catch(e => {
+      if (btn) { btn.classList.remove('busy'); btn.textContent = '🔎'; }
+      showErr(e);
+    });
+}
+
+// Per-item AI summary + chapters (Qwen, GPU-gated). Synchronous with clear
+// messaging: a cold model load can take a few minutes; warm is seconds; if the
+// GPU is busy the sidecar returns {deferred:true} and we say so.
+function closeAiSum() { const m = document.getElementById('ai-sum-modal'); if (m) m.style.display = 'none'; }
+function aiSummarize(path, name) {
+  if (!path) return;
+  const m = document.getElementById('ai-sum-modal');
+  const t = document.getElementById('ai-sum-title');
+  const b = document.getElementById('ai-sum-body');
+  if (t) t.textContent = '📝 ' + (name || 'Summary');
+  if (b) b.innerHTML = '<div class=empty><span class=spin></span> Summarising… the first run can take a few minutes while the model loads. Keep this open.</div>';
+  if (m) m.style.display = 'flex';
+  api('/api/media-ai/summarize', { method: 'POST', body: JSON.stringify({ path: path }) })
+    .then(r => {
+      if (!b) return;
+      if (r && r.deferred) {
+        b.innerHTML = '<div class=empty>⏳ GPU is busy right now — ' + esc(r.reason || 'try again shortly') + '.</div>';
+        return;
+      }
+      renderAiSummary(b, r || {});
+    })
+    .catch(e => { if (b) b.innerHTML = '<div class=empty>Summary failed: ' + esc(String(e)) + '</div>'; });
+}
+function renderAiSummary(b, r) {
+  let html = '';
+  if (r.summary) html += '<div style="margin-bottom:12px">' + esc(r.summary) + '</div>';
+  const chapters = r.chapters || [];
+  if (chapters.length) {
+    html += '<div style="font-weight:600;margin:10px 0 4px">Chapters</div>';
+    html += chapters.map(c => '<div style="display:flex;gap:10px;margin:4px 0">' +
+      '<span style="color:var(--muted);font-variant-numeric:tabular-nums;min-width:46px">' + esc(c.start || '') + '</span>' +
+      '<span>' + esc(c.title || '') + '</span></div>').join('');
+  }
+  const topics = (r.topics || []);
+  if (topics.length) html += '<div style="margin-top:14px;color:var(--muted);font-size:12px">' + topics.map(esc).join(' · ') + '</div>';
+  if (!html) html = '<div class=empty>No speech found to summarise.</div>';
+  b.innerHTML = html;
 }
 
 // ── Entitlement preview ("view as") + paywall upgrade sheet ───────────────
@@ -5681,8 +5785,14 @@ function renderLibCard(it) {
   const click = it.share_url
     ? 'openPreview(\\'' + u + '\\', \\'' + n + '\\')'
     : "showErr('No share URL — SHARE_SECRET/PUBLIC_BASE_URL not configured')";
+  const aiBtns = (it.kind === 'video' || it.kind === 'audio')
+    ? '<button class=lib-sum data-p="' + encodeURIComponent(it.path || '') +
+        '" data-n="' + encodeURIComponent(it.name || '') + '" title="AI summary">📝</button>' +
+      '<button class=lib-ai data-p="' + encodeURIComponent(it.path || '') +
+        '" title="Index for AI search">🔎</button>'
+    : '';
   return '<div class=lib-card onclick="' + click + '">' +
-    '<div class=lib-thumb>' + inner +
+    '<div class=lib-thumb>' + inner + aiBtns +
       '<span class=lib-kind-tag>' + esc(it.ext || '') + '</span></div>' +
     '<div class=lib-body><div class=lib-name>' + esc(it.name) + '</div>' +
     '<div class=lib-meta>' + fmtSize(it.size) + ' · ' + fmtDate(it.mtime) + '</div>' +
@@ -5702,6 +5812,7 @@ async function loadLibrary(kind, force) {
   _libItems = [];
   const grid = document.getElementById('library-grid');
   const more = document.getElementById('library-more');
+  bindLibAi();
   if (more) more.innerHTML = '';
   grid.innerHTML = '<div class=empty><span class=spin></span> Scanning…</div>';
   try {
@@ -7765,7 +7876,7 @@ let _galleryIndex = -1;   // index into _galleryItems, or -1 for a standalone op
 
 // Render the media for one item into the open modal. Shared by the standalone
 // openPreview() and the gallery openPreviewAt().
-function _renderPreview(url, name) {
+function _renderPreview(url, name, seekTo) {
   _previewUrl = url; _previewName = name;
   const ext = (name.split('.').pop() || '').toLowerCase();
   const body = document.getElementById('preview-body');
@@ -7788,6 +7899,16 @@ function _renderPreview(url, name) {
     </div>`;
   }
   body.innerHTML = inner;
+  // Jump-to-timestamp (AI Search): seek once metadata is ready. More reliable in
+  // the Telegram WebView than a #t= media fragment.
+  if (seekTo && seekTo > 0) {
+    const v = body.querySelector('video, audio');
+    if (v) {
+      const doSeek = () => { try { v.currentTime = seekTo; } catch (e) {} };
+      v.addEventListener('loadedmetadata', doSeek, { once: true });
+      if (v.readyState >= 1) doSeek();
+    }
+  }
 }
 
 function _updateGalleryNav() {
@@ -7799,9 +7920,9 @@ function _updateGalleryNav() {
 }
 
 // Standalone open (audio / docs / non-gallery files).
-function openPreview(encodedUrl, encodedName) {
+function openPreview(encodedUrl, encodedName, seekTo) {
   _galleryIndex = -1;
-  _renderPreview(decodeURIComponent(encodedUrl), decodeURIComponent(encodedName));
+  _renderPreview(decodeURIComponent(encodedUrl), decodeURIComponent(encodedName), seekTo || 0);
   _updateGalleryNav();
   document.getElementById('preview-modal').classList.add('open');
 }

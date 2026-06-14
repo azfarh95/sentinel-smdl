@@ -41,6 +41,12 @@ VAD_FILTER = (os.environ.get("MEDIA_AI_VAD", "true").strip().lower() != "false")
 EMBED_MODEL = os.environ.get("MEDIA_AI_EMBED_MODEL", "BAAI/bge-small-en-v1.5").strip()
 DB_PATH = os.environ.get("MEDIA_AI_DB_PATH", "/data/media_ai.db").strip()
 
+# Translation to English (in-stack libretranslate) for non-English transcripts —
+# makes them searchable by an English query (the embed model is English-only).
+# Degrade-dark: unset ⇒ no translation; fail-soft on any error.
+TRANSLATE_URL = os.environ.get("MEDIA_AI_TRANSLATE_URL", "").rstrip("/")
+TRANSLATE_TIMEOUT = float(os.environ.get("MEDIA_AI_TRANSLATE_TIMEOUT", "30"))
+
 # ── GPU broker (the "GPU when the broker says free" path; Phase 1 = off) ──────
 # CPU is the default engine and needs no GPU. When a GPU engine is added
 # (whisper.cpp/hipBLAS, since CTranslate2 has no ROCm), it will acquire a lease

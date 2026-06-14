@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import broker, config, embed, engine, gpu, store, summarize
+from . import broker, config, embed, engine, gpu, store, summarize, translate
 from .engine import Segment
 
 logging.basicConfig(level=logging.INFO,
@@ -65,12 +65,28 @@ def _transcribe_cached(real: str, key: str, model_size: str,
             return cached
     eng = engine.resolve("auto")
     result = eng.transcribe(real, model_size=model_size, language=language)
+
+    # Non-English → translate to English so it's searchable by an English query
+    # (the embed model is English-only) and readable by the owner. Original text
+    # kept per-segment as text_orig. Fail-soft: on no-op/failure we keep originals.
+    seg_dicts = [s.__dict__ for s in result.segments]
+    text_parts = [s.text for s in result.segments]
+    translated_from = None
+    if result.language and result.language != "en" and translate.enabled() and result.segments:
+        en_texts = translate.to_english(text_parts, result.language)
+        if en_texts != text_parts:
+            translated_from = result.language
+            seg_dicts = [{"start": s.start, "end": s.end, "text": en, "text_orig": s.text}
+                         for s, en in zip(result.segments, en_texts)]
+            text_parts = en_texts
+
     out = {
         "language": result.language,
+        "translated_from": translated_from,
         "language_probability": result.language_probability,
         "duration": result.duration,
-        "text": result.text,
-        "segments": [s.__dict__ for s in result.segments],
+        "text": " ".join(text_parts).strip(),
+        "segments": seg_dicts,
         "transcribe_seconds": result.transcribe_seconds,
         "realtime_factor": result.realtime_factor,
         "engine": result.engine, "model": result.model,

@@ -4277,6 +4277,7 @@ button.warn { background: #ff9500; color: #fff; }
            background: rgba(0,0,0,.55); color: #fff; width: 30px; height: 30px;
            border-radius: 50%; font-size: 13px; line-height: 30px; padding: 0; }
 .lib-sum:active { background: rgba(0,0,0,.85); }
+.lib-sum.done { background: rgba(90,210,122,.9); }
 .ai-hit { cursor: pointer; }
 .ai-hit:active { background: var(--bg); }
 .lib-ai.busy { opacity: .6; }
@@ -4512,6 +4513,7 @@ button.warn { background: #ff9500; color: #fff; }
   <div class=page id=page-library>
     <div class=page-header>
       <h1>Library</h1>
+      <button class="small sec" onclick="indexAllVisible()" title="Index visible video/audio for AI search">🔎 Index all</button>
       <button class="small sec" onclick="loadLibrary(libKind, true)" title="Rescan">🔄</button>
     </div>
     <div class=lib-tabs id=lib-tabs></div>
@@ -4526,6 +4528,7 @@ button.warn { background: #ff9500; color: #fff; }
              style="width:100%;box-sizing:border-box;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px">
       <div style="margin-top:8px;text-align:right"><button class=small id=ai-go>Search</button></div>
     </div>
+    <div id=ai-stats class=meta style="font-size:12px;margin:-4px 2px 10px;color:var(--muted)"></div>
     <div id=ai-results><div class=empty>Search the transcripts of your downloaded media. Index a download from its Library entry first.</div></div>
   </div>
 
@@ -5094,6 +5097,18 @@ function initAiSearch() {
     if (!hit || !hit.dataset.u) return;
     openPreview(hit.dataset.u, hit.dataset.n, parseInt(hit.dataset.t || '0', 10));
   });
+  refreshAiStats();
+}
+function refreshAiStats() {
+  const el = document.getElementById('ai-stats');
+  if (!el) return;
+  api('/api/media-ai/status').then(r => {
+    const ix = (r && r.index) || {};
+    if (ix.media == null) { el.textContent = ''; return; }
+    el.textContent = ix.media + ' file' + (ix.media === 1 ? '' : 's') + ' · ' +
+      ix.segments + ' segments indexed' +
+      (ix.summarized ? ' · ' + ix.summarized + ' summarised' : '');
+  }).catch(() => { el.textContent = ''; });
 }
 function _aiFmtTs(s) {
   s = Math.max(0, Math.floor(s || 0));
@@ -5147,20 +5162,63 @@ function bindLibAi() {
       aiSummarize(decodeURIComponent(sm.dataset.p || ''), decodeURIComponent(sm.dataset.n || '')); return; }
   }, true);
 }
-function aiIndexPath(path, btn) {
-  if (!path) return;
-  if (btn && btn.classList.contains('busy')) return;
+function aiIndexPath(path, btn, quiet) {
+  if (!path) return Promise.resolve();
+  if (btn && btn.classList.contains('busy')) return Promise.resolve();
   if (btn) { btn.classList.add('busy'); btn.textContent = '⏳'; }
-  api('/api/media-ai/index', { method: 'POST', body: JSON.stringify({ path: path }) })
+  return api('/api/media-ai/index', { method: 'POST', body: JSON.stringify({ path: path }) })
     .then(r => {
       if (btn) { btn.classList.remove('busy'); btn.classList.add('done'); btn.textContent = '✓'; }
       const n = r.indexed || 0;
-      showOk(r.empty ? 'No speech found to index' : ('Indexed ' + n + ' segment' + (n === 1 ? '' : 's') + ' — now searchable'));
+      if (!quiet) showOk(r.empty ? 'No speech found to index' : ('Indexed ' + n + ' segment' + (n === 1 ? '' : 's') + ' — now searchable'));
+      return r;
     })
     .catch(e => {
       if (btn) { btn.classList.remove('busy'); btn.textContent = '🔎'; }
-      showErr(e);
+      if (!quiet) showErr(e);
+      throw e;
     });
+}
+
+// Mark Library cards that are already indexed/summarised (badge refresh after a
+// page render). Best-effort; a failure just leaves the buttons in their default
+// state.
+function refreshLibAiBadges() {
+  const grid = document.getElementById('library-grid');
+  if (!grid) return;
+  const btns = Array.from(grid.querySelectorAll('.lib-ai'));
+  const paths = btns.map(b => decodeURIComponent(b.dataset.p || '')).filter(Boolean);
+  if (!paths.length) return;
+  api('/api/media-ai/status-batch', { method: 'POST', body: JSON.stringify({ paths: paths }) })
+    .then(r => {
+      const st = (r && r.status) || {};
+      grid.querySelectorAll('.lib-ai').forEach(b => {
+        const s = st[decodeURIComponent(b.dataset.p || '')];
+        if (s && s.indexed) { b.classList.add('done'); b.textContent = '✓';
+          b.title = 'Indexed (' + s.segments + ' segments) — tap to re-index'; }
+      });
+      grid.querySelectorAll('.lib-sum').forEach(b => {
+        const s = st[decodeURIComponent(b.dataset.p || '')];
+        if (s && s.summarized) { b.classList.add('done'); b.title = 'Summary ready'; }
+      });
+    }).catch(() => {});
+}
+
+// Index every not-yet-indexed video/audio card currently on screen, sequentially
+// (CPU; keeps load bounded). Skips items already marked done.
+async function indexAllVisible() {
+  const grid = document.getElementById('library-grid');
+  if (!grid) return;
+  const btns = Array.from(grid.querySelectorAll('.lib-ai:not(.done)'));
+  if (!btns.length) { showOk('Nothing new to index on screen'); return; }
+  showOk('Indexing ' + btns.length + ' item(s) for search…');
+  let ok = 0;
+  for (const b of btns) {
+    const p = decodeURIComponent(b.dataset.p || '');
+    if (!p) continue;
+    try { await aiIndexPath(p, b, true); ok++; } catch (e) {}
+  }
+  showOk('Indexed ' + ok + ' / ' + btns.length + ' — try AI Search');
 }
 
 // Per-item AI summary + chapters (Qwen, GPU-gated). Synchronous with clear
@@ -5829,6 +5887,7 @@ async function loadLibrary(kind, force) {
         _libItems.map(renderLibCard).join('') + '</div>';
     }
     renderLibMore();
+    refreshLibAiBadges();
   } catch (e) {
     grid.innerHTML = '<div class=empty>Library failed to load: ' + esc(String(e)) + '</div>';
   } finally {
@@ -5862,6 +5921,7 @@ async function loadMoreLibrary() {
     const gridInner = document.querySelector('#library-grid .lib-grid');
     if (gridInner) gridInner.insertAdjacentHTML('beforeend', items.map(renderLibCard).join(''));
     renderLibMore();
+    refreshLibAiBadges();
   } catch (e) {
     if (more) more.innerHTML = '<div class=meta>Load more failed: ' + esc(String(e)) + '</div>';
   } finally {

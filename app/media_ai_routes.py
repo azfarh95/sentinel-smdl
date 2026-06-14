@@ -92,6 +92,30 @@ async def media_ai_summarize(body: SummarizeBody, request: Request) -> dict:
         raise HTTPException(status_code=502, detail=str(e))
 
 
+class StatusPathsBody(BaseModel):
+    paths: list[str] = Field(default_factory=list)
+
+
+@router.post("/api/media-ai/status-batch")
+async def media_ai_status_batch(body: StatusPathsBody, request: Request) -> dict:
+    await _owner(request)
+    _require_enabled()
+    try:
+        return await asyncio.to_thread(media_ai.status_paths, body.paths)
+    except media_ai.MediaAIError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/media-ai/transcript")
+async def media_ai_transcript(request: Request, path: str) -> dict:
+    await _owner(request)
+    _require_enabled()
+    try:
+        return await asyncio.to_thread(media_ai.transcript, path)
+    except media_ai.MediaAIError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @router.post("/api/media-ai/search")
 async def media_ai_search(body: SearchBody, request: Request) -> dict:
     await _owner(request)

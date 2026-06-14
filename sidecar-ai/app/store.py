@@ -10,6 +10,7 @@ joined back to `segments` for the text + timestamps.
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
@@ -54,6 +55,22 @@ def init() -> None:
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_segments "
             f"USING vec0(segment_id INTEGER PRIMARY KEY, "
             f"embedding FLOAT[{DIM}] distance_metric=cosine)")
+        # Caches keyed by media_path; (mtime,size) invalidate when the file
+        # changes (re-download), so a stale transcript/summary is never served.
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS transcripts (
+                media_path TEXT PRIMARY KEY,
+                mtime REAL, size INTEGER,
+                language TEXT, language_probability REAL, duration REAL,
+                text TEXT, segments_json TEXT, created_at REAL
+            )""")
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS summaries (
+                media_path TEXT PRIMARY KEY,
+                mtime REAL, size INTEGER,
+                summary TEXT, chapters_json TEXT, topics_json TEXT,
+                language TEXT, model TEXT, created_at REAL
+            )""")
 
 
 def delete_media(db: sqlite3.Connection, media_path: str) -> None:
@@ -109,4 +126,79 @@ def stats() -> dict:
     with _lock, _connect() as db:
         n_seg = db.execute("SELECT COUNT(*) c FROM segments").fetchone()["c"]
         n_media = db.execute("SELECT COUNT(DISTINCT media_path) c FROM segments").fetchone()["c"]
-    return {"segments": n_seg, "media": n_media}
+        n_tx = db.execute("SELECT COUNT(*) c FROM transcripts").fetchone()["c"]
+        n_sum = db.execute("SELECT COUNT(*) c FROM summaries").fetchone()["c"]
+    return {"segments": n_seg, "media": n_media, "transcribed": n_tx, "summarized": n_sum}
+
+
+# ── transcript cache ─────────────────────────────────────────────────────────
+def get_transcript(media_path: str, mtime: float, size: int) -> dict | None:
+    """Cached transcript iff present AND the file is unchanged (mtime+size)."""
+    with _lock, _connect() as db:
+        r = db.execute("SELECT * FROM transcripts WHERE media_path = ?", (media_path,)).fetchone()
+    if not r:
+        return None
+    if abs((r["mtime"] or 0) - mtime) > 1 or (r["size"] or 0) != size:
+        return None
+    return {
+        "language": r["language"], "language_probability": r["language_probability"],
+        "duration": r["duration"], "text": r["text"],
+        "segments": json.loads(r["segments_json"] or "[]"), "cached": True,
+    }
+
+
+def put_transcript(media_path: str, mtime: float, size: int, result: dict) -> None:
+    with _lock, _connect() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO transcripts(media_path, mtime, size, language, "
+            "language_probability, duration, text, segments_json, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (media_path, mtime, size, result.get("language"),
+             result.get("language_probability"), result.get("duration"),
+             result.get("text", ""), json.dumps(result.get("segments", [])), time.time()))
+
+
+# ── summary cache ────────────────────────────────────────────────────────────
+def get_summary(media_path: str, mtime: float, size: int) -> dict | None:
+    with _lock, _connect() as db:
+        r = db.execute("SELECT * FROM summaries WHERE media_path = ?", (media_path,)).fetchone()
+    if not r:
+        return None
+    if abs((r["mtime"] or 0) - mtime) > 1 or (r["size"] or 0) != size:
+        return None
+    return {
+        "summary": r["summary"], "chapters": json.loads(r["chapters_json"] or "[]"),
+        "topics": json.loads(r["topics_json"] or "[]"), "language": r["language"],
+        "model": r["model"], "cached": True,
+    }
+
+
+def put_summary(media_path: str, mtime: float, size: int, summary: dict) -> None:
+    with _lock, _connect() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO summaries(media_path, mtime, size, summary, "
+            "chapters_json, topics_json, language, model, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (media_path, mtime, size, summary.get("summary", ""),
+             json.dumps(summary.get("chapters", [])), json.dumps(summary.get("topics", [])),
+             summary.get("language"), summary.get("model"), time.time()))
+
+
+def media_status(paths: list[str]) -> dict:
+    """Per-path flags for the UI: indexed (segments present), transcribed, summarized."""
+    out = {p: {"indexed": False, "segments": 0, "transcribed": False, "summarized": False}
+           for p in paths}
+    if not paths:
+        return out
+    with _lock, _connect() as db:
+        qmarks = ",".join("?" * len(paths))
+        for r in db.execute(
+                f"SELECT media_path, COUNT(*) c FROM segments WHERE media_path IN ({qmarks}) "
+                f"GROUP BY media_path", paths):
+            out[r["media_path"]].update(indexed=r["c"] > 0, segments=r["c"])
+        for r in db.execute(
+                f"SELECT media_path FROM transcripts WHERE media_path IN ({qmarks})", paths):
+            out[r["media_path"]]["transcribed"] = True
+        for r in db.execute(
+                f"SELECT media_path FROM summaries WHERE media_path IN ({qmarks})", paths):
+            out[r["media_path"]]["summarized"] = True
+    return out

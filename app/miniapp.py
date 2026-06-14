@@ -4280,6 +4280,7 @@ button.warn { background: #ff9500; color: #fff; }
 .lib-sum.done { background: rgba(90,210,122,.9); }
 .ai-hit { cursor: pointer; }
 .ai-hit:active { background: var(--bg); }
+mark { background: rgba(90,210,122,.35); color: inherit; border-radius: 3px; padding: 0 1px; }
 .lib-ai.busy { opacity: .6; }
 .lib-ai.done { background: rgba(90,210,122,.9); }
 .lib-body { padding: 8px 10px; }
@@ -5115,10 +5116,23 @@ function _aiFmtTs(s) {
   const m = Math.floor(s / 60), ss = s % 60;
   return (m < 10 ? '0' : '') + m + ':' + (ss < 10 ? '0' : '') + ss;
 }
+// Highlight query terms in transcript text. Backslash-free (no regex) so it can't
+// hit the non-raw-string mangling gotcha; word-level substring match.
+function _hl(text, q) {
+  const terms = (q || '').toLowerCase().split(' ').filter(t => t.length >= 2);
+  const t = String(text || '');
+  if (!terms.length) return esc(t);
+  return t.split(' ').map(w => {
+    const bare = w.toLowerCase();
+    return terms.some(term => bare.indexOf(term) >= 0) ? '<mark>' + esc(w) + '</mark>' : esc(w);
+  }).join(' ');
+}
+let _aiLastQuery = '';
 function doAiSearch() {
   const q = (document.getElementById('ai-q').value || '').trim();
   const box = document.getElementById('ai-results');
   if (q.length < 2) { box.innerHTML = '<div class=empty>Type at least 2 characters.</div>'; return; }
+  _aiLastQuery = q;
   box.innerHTML = '<div class=empty><span class=spin></span> Searching…</div>';
   api('/api/media-ai/search', { method: 'POST', body: JSON.stringify({ query: q, k: 15 }) })
     .then(r => renderAiHits(r.hits || []))
@@ -5127,7 +5141,9 @@ function doAiSearch() {
 function renderAiHits(hits) {
   const box = document.getElementById('ai-results');
   if (!hits.length) { box.innerHTML = '<div class=empty>No matches. Index a download first (Library → tap 🔎 on an item).</div>'; return; }
-  box.innerHTML = hits.map(h => {
+  const head = '<div class=meta style="font-size:12px;color:var(--muted);margin:0 2px 8px">' +
+    hits.length + ' result' + (hits.length === 1 ? '' : 's') + '</div>';
+  box.innerHTML = head + hits.map(h => {
     const name = h.name || (h.media_path || '').split('/').pop();
     const pct = Math.round((h.score || 0) * 100);
     const playable = !!h.play_url;
@@ -5140,7 +5156,7 @@ function renderAiHits(hits) {
         <span style="font-weight:600;font-size:13px;word-break:break-all">${esc(name)}</span>
         <span style="color:var(--muted);font-size:12px;white-space:nowrap">${playable ? '▶ ' : ''}${_aiFmtTs(h.start)} · ${pct}%</span>
       </div>
-      <div style="margin-top:4px;font-size:13px;line-height:1.4">${esc(h.text || '')}</div>` +
+      <div style="margin-top:4px;font-size:13px;line-height:1.4">${_hl(h.text, _aiLastQuery)}</div>` +
     '</div>';
   }).join('');
 }
@@ -5307,11 +5323,27 @@ function aiViewTranscript(path, name) {
       if (!b) return;
       r = r || {};
       if (r.play_url) _aiCtx.play_url = r.play_url;
-      const segs = r.segments || [];
-      if (!segs.length) { b.innerHTML = '<div class=empty>No transcript — no speech detected in this file.</div>'; return; }
-      b.innerHTML = segs.map(s => _chapRow(_aiFmtTs(s.start), Math.floor(s.start || 0), false, s.text || '')).join('');
+      _aiCtx.segs = r.segments || [];
+      if (!_aiCtx.segs.length) { b.innerHTML = '<div class=empty>No transcript — no speech detected in this file.</div>'; return; }
+      b.innerHTML = '<input id=tx-find placeholder="Find in transcript…" autocomplete=off style="width:100%;box-sizing:border-box;padding:8px;margin-bottom:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px"><div id=tx-lines></div>';
+      renderTxLines('');
+      const fi = document.getElementById('tx-find');
+      if (fi) fi.addEventListener('input', function() { renderTxLines(fi.value); });
     })
     .catch(e => { if (b) b.innerHTML = '<div class=empty>Transcript failed: ' + esc(String(e)) + '</div>'; });
+}
+function renderTxLines(q) {
+  const el = document.getElementById('tx-lines');
+  if (!el) return;
+  const segs = _aiCtx.segs || [];
+  const ql = (q || '').toLowerCase().trim();
+  const rows = ql ? segs.filter(s => (s.text || '').toLowerCase().indexOf(ql) >= 0) : segs;
+  if (!rows.length) { el.innerHTML = '<div class=empty>No lines match.</div>'; return; }
+  el.innerHTML = rows.map(s =>
+    '<div class=ai-chap data-t="' + Math.floor(s.start || 0) + '" style="display:flex;gap:10px;margin:5px 0' +
+      (_aiCtx.play_url ? ';cursor:pointer' : '') + '">' +
+      '<span style="color:var(--muted);font-variant-numeric:tabular-nums;min-width:46px">' + _aiFmtTs(s.start) + '</span>' +
+      '<span>' + _hl(s.text || '', ql) + '</span></div>').join('');
 }
 
 // ── Entitlement preview ("view as") + paywall upgrade sheet ───────────────

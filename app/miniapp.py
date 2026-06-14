@@ -4269,6 +4269,12 @@ button.warn { background: #ff9500; color: #fff; }
 .lib-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .lib-kind-tag { position: absolute; left: 6px; top: 6px; background: rgba(0,0,0,.55);
                 color: #fff; font-size: 11px; padding: 1px 6px; border-radius: 4px; }
+.lib-ai { position: absolute; right: 6px; top: 6px; z-index: 2; border: none; cursor: pointer;
+          background: rgba(0,0,0,.55); color: #fff; width: 30px; height: 30px;
+          border-radius: 50%; font-size: 14px; line-height: 30px; padding: 0; }
+.lib-ai:active { background: rgba(0,0,0,.85); }
+.lib-ai.busy { opacity: .6; }
+.lib-ai.done { background: rgba(90,210,122,.9); }
 .lib-body { padding: 8px 10px; }
 .lib-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden;
             text-overflow: ellipsis; }
@@ -5098,6 +5104,38 @@ function renderAiHits(hits) {
   }).join('');
 }
 
+// Library "🔎 Index for AI search" — capture-phase delegation on the grid so the
+// button beats the card's own tap handler (openPreview) without per-card wiring.
+let _libAiBound = false;
+function bindLibAi() {
+  if (_libAiBound) return;
+  const grid = document.getElementById('library-grid');
+  if (!grid) return;
+  _libAiBound = true;
+  grid.addEventListener('click', function(e) {
+    const btn = e.target.closest('.lib-ai');
+    if (!btn) return;
+    e.stopPropagation();
+    e.preventDefault();
+    aiIndexPath(decodeURIComponent(btn.dataset.p || ''), btn);
+  }, true);
+}
+function aiIndexPath(path, btn) {
+  if (!path) return;
+  if (btn && btn.classList.contains('busy')) return;
+  if (btn) { btn.classList.add('busy'); btn.textContent = '⏳'; }
+  api('/api/media-ai/index', { method: 'POST', body: JSON.stringify({ path: path }) })
+    .then(r => {
+      if (btn) { btn.classList.remove('busy'); btn.classList.add('done'); btn.textContent = '✓'; }
+      const n = r.indexed || 0;
+      showOk(r.empty ? 'No speech found to index' : ('Indexed ' + n + ' segment' + (n === 1 ? '' : 's') + ' — now searchable'));
+    })
+    .catch(e => {
+      if (btn) { btn.classList.remove('busy'); btn.textContent = '🔎'; }
+      showErr(e);
+    });
+}
+
 // ── Entitlement preview ("view as") + paywall upgrade sheet ───────────────
 // The owner can simulate a community plan to watch the paywall gates fire on
 // their own box. The banner reads the cookie directly — it's not a secret; the
@@ -5681,8 +5719,12 @@ function renderLibCard(it) {
   const click = it.share_url
     ? 'openPreview(\\'' + u + '\\', \\'' + n + '\\')'
     : "showErr('No share URL — SHARE_SECRET/PUBLIC_BASE_URL not configured')";
+  const aiBtn = (it.kind === 'video' || it.kind === 'audio')
+    ? '<button class=lib-ai data-p="' + encodeURIComponent(it.path || '') +
+      '" title="Index for AI search">🔎</button>'
+    : '';
   return '<div class=lib-card onclick="' + click + '">' +
-    '<div class=lib-thumb>' + inner +
+    '<div class=lib-thumb>' + inner + aiBtn +
       '<span class=lib-kind-tag>' + esc(it.ext || '') + '</span></div>' +
     '<div class=lib-body><div class=lib-name>' + esc(it.name) + '</div>' +
     '<div class=lib-meta>' + fmtSize(it.size) + ' · ' + fmtDate(it.mtime) + '</div>' +
@@ -5702,6 +5744,7 @@ async function loadLibrary(kind, force) {
   _libItems = [];
   const grid = document.getElementById('library-grid');
   const more = document.getElementById('library-more');
+  bindLibAi();
   if (more) more.innerHTML = '';
   grid.innerHTML = '<div class=empty><span class=spin></span> Scanning…</div>';
   try {

@@ -97,6 +97,29 @@ async def media_ai_search(body: SearchBody, request: Request) -> dict:
     await _owner(request)
     _require_enabled()
     try:
-        return await asyncio.to_thread(media_ai.search, body.query, body.k, body.path)
+        res = await asyncio.to_thread(media_ai.search, body.query, body.k, body.path)
     except media_ai.MediaAIError as e:
         raise HTTPException(status_code=502, detail=str(e))
+    # Enrich each hit with a signed play_url + display name so the UI can open the
+    # file and seek to the hit's timestamp. media_ai is SMDL-agnostic, so the
+    # share-URL signing happens here (not in the sidecar). Best-effort per hit.
+    _enrich_hits(res.get("hits") or [])
+    return res
+
+
+def _enrich_hits(hits: list) -> None:
+    import os
+    try:
+        from .file_serve import sign_share_url
+    except Exception:  # noqa: BLE001
+        sign_share_url = None
+    for h in hits:
+        mp = (h.get("media_path") or "").replace("\\", "/")
+        h["name"] = os.path.basename(mp)
+        if sign_share_url:
+            try:
+                url = sign_share_url(mp)
+                if url:
+                    h["play_url"] = url
+            except Exception:  # noqa: BLE001
+                pass

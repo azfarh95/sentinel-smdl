@@ -100,7 +100,7 @@ async def web_manifest():
 # cached offline shell when offline); cache-first for static/icon assets. The
 # offline shell is embedded so it works on the very first offline load.
 _SW_JS = """
-const CACHE = 'sentinel-tv-v7';
+const CACHE = 'sentinel-tv-v8';
 const OFFLINE_URL = '/offline.html';
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.add(OFFLINE_URL)).then(() => self.skipWaiting()));

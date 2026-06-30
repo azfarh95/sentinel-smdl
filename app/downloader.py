@@ -87,6 +87,11 @@ def _resolve_cookies(url: str) -> str | None:
 
 async def identify_post(url: str) -> dict:
     """Determine media type (video / photo / carousel) without downloading."""
+    # ADR MED-012: Instagram is probed through the Camoufox stealth browser
+    # (flag-gated). yt-dlp's non-browser fingerprint is what flags the IG account.
+    from . import camoufox_ig
+    if camoufox_ig.handles(url):
+        return await camoufox_ig.identify_via_camoufox(url)
     loop = asyncio.get_running_loop()
     cookiepath = _resolve_cookies(url)
     opts: dict = {"quiet": True, "no_warnings": True}
@@ -194,6 +199,19 @@ async def download(
             if safe:
                 out_dir = os.path.join(out_dir, safe)
         Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+        # ADR MED-012: Instagram → Camoufox stealth browser (flag-gated). No
+        # yt-dlp fallback for IG — a failure returns its error rather than
+        # re-running the fingerprint that got the account flagged. Flip
+        # SMDL_IG_CAMOUFOX=0 to revert IG to the yt-dlp path.
+        from . import camoufox_ig
+        if camoufox_ig.handles(url):
+            res = await camoufox_ig.download_via_camoufox(url, out_dir)
+            if not temp and res.get("files"):
+                uploader = Path(res["files"][0]).parent.name
+                await db.set_url_cache(url, res["files"],
+                                       _platform_from_url(url), uploader)
+            return res
 
         try:
             if media_type in ("photo", "carousel"):

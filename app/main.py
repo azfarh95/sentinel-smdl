@@ -32,6 +32,13 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+
+# httpx logs every request URL at INFO. Telegram embeds the bot token in the
+# path, so polling writes the full token to container logs every few seconds.
+# Keep these at WARNING — errors still surface, the token never lands in logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 

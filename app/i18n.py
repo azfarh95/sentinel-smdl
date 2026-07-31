@@ -118,6 +118,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_snooze_8h":        "😴 8h",
         "monitor_snoozed":      "{uploader} — 💤 Snoozed for {duration} (until {until})",
 
+        # Package update prompt (yt-dlp / gallery-dl — app/version_check.py)
+        "pkg_update_available":  "🔧 {pkg} update available: {installed} → {latest}",
+        "btn_update_now":        "⬆️ Update now",
+        "btn_dismiss":           "✖ Dismiss",
+        "pkg_update_dismissed":  "{pkg} — update dismissed. You'll be re-prompted next time a newer version ships.",
+        "pkg_updating":          "{pkg} — ⬆️ Updating…",
+        "pkg_update_restarting": "{pkg} — ✅ Updated to {latest}. Restarting…",
+        "pkg_update_failed":     "{pkg} — ❌ Update failed:\n{error}",
+
         # /start handshake — pending-code expiry edit
         "access_code_expired": "⏱ One-time access code expired.\nSend /regenerate\\_token for a fresh one.",
 
@@ -234,6 +243,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_snooze_1h":        "💤 1ч",
         "btn_snooze_8h":        "😴 8ч",
         "monitor_snoozed":      "{uploader} — 💤 Тишина на {duration} (до {until})",
+
+        # Package update prompt (yt-dlp / gallery-dl — app/version_check.py)
+        "pkg_update_available":  "🔧 Доступно обновление {pkg}: {installed} → {latest}",
+        "btn_update_now":        "⬆️ Обновить",
+        "btn_dismiss":           "✖ Скрыть",
+        "pkg_update_dismissed":  "{pkg} — обновление отклонено. Напомню при выходе новой версии.",
+        "pkg_updating":          "{pkg} — ⬆️ Обновление…",
+        "pkg_update_restarting": "{pkg} — ✅ Обновлено до {latest}. Перезапуск…",
+        "pkg_update_failed":     "{pkg} — ❌ Ошибка обновления:\n{error}",
 
         # /start handshake — pending-code expiry edit
         "access_code_expired": "⏱ Одноразовый код доступа истёк.\nОтправьте /regenerate\\_token для нового.",

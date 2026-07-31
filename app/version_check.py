@@ -3,16 +3,18 @@
 Mirrors stream_monitor's poll-loop + inline-keyboard-prompt shape (same
 OWNER_CHAT_ID target, same settings-table dedup idiom as cookie_mark_alerted).
 
-The "Update now" button runs `pip install --upgrade` in-process, then hard-exits.
-The owner-box `smdl` service is `restart: unless-stopped` and runs as `user:
-"0:0"`, so the exit relaunches the same container (not a fresh image pull) with
-the just-installed package already on disk — no docker.sock access needed.
+The "Update now" button runs `pip install --upgrade` in-process, then triggers
+a restart. The owner-box `smdl` service is `restart: unless-stopped` and runs
+as `user: "0:0"`, so the restart relaunches the same container (not a fresh
+image pull) with the just-installed package already on disk — no docker.sock
+access needed.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import signal
 import sys
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _installed_version
@@ -106,6 +108,16 @@ async def apply_update(pkg: str) -> tuple[bool, str]:
 
 
 def restart_process() -> None:
-    """Hard-exit so `restart: unless-stopped` relaunches the container with
-    the just-upgraded package on disk."""
-    os._exit(0)
+    """Trigger a full container restart so `restart: unless-stopped` relaunches
+    it with the just-upgraded package on disk.
+
+    Signals PID 1 directly rather than exiting the current process. Under the
+    owner box's `uvicorn --reload`, the code calling this runs in a *child*
+    process the reloader spawns — exiting self (`os._exit(0)`) only killed
+    that child, not the container; the reloader took ~7 minutes to notice and
+    respawn it, a real outage (2026-07-31 incident). PID 1 is always the
+    container's true entrypoint whether or not --reload is active, and
+    SIGTERM is exactly what `docker restart`/`docker stop` already send it —
+    the same clean shutdown-then-relaunch path, just triggered from inside.
+    """
+    os.kill(1, signal.SIGTERM)

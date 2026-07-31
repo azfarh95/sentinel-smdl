@@ -24,6 +24,7 @@ from . import cookie_routes
 from . import media_ai_routes
 from . import streamer_consent
 from . import stream_monitor
+from . import version_check
 from .bot import build
 from .downloader import start_cleanup_loop
 from .sticker_routes import start_cleanup_loop as start_sticker_cleanup_loop
@@ -168,6 +169,7 @@ async def lifespan(app: FastAPI):
         "polling_task": None,
         "monitor_task": None,
         "scraper_task": None,
+        "version_check_task": None,
         "ready": False,
         "last_error": None,
     }
@@ -197,6 +199,7 @@ async def lifespan(app: FastAPI):
     polling_task = state.get("polling_task")
     monitor_task = state.get("monitor_task")
     scraper_task = state.get("scraper_task")
+    version_check_task = state.get("version_check_task")
     tg_app       = state.get("tg_app")
     if polling_task and not polling_task.done():
         polling_task.cancel()
@@ -204,6 +207,8 @@ async def lifespan(app: FastAPI):
         monitor_task.cancel()
     if scraper_task and not scraper_task.done():
         scraper_task.cancel()
+    if version_check_task and not version_check_task.done():
+        version_check_task.cancel()
     if tg_app is not None:
         try:
             await tg_app.updater.stop()
@@ -246,6 +251,7 @@ async def _init_bot_with_retry(state: dict) -> None:
             )
             monitor_task = asyncio.create_task(stream_monitor.monitor_loop(tg_app))
             scraper_task = asyncio.create_task(profile_monitor.scraper_loop(tg_app))
+            version_check_task = asyncio.create_task(version_check.check_loop(tg_app))
 
             def _on_task_done(t: asyncio.Task):
                 if not t.cancelled() and t.exception():
@@ -254,11 +260,13 @@ async def _init_bot_with_retry(state: dict) -> None:
             polling_task.add_done_callback(_on_task_done)
             monitor_task.add_done_callback(_on_task_done)
             scraper_task.add_done_callback(_on_task_done)
+            version_check_task.add_done_callback(_on_task_done)
 
             state["tg_app"] = tg_app
             state["polling_task"] = polling_task
             state["monitor_task"] = monitor_task
             state["scraper_task"] = scraper_task
+            state["version_check_task"] = version_check_task
             state["ready"] = True
             state["last_error"] = None
             if attempt == 1:

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
@@ -29,7 +30,7 @@ from .i18n import (
 from .interceptor import find_video_url
 from .live_downloader import detect_live
 from .recorder_bridge import bridge
-from . import file_serve, stream_monitor, telethon_uploader
+from . import file_serve, stream_monitor, telethon_uploader, version_check
 
 DOWNLOADS_DIR = os.environ.get("DOWNLOADS_DIR", "/downloads")
 
@@ -1047,6 +1048,66 @@ async def build() -> Application:
             # other update processing.
             asyncio.create_task(_run_monitor_recording(ctx, chat_id, url))
 
+    async def _run_pkg_update(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int,
+                               message_id: int, pkg: str, lang: str):
+        ok, result = await version_check.apply_update(pkg)
+        if not ok:
+            try:
+                await ctx.bot.edit_message_text(
+                    chat_id=chat_id, message_id=message_id,
+                    text=t("pkg_update_failed", lang, pkg=pkg, error=result),
+                )
+            except Exception:
+                pass
+            return
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text=t("pkg_update_restarting", lang, pkg=pkg, latest=result),
+            )
+        except Exception:
+            pass
+        # Let the Telegram edit land before the process dies — `restart:
+        # unless-stopped` relaunches the container with the new package.
+        await asyncio.sleep(1.5)
+        version_check.restart_process()
+
+    async def handle_pkgupdate_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id is None or not _is_owner(chat_id):
+            try:
+                await query.answer(t("owner_only", get_lang(chat_id or 0)), show_alert=True)
+            except Exception:
+                pass
+            return
+        lang = get_lang(chat_id)
+        data = query.data or ""
+        parts = data.split(":")
+        if len(parts) < 3:
+            return
+        action, pkg = parts[1], parts[2]
+        if action == "skip":
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.edit_message_text(text=t("pkg_update_dismissed", lang, pkg=pkg))
+            except Exception:
+                pass
+            return
+        if action == "go":
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.edit_message_text(text=t("pkg_updating", lang, pkg=pkg))
+            except Exception:
+                pass
+            # Fire-and-forget — pip install + restart must not block other
+            # update processing.
+            asyncio.create_task(_run_pkg_update(
+                ctx, chat_id, query.message.message_id, pkg, lang))
+
     async def _record_user(update: Update) -> None:
         """Tiny helper: UPSERT the user into the directory. Skips group and
         channel chats (Telegram chat_id is the GROUP id there, not the user,
@@ -1889,6 +1950,7 @@ async def build() -> Application:
     _app.add_handler(CommandHandler("storage_stats", handle_storage_stats))
     _app.add_handler(CommandHandler("clear_cache", handle_clear_cache))
     _app.add_handler(CallbackQueryHandler(handle_monitor_callback, pattern=r"^mon:"))
+    _app.add_handler(CallbackQueryHandler(handle_pkgupdate_callback, pattern=r"^pkgupd:"))
     _app.add_handler(CallbackQueryHandler(handle_language_callback, pattern=r"^lang:"))
     _app.add_handler(CallbackQueryHandler(handle_transcode_callback, pattern=r"^tc:"))
     _app.add_handler(CallbackQueryHandler(handle_default_video_size_callback, pattern=r"^vq:"))

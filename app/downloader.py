@@ -24,6 +24,14 @@ _ANIM_EXTS  = {".gif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 _AUDIO_EXTS = {".mp3", ".m4a", ".ogg", ".flac", ".wav"}
 
+# Phrases yt-dlp's extractors use for "this post has no video, only images"
+# (all go through the same InfoExtractor.raise_no_formats(msg, expected=True)
+# base method, but each extractor supplies its own msg — and that text isn't
+# stable across yt-dlp releases: Instagram's changed from "No video formats
+# found" to "There is no video in this post" between 2026.3.17 and 2026.7.4,
+# silently breaking this exact fallback check. Match on all known phrasings.
+_NO_VIDEO_PHRASES = ("No video formats found", "There is no video in this post")
+
 _SITE_COOKIE_MAP = {
     "tiktok.com":    "tiktok",
     "instagram.com": "instagram",
@@ -109,7 +117,7 @@ async def identify_post(url: str) -> dict:
         info = await loop.run_in_executor(None, _run)
     except yt_dlp.utils.DownloadError as e:
         msg = str(e)
-        if "No video formats found" in msg:
+        if any(p in msg for p in _NO_VIDEO_PHRASES):
             return {
                 "platform": _platform_from_url(url),
                 "uploader": None, "uploader_id": None,
@@ -265,7 +273,7 @@ async def download(
                             if not final["path"]:
                                 final["path"] = final["prepared"]
                     except yt_dlp.utils.DownloadError as e:
-                        if "No video formats found" not in str(e):
+                        if not any(p in str(e) for p in _NO_VIDEO_PHRASES):
                             raise
                         raise _GalleryDLFallback()
 

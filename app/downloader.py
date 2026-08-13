@@ -17,6 +17,13 @@ TEMP_DIR           = os.path.join(DOWNLOADS_DIR, "temp")
 COOKIES_DIR        = os.environ.get("COOKIES_DIR", "/cookies")
 TELEGRAM_MAX_BYTES = 50 * 1024 * 1024
 
+# ADR NET-014 — isolate the YouTube account's egress IP from the home WAN's
+# shared reputation. Empty by default (feature is off until deployed with a
+# real value); unset/blank means no proxy override, same as before this
+# existed. Only youtube.com/youtu.be route through it — every other platform
+# in _SITE_COOKIE_MAP is untouched.
+YOUTUBE_PROXY_URL  = os.environ.get("YOUTUBE_PROXY_URL", "")
+
 _semaphore: asyncio.Semaphore | None = None
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -93,6 +100,15 @@ def _resolve_cookies(url: str) -> str | None:
     return None
 
 
+def _resolve_proxy(url: str) -> str | None:
+    if not YOUTUBE_PROXY_URL:
+        return None
+    url_lower = url.lower()
+    if "youtube.com" in url_lower or "youtu.be" in url_lower:
+        return YOUTUBE_PROXY_URL
+    return None
+
+
 async def identify_post(url: str) -> dict:
     """Determine media type (video / photo / carousel) without downloading."""
     # ADR MED-012: Instagram is probed through the Camoufox stealth browser
@@ -105,6 +121,9 @@ async def identify_post(url: str) -> dict:
     opts: dict = {"quiet": True, "no_warnings": True}
     if cookiepath:
         opts["cookiefile"] = cookiepath
+    proxy = _resolve_proxy(url)
+    if proxy:
+        opts["proxy"] = proxy
     # Cloudflare-protected sites need Chrome TLS impersonation (HTTP 406 otherwise).
     from .live_downloader import _add_impersonate_if_needed
     _add_impersonate_if_needed(opts, url)
@@ -264,6 +283,9 @@ async def download(
                 }
                 if cookiepath:
                     ydl_opts["cookiefile"] = cookiepath
+                proxy = _resolve_proxy(url)
+                if proxy:
+                    ydl_opts["proxy"] = proxy
 
                 def _run():
                     try:

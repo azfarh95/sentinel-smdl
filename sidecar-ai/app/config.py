@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+from .sentinel_lanes_generated import BRAIN
+
 
 def _int(name: str, default: int) -> int:
     try:
@@ -77,7 +79,11 @@ GPU_BROKER_TOKEN = os.environ.get("MEDIA_AI_GPU_BROKER_TOKEN", "").strip()
 # — media-ai is an LLM-class consumer, it does NOT lease (only FLUX leases).
 # Unset QWEN_URL ⇒ summary stays dark (enabled() is False).
 QWEN_URL = os.environ.get("MEDIA_AI_QWEN_URL", "").rstrip("/")
-QWEN_MODEL = os.environ.get("MEDIA_AI_QWEN_MODEL", "qwen/qwen3.6-27b").strip()
+# BRAIN names the lane (:1234), not the weights loaded in it — SoT is
+# sentinel-watchdog/shared/lanes.yaml. "qwen/qwen3.6-27b" is still a legacy
+# alias the same lane answers to, so an env override using the old id keeps
+# working.
+QWEN_MODEL = os.environ.get("MEDIA_AI_QWEN_MODEL", BRAIN).strip()
 # Generous: a COLD 27B load through llama-swap (≈16 GB GGUF + mmproj into VRAM)
 # measured >3 min before the first token on this box; warm calls are seconds.
 # On-demand load is the price of being a good GPU citizen (TTL-evict frees the

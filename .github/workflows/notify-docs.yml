@@ -36,3 +36,4 @@ jobs:
           repository: azfarh95/sentinel-docs
           event-type: rebuild
           client-payload: '{"source_repo": "${{ github.repository }}", "ref": "${{ github.sha }}"}'
+

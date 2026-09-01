@@ -11,6 +11,12 @@ parameter count in one of these.
 BRAIN = "sentinel/brain"  # :1234 (live)
 REFLEX = "sentinel/reflex"  # :1237 (dormant)
 LAB = "sentinel/lab"  # :1235 (reserved)
+QUALITY_A = "sentinel/quality-a"  # :1240 (reserved)
+QUALITY_B = "sentinel/quality-b"  # :1241 (reserved)
+REFLEX_A = "sentinel/reflex-a"  # :1242 (reserved)
+REFLEX_B = "sentinel/reflex-b"  # :1243 (reserved)
+REFLEX_C = "sentinel/reflex-c"  # :1244 (reserved)
+REFLEX_D = "sentinel/reflex-d"  # :1245 (reserved)
 
 # Every id a lane still answers to, canonical first. Legacy aliases are
 # transitional — read from here rather than hardcoding an old string.
@@ -18,6 +24,12 @@ LANE_IDS = {
     "brain": ("sentinel/brain", "qwen/qwen3.6-27b",),
     "reflex": ("sentinel/reflex", "qwen3-4b",),
     "lab": ("sentinel/lab",),
+    "quality-a": ("sentinel/quality-a",),
+    "quality-b": ("sentinel/quality-b",),
+    "reflex-a": ("sentinel/reflex-a",),
+    "reflex-b": ("sentinel/reflex-b",),
+    "reflex-c": ("sentinel/reflex-c",),
+    "reflex-d": ("sentinel/reflex-d",),
 }
 
 # lane -> base url of the local server that answers for it
@@ -25,4 +37,10 @@ LANE_BASE_URLS = {
     "brain": "http://127.0.0.1:1234",
     "reflex": "http://127.0.0.1:1237",
     "lab": "http://127.0.0.1:1235",
+    "quality-a": "http://127.0.0.1:1240",
+    "quality-b": "http://127.0.0.1:1241",
+    "reflex-a": "http://127.0.0.1:1242",
+    "reflex-b": "http://127.0.0.1:1243",
+    "reflex-c": "http://127.0.0.1:1244",
+    "reflex-d": "http://127.0.0.1:1245",
 }

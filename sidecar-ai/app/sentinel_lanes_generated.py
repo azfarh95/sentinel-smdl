@@ -9,8 +9,19 @@ parameter count in one of these.
 
 # lane -> canonical wire id
 BRAIN = "sentinel/brain"  # :1234 (live)
+BENCHMARK = "brain-console/benchmark"  # :5802 (dormant)
+EMBEDDER = "retrieval/embedder"  # :8151 (dormant)
+FINANCE_POOL_1 = "retrieval/finance-pool-1"  # :8155 (dormant)
+FINANCE_POOL_2 = "retrieval/finance-pool-2"  # :8156 (dormant)
+FINANCE_POOL_3 = "retrieval/finance-pool-3"  # :8157 (dormant)
+FINANCE_POOL_4 = "retrieval/finance-pool-4"  # :8158 (dormant)
+FINANCE_POOL_5 = "retrieval/finance-pool-5"  # :8159 (dormant)
+OCR = "retrieval/ocr"  # :8154 (dormant)
 REFLEX = "sentinel/reflex"  # :1237 (dormant)
+RERANKER = "retrieval/reranker"  # :8152 (dormant)
+VISION = "retrieval/vision"  # :8153 (dormant)
 LAB = "sentinel/lab"  # :1235 (reserved)
+OFFICE = "sentinel/office"  # :1246 (reserved)
 QUALITY_A = "sentinel/quality-a"  # :1240 (reserved)
 QUALITY_B = "sentinel/quality-b"  # :1241 (reserved)
 REFLEX_A = "sentinel/reflex-a"  # :1242 (reserved)
@@ -22,8 +33,19 @@ REFLEX_D = "sentinel/reflex-d"  # :1245 (reserved)
 # transitional — read from here rather than hardcoding an old string.
 LANE_IDS = {
     "brain": ("sentinel/brain", "qwen/qwen3.6-27b",),
+    "benchmark": ("brain-console/benchmark",),
+    "embedder": ("retrieval/embedder",),
+    "finance-pool-1": ("retrieval/finance-pool-1",),
+    "finance-pool-2": ("retrieval/finance-pool-2",),
+    "finance-pool-3": ("retrieval/finance-pool-3",),
+    "finance-pool-4": ("retrieval/finance-pool-4",),
+    "finance-pool-5": ("retrieval/finance-pool-5",),
+    "ocr": ("retrieval/ocr",),
     "reflex": ("sentinel/reflex", "qwen3-4b",),
+    "reranker": ("retrieval/reranker",),
+    "vision": ("retrieval/vision",),
     "lab": ("sentinel/lab",),
+    "office": ("sentinel/office",),
     "quality-a": ("sentinel/quality-a",),
     "quality-b": ("sentinel/quality-b",),
     "reflex-a": ("sentinel/reflex-a",),
@@ -35,8 +57,19 @@ LANE_IDS = {
 # lane -> base url of the local server that answers for it
 LANE_BASE_URLS = {
     "brain": "http://127.0.0.1:1234",
+    "benchmark": "http://127.0.0.1:5802",
+    "embedder": "http://127.0.0.1:8151",
+    "finance-pool-1": "http://127.0.0.1:8155",
+    "finance-pool-2": "http://127.0.0.1:8156",
+    "finance-pool-3": "http://127.0.0.1:8157",
+    "finance-pool-4": "http://127.0.0.1:8158",
+    "finance-pool-5": "http://127.0.0.1:8159",
+    "ocr": "http://127.0.0.1:8154",
     "reflex": "http://127.0.0.1:1237",
+    "reranker": "http://127.0.0.1:8152",
+    "vision": "http://127.0.0.1:8153",
     "lab": "http://127.0.0.1:1235",
+    "office": "http://127.0.0.1:1246",
     "quality-a": "http://127.0.0.1:1240",
     "quality-b": "http://127.0.0.1:1241",
     "reflex-a": "http://127.0.0.1:1242",

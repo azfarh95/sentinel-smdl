@@ -1,6 +1,7 @@
 """Direct yt-dlp + gallery-dl downloader — no external API dependency."""
 
 import asyncio
+import logging
 import os
 import re
 import subprocess
@@ -11,6 +12,8 @@ from telegram import InputMediaPhoto
 
 from . import database as db
 from .config import DEFAULT_QUALITY, DELETE_AFTER_SEND, MAX_CONCURRENT, TEMP_TTL_HOURS
+
+logger = logging.getLogger(__name__)
 
 DOWNLOADS_DIR      = os.environ.get("DOWNLOADS_DIR", "/downloads")
 TEMP_DIR           = os.path.join(DOWNLOADS_DIR, "temp")
@@ -96,7 +99,13 @@ def _resolve_cookies(url: str) -> str | None:
     for domain, name in _SITE_COOKIE_MAP.items():
         if domain in url_lower:
             path = Path(COOKIES_DIR) / f"{name}.txt"
-            return str(path) if path.exists() else None
+            try:
+                return str(path) if path.exists() else None
+            except OSError as exc:
+                # Cookies are optional for public media. A transient bind-mount
+                # permission failure must not prevent a logged-out attempt.
+                logger.warning("cookie file unavailable; continuing without it: %s (%s)", path, exc)
+                return None
     return None
 
 

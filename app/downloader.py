@@ -85,7 +85,13 @@ def _resolve_cookies(url: str) -> str | None:
         if domain in url_lower:
             path = Path(COOKIES_DIR) / f"{name}.txt"
             try:
-                return str(path) if path.exists() else None
+                if not path.exists():
+                    return None
+                # yt-dlp updates its MozillaCookieJar when it closes, so a
+                # readable bind-mounted file still fails if it is not writable.
+                with path.open("r+", encoding="utf-8"):
+                    pass
+                return str(path)
             except OSError as exc:
                 # Cookies are optional for public media. A transient bind-mount
                 # permission failure must not prevent a logged-out attempt.

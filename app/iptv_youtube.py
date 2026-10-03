@@ -69,7 +69,10 @@ def _resolve_sync(channel_url: str) -> str:
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "format": "best[protocol^=m3u8]/best",
+        # 2026-10: "best[...]" stopped matching live formats (YouTube split
+        # A/V) -> "Requested format is not available". "b" is the modern
+        # best-single-format alias and keeps the single-URL contract here.
+        "format": "b[protocol^=m3u8]/b",
         # Don't follow @handle → /videos → individual VOD; we want /live.
         "extract_flat": False,
         "socket_timeout": _RESOLVE_TIMEOUT_SEC,

@@ -69,7 +69,13 @@ def _resolve_sync(channel_url: str) -> str:
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "format": "best[protocol^=m3u8]/best",
+        # 2026-10: YouTube live now serves SPLIT audio/video only on the
+        # default web client, so every "best"-family selector matches
+        # nothing ("Requested format is not available"). The android_vr
+        # client still serves MUXED HLS (combined avc1+mp4a), which keeps
+        # this relay's single-URL contract.
+        "format": "b[protocol^=m3u8]/b",
+        "extractor_args": {"youtube": {"player_client": ["android_vr"]}},
         # Don't follow @handle → /videos → individual VOD; we want /live.
         "extract_flat": False,
         "socket_timeout": _RESOLVE_TIMEOUT_SEC,

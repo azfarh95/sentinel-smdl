@@ -2,6 +2,7 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.0
 python-telegram-bot==21.11.1
 yt-dlp
+bgutil-ytdlp-pot-provider==2.0.1  # PO tokens for the youtube-live relay (server: bgutil-provider container, MUST match its version)
 gallery-dl
 aiosqlite
 pyyaml>=6.0

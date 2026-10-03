@@ -76,6 +76,12 @@ def _resolve_sync(channel_url: str) -> str:
         # default web client; android_vr still serves MUXED HLS (combined
         # avc1+mp4a), keeping the relay's single-URL contract.
         "format": "b[protocol^=m3u8]/b",
+        "extractor_args": {
+            "youtube": {"player_client": ["android_vr"]},
+            # PO tokens via the bgutil provider (bgutil-provider:4416) —
+            # googlevideo 403s live segments without one (2026 SABR).
+            "youtubepot-bgutilhttp": {"base_url": "http://bgutil-provider:4416"},
+        },
         "extractor_args": {"youtube": {"player_client": ["android_vr"]}},
         # Don't follow @handle → /videos → individual VOD; we want /live.
         "extract_flat": False,

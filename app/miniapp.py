@@ -258,9 +258,13 @@ def _verify_apk_cookie(val: str) -> bool:
     (which handles both v1 and v2 via the auth_v2 helper).
 
     AI-109: accepts cookies HMAC'd with the signing key OR (transition only)
-    the legacy login token, so pre-split 90-day cookies stay valid."""
+    the legacy login token, so pre-split 90-day cookies stay valid.
+    v2-format cookies are delegated to _parse_session_cookie — the v1 shape
+    parser below cannot even split a 6-part v2 cookie."""
     if not val or not SIGNING_KEY:
         return False
+    if val.startswith("v2."):
+        return _parse_session_cookie(val) is not None
     try:
         body, sig = val.rsplit(".", 1)
         ts_s, _   = body.split(".", 1)
@@ -413,6 +417,14 @@ async def _verify(request: Request) -> dict:
     if session is not None:
         payload = _payload_from_cookie(session)
         if payload["user"].get("id"):
+            return payload
+        # AI-109 test sessions: the non-owner test credential's v2 cookie has
+        # user_id="test" and no telegram id by design. Accept it as itself —
+        # scoped exactly as minted (["smdl.iptv"]), never the owner — instead
+        # of falling through to 401. Narrow carve-out: only the literal "test"
+        # identity; google:<sub>/beta-slug cookies keep falling through.
+        if session.get("version") == "v2" and session.get("user_id") == "test":
+            payload["session"] = session
             return payload
 
     if not bot_token:

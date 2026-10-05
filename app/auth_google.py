@@ -98,9 +98,11 @@ def _client_secret() -> str:
 
 
 def _signing_secret() -> str:
-    """HMAC secret for the state cookie + the session cookie. Reuses the
-    deployment's OWNER_AUTH_TOKEN — same value already used by auth_v2."""
-    return os.environ.get("OWNER_AUTH_TOKEN", "").strip()
+    """HMAC secret for the state cookie + the session cookie. AI-109: prefers
+    the dedicated cookie-signing key; falls back to the login token it was
+    split from (same value auth_v2 historically used)."""
+    return (os.environ.get("OWNER_COOKIE_SIGNING_KEY", "")
+            or os.environ.get("OWNER_AUTH_TOKEN", "")).strip()
 
 
 def is_configured() -> bool:

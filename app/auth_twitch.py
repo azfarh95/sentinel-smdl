@@ -111,9 +111,11 @@ def _client_secret() -> str:
 
 
 def _signing_secret() -> str:
-    """HMAC secret for the state cookie + the session cookie. Same value
-    auth_v2 already uses."""
-    return os.environ.get("OWNER_AUTH_TOKEN", "").strip()
+    """HMAC secret for the state cookie + the session cookie. AI-109: prefers
+    the dedicated cookie-signing key; falls back to the login token it was
+    split from (same value auth_v2 historically uses)."""
+    return (os.environ.get("OWNER_COOKIE_SIGNING_KEY", "")
+            or os.environ.get("OWNER_AUTH_TOKEN", "")).strip()
 
 
 def is_configured() -> bool:

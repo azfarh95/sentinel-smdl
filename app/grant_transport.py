@@ -127,17 +127,25 @@ def _identity_from_cookie(request: Request) -> tuple[str, str] | None:
         <slug>         → None (unmappable, e.g. beta-user slug)
     Returns None when no cookie / expired / unverifiable / unmappable.
     """
-    secret = os.environ.get("OWNER_AUTH_TOKEN", "")
+    signing = os.environ.get("OWNER_COOKIE_SIGNING_KEY", "")
+    secret = signing or os.environ.get("OWNER_AUTH_TOKEN", "")
     if not secret:
         return None
     val = request.cookies.get(_COOKIE_NAME, "")
     if not val:
         return None
+    payload = None
     try:
         payload = auth_v2.parse_session_cookie(val, secret)
     except HTTPException:
-        return None
-    if payload.get("expired"):
+        payload = None
+    # AI-109 transition: legacy cookies are signed with the login token.
+    if payload is None and signing and signing != os.environ.get("OWNER_AUTH_TOKEN", ""):
+        try:
+            payload = auth_v2.parse_session_cookie(val, os.environ["OWNER_AUTH_TOKEN"])
+        except HTTPException:
+            return None
+    if payload is None or payload.get("expired"):
         return None
     # v1 owner cookie short-circuits.
     if payload.get("version") == "v1":

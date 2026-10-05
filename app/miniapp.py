@@ -231,28 +231,46 @@ COOKIE_NAME      = "sentinel_apk_session"
 COOKIE_DOMAIN    = ".az-sentinel.xyz"
 COOKIE_TTL_SEC   = 90 * 24 * 3600
 
+# AI-109 SSO v2: the cookie SIGNING key is split from the login token. Cookies
+# are HMAC'd with OWNER_COOKIE_SIGNING_KEY; OWNER_AUTH_TOKEN remains the
+# /auth/setup login credential only. Falls back to the login token when unset
+# (community box, pre-sync host, rollback) so behavior is byte-identical to v1
+# until the key is projected. ⚠ rotating the signing key invalidates every
+# session estate-wide BY DESIGN — never do it casually.
+SIGNING_KEY = os.environ.get("OWNER_COOKIE_SIGNING_KEY", "") or OWNER_AUTH_TOKEN
+# Non-owner test credential (owner box only): /auth/setup accepts it and mints
+# a v2 scoped session (scopes=["smdl.iptv"]) so device/E2E sessions never paste
+# or screenshot the real owner token.
+TEST_USER_AUTH_TOKEN = os.environ.get("TEST_USER_AUTH_TOKEN", "")
+
 
 def _issue_apk_cookie() -> str:
     ts    = str(int(time.time()))
     nonce = secrets.token_urlsafe(16)
     body  = f"{ts}.{nonce}"
-    sig   = hmac.new(OWNER_AUTH_TOKEN.encode(), body.encode(), hashlib.sha256).hexdigest()
+    sig   = hmac.new(SIGNING_KEY.encode(), body.encode(), hashlib.sha256).hexdigest()
     return f"{body}.{sig}"
 
 
 def _verify_apk_cookie(val: str) -> bool:
     """Legacy v1 cookie check — kept for backwards compat with anything
     still calling it directly. New code should use _parse_session_cookie
-    (which handles both v1 and v2 via the auth_v2 helper)."""
-    if not val or not OWNER_AUTH_TOKEN:
+    (which handles both v1 and v2 via the auth_v2 helper).
+
+    AI-109: accepts cookies HMAC'd with the signing key OR (transition only)
+    the legacy login token, so pre-split 90-day cookies stay valid."""
+    if not val or not SIGNING_KEY:
         return False
     try:
         body, sig = val.rsplit(".", 1)
         ts_s, _   = body.split(".", 1)
-        expected  = hmac.new(OWNER_AUTH_TOKEN.encode(), body.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, sig):
-            return False
-        return (time.time() - int(ts_s)) < COOKIE_TTL_SEC
+        for key in (SIGNING_KEY, OWNER_AUTH_TOKEN):
+            if not key:
+                continue
+            expected = hmac.new(key.encode(), body.encode(), hashlib.sha256).hexdigest()
+            if hmac.compare_digest(expected, sig):
+                return (time.time() - int(ts_s)) < COOKIE_TTL_SEC
+        return False
     except Exception:
         return False
 
@@ -260,15 +278,27 @@ def _verify_apk_cookie(val: str) -> bool:
 def _parse_session_cookie(val: str) -> dict | None:
     """Return the v2 auth_v2-parsed payload if the cookie is valid + not
     expired, else None. Handles BOTH v1 (legacy owner-only, scopes=['*'])
-    and v2 (scoped beta users). Per auth-perms-v2 §6."""
-    if not val or not OWNER_AUTH_TOKEN:
+    and v2 (scoped beta users). Per auth-perms-v2 §6.
+
+    AI-109: cookies are minted with the signing key; legacy cookies signed
+    with the login token still verify until they age out (≤90 days)."""
+    if not val or not SIGNING_KEY:
         return None
     try:
         from .auth_v2 import parse_session_cookie
-        payload = parse_session_cookie(val, OWNER_AUTH_TOKEN)
     except Exception:
         return None
-    if payload.get("expired"):
+    payload = None
+    try:
+        payload = parse_session_cookie(val, SIGNING_KEY)
+    except Exception:
+        payload = None
+    if payload is None and OWNER_AUTH_TOKEN and OWNER_AUTH_TOKEN != SIGNING_KEY:
+        try:
+            payload = parse_session_cookie(val, OWNER_AUTH_TOKEN)
+        except Exception:
+            return None
+    if payload is None or payload.get("expired"):
         return None
     return payload
 
@@ -9847,6 +9877,23 @@ async def auth_setup(request: Request):
     if not nxt.startswith("/"):
         nxt = "/app"
     if not _safe_token_eq(token, OWNER_AUTH_TOKEN):
+        # AI-109 companion: non-owner test credential (owner box only, env-gated).
+        # Mints a v2 SCOPED session — authenticated for E2E surfaces that accept
+        # the scope, but with NO owner identity and no '*' scope. Never mint the
+        # v1 owner format here: v1 == owner by definition.
+        if TEST_USER_AUTH_TOKEN and _safe_token_eq(token, TEST_USER_AUTH_TOKEN):
+            from .auth_v2 import issue_v2_cookie
+            resp = RedirectResponse(url=nxt, status_code=303)
+            host = (request.url.hostname or "").lower()
+            domain = COOKIE_DOMAIN if host.endswith("az-sentinel.xyz") else None
+            resp.set_cookie(
+                key=COOKIE_NAME,
+                value=issue_v2_cookie(SIGNING_KEY, "test", ["smdl.iptv"]),
+                max_age=COOKIE_TTL_SEC,
+                domain=domain, path="/",
+                secure=domain is not None, httponly=True, samesite="lax",
+            )
+            return resp
         return JSONResponse({"error": "invalid_token"}, status_code=401)
     resp = RedirectResponse(url=nxt, status_code=303)
     _set_apk_cookie(resp, request)

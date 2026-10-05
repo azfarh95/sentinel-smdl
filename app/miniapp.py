@@ -10092,8 +10092,25 @@ class _AuthLoginBody(BaseModel):
 async def auth_login(body: _AuthLoginBody, request: Request):
     """JSON twin of /auth/setup for in-app re-keying: paste the 64-char
     owner token → set the owner cookie → return JSON (no redirect, so the
-    Account panel can confirm inline)."""
-    if not _safe_token_eq((body.token or "").strip(), OWNER_AUTH_TOKEN):
+    Account panel can confirm inline). AI-109: the non-owner test credential
+    is accepted here too (mirrors /auth/setup) — mints the same v2 scoped
+    test session, kind="test", so device/E2E logins never need the owner
+    token."""
+    token = (body.token or "").strip()
+    if not _safe_token_eq(token, OWNER_AUTH_TOKEN):
+        if TEST_USER_AUTH_TOKEN and _safe_token_eq(token, TEST_USER_AUTH_TOKEN):
+            from .auth_v2 import issue_v2_cookie
+            resp = JSONResponse({"ok": True, "kind": "test"})
+            host = (request.url.hostname or "").lower()
+            domain = COOKIE_DOMAIN if host.endswith("az-sentinel.xyz") else None
+            resp.set_cookie(
+                key=COOKIE_NAME,
+                value=issue_v2_cookie(SIGNING_KEY, "test", ["smdl.iptv"]),
+                max_age=COOKIE_TTL_SEC,
+                domain=domain, path="/",
+                secure=domain is not None, httponly=True, samesite="lax",
+            )
+            return resp
         return JSONResponse({"ok": False, "error": "invalid_token"}, status_code=401)
     resp = JSONResponse({"ok": True, "kind": "owner"})
     _set_apk_cookie(resp, request)

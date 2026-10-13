@@ -55,3 +55,6 @@ android-twa/build.log
 *.swp
 .idea/
 .vscode/
+
+# runtime / generated output found untracked 2026-10-13
+static/stremio/

@@ -3,6 +3,13 @@
 Pointer document for the next session. The session record is in Sentinel Docs;
 this file holds only live state and work that remains.
 
+## 2026-10-16 - the deploy line is `main` again
+
+- PR #26 rebased the long-lived `feat/ig-camoufox-stealth` branch onto `main` (12 commits became 7; conflicts in the lane files and `iptv_youtube.py` kept `main`'s newer version) and merged it as `f998db56`. The live checkout `C:\Users\azfar\sentinel-smdl` is on `main`, and the container `smdl` was restarted onto it (healthy, `/health/bot` ready).
+- The container bind-mounts `sentinel-smdl\app`, `static` and `data` from the live checkout. A code change goes live with `docker restart smdl`; check `GET :8096/health/bot` returns `{"ready":true}`. The image only changes with a rebuild from `metamcp-local`.
+- Old tip saved as remote branch `backup/ig-camoufox-pre-rebase-20261016` (and the local `feat/ig-camoufox-stealth`). Delete both once nothing refers to them.
+- The stale `sentinel-smdl-wt-cookie-fallback` worktree (it held `main` and blocked the switch) was removed; it was clean and fully on origin.
+
 ## Closed 2026-09-10 — optional Instagram cookie fallback
 
 - Fixed the live failure `Permission denied: /cookies/instagram.txt` for public

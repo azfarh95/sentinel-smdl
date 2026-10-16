@@ -9,20 +9,77 @@ parameter count in one of these.
 
 # lane -> canonical wire id
 BRAIN = "sentinel/brain"  # :1234 (live)
-REFLEX = "sentinel/reflex"  # :1237 (dormant)
-LAB = "sentinel/lab"  # :1235 (reserved)
+ORNITH_1_5_9B = "sentinel/ornith-1.5-9b"  # :8165 (live)
+OXCODER_9B = "sentinel/oxcoder-9b"  # :8164 (live)
+REFLEX = "sentinel/reflex"  # :1237 (live)
+EMBEDDER = "retrieval/embedder"  # :8151 (dormant)
+FINANCE_POOL_1 = "retrieval/finance-pool-1"  # :8155 (dormant)
+FINANCE_POOL_2 = "retrieval/finance-pool-2"  # :8156 (dormant)
+FINANCE_POOL_3 = "retrieval/finance-pool-3"  # :8157 (dormant)
+FINANCE_POOL_4 = "retrieval/finance-pool-4"  # :8158 (dormant)
+FINANCE_POOL_5 = "retrieval/finance-pool-5"  # :8159 (dormant)
+OCR = "retrieval/ocr"  # :8154 (dormant)
+RERANKER = "retrieval/reranker"  # :8152 (dormant)
+VISION = "retrieval/vision"  # :8153 (dormant)
+OFFICE = "sentinel/office"  # :1246 (reserved)
+BENCHMARK = "brain-console/benchmark"  # :5802 (retired)
+LAB = "sentinel/lab"  # :1235 (retired)
+QUALITY_A = "sentinel/quality-a"  # :1240 (retired)
+QUALITY_B = "sentinel/quality-b"  # :1241 (retired)
+REFLEX_A = "sentinel/reflex-a"  # :1242 (retired)
+REFLEX_B = "sentinel/reflex-b"  # :1243 (retired)
+REFLEX_C = "sentinel/reflex-c"  # :1244 (retired)
+REFLEX_D = "sentinel/reflex-d"  # :1245 (retired)
 
 # Every id a lane still answers to, canonical first. Legacy aliases are
 # transitional — read from here rather than hardcoding an old string.
 LANE_IDS = {
     "brain": ("sentinel/brain", "qwen/qwen3.6-27b",),
+    "ornith-1.5-9b": ("sentinel/ornith-1.5-9b",),
+    "oxcoder-9b": ("sentinel/oxcoder-9b",),
     "reflex": ("sentinel/reflex", "qwen3-4b",),
+    "embedder": ("retrieval/embedder",),
+    "finance-pool-1": ("retrieval/finance-pool-1",),
+    "finance-pool-2": ("retrieval/finance-pool-2",),
+    "finance-pool-3": ("retrieval/finance-pool-3",),
+    "finance-pool-4": ("retrieval/finance-pool-4",),
+    "finance-pool-5": ("retrieval/finance-pool-5",),
+    "ocr": ("retrieval/ocr",),
+    "reranker": ("retrieval/reranker",),
+    "vision": ("retrieval/vision",),
+    "office": ("sentinel/office",),
+    "benchmark": ("brain-console/benchmark",),
     "lab": ("sentinel/lab",),
+    "quality-a": ("sentinel/quality-a",),
+    "quality-b": ("sentinel/quality-b",),
+    "reflex-a": ("sentinel/reflex-a",),
+    "reflex-b": ("sentinel/reflex-b",),
+    "reflex-c": ("sentinel/reflex-c",),
+    "reflex-d": ("sentinel/reflex-d",),
 }
 
 # lane -> base url of the local server that answers for it
 LANE_BASE_URLS = {
     "brain": "http://127.0.0.1:1234",
+    "ornith-1.5-9b": "http://127.0.0.1:8165",
+    "oxcoder-9b": "http://127.0.0.1:8164",
     "reflex": "http://127.0.0.1:1237",
+    "embedder": "http://127.0.0.1:8151",
+    "finance-pool-1": "http://127.0.0.1:8155",
+    "finance-pool-2": "http://127.0.0.1:8156",
+    "finance-pool-3": "http://127.0.0.1:8157",
+    "finance-pool-4": "http://127.0.0.1:8158",
+    "finance-pool-5": "http://127.0.0.1:8159",
+    "ocr": "http://127.0.0.1:8154",
+    "reranker": "http://127.0.0.1:8152",
+    "vision": "http://127.0.0.1:8153",
+    "office": "http://127.0.0.1:1246",
+    "benchmark": "http://127.0.0.1:5802",
     "lab": "http://127.0.0.1:1235",
+    "quality-a": "http://127.0.0.1:1240",
+    "quality-b": "http://127.0.0.1:1241",
+    "reflex-a": "http://127.0.0.1:1242",
+    "reflex-b": "http://127.0.0.1:1243",
+    "reflex-c": "http://127.0.0.1:1244",
+    "reflex-d": "http://127.0.0.1:1245",
 }
